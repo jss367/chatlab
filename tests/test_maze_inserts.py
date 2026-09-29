@@ -549,6 +549,18 @@ class ForkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reads a special token out of the message inserted before response 2"):
             self.forked(special, 1, "west")
 
+    def test_a_fork_stopped_before_its_edited_response_takes_back_the_message_before_it(self):
+        # The message went in again ahead of the edited response, which the
+        # stop kept the model from reading, so the fork keeps no record of it.
+        replay, fork, manager, _ = self.forked(hand_built(note("user")), 1, "west")
+        stream = stream_episode(fork, manager)
+        next(stream)
+        fork.request_stop()
+        list(stream)
+        self.assertNotIn("context_inserts", fork.config)
+        self.assertEqual(fork.messages, context_messages(replay, 1)[:-1])
+        self.assertEqual(from_payload(json.loads(json.dumps(fork.payload()))).phase, "stopped")
+
     def test_a_fork_later_than_the_message_replays_it_at_its_own_boundary(self):
         payload = hand_built(note(before_turn=0, position=(0, 1)), moves=("east", "east"))
         replay, fork, manager, suffix = self.forked(payload, 1, "west")

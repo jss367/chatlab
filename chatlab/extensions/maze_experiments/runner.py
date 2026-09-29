@@ -217,6 +217,15 @@ class Episode:
     replay_only: bool = False
     token_edit: dict | None = None
     pending_edit: dict | None = None
+    # A team round a fork left open: the actions of the teammates it kept
+    # from the round the edited response was in, and the caps that round
+    # began with. Not written to the run: a fork finishes it before it stops,
+    # or discards it as any unfinished round is.
+    open_round: dict | None = None
+    # The agent and the history it had before the message a fork landed ahead
+    # of its edited response, so the message can be taken back if that
+    # response is never generated, as a live one is. Not written to the run.
+    edit_insert: tuple | None = None
     # The response the viewer last drew, or for a team the round. Previous,
     # Next and playback move relative to it, so a rapid second click cannot
     # resend a stale index.
@@ -466,7 +475,7 @@ class Episode:
         if self.team:
             keys = ("run_id", "phase", "detail", "turns", "events", "mail", "rounds", "model_id", "load_id",
                     "sampled_tokens", "tool_attempts", "supplied_moves", "manual_intervention", "created_at",
-                    "dropped_closures", "close_next")
+                    "dropped_closures", "close_next", "token_edit")
             with self.lock:
                 # A queued message is not written, as a run of one agent does not write its own.
                 agents = [{key: value for key, value in agent.items() if key != "insert_next"} for agent in self.agents]
@@ -974,7 +983,7 @@ def visible_token_ids(metrics, literal_prefill_tokens, hidden_ids):
 
 def literal_prefill_of(turn):
     """How many leading tokens of this response replay forces visible."""
-    return turn.get("literal_prefill_tokens", turn["forced_prefix_tokens"])
+    return turn.get("literal_prefill_tokens", turn.get("forced_prefix_tokens", 0))
 
 
 def verify_recorded_text(episode, turn_index, manager):
@@ -1080,7 +1089,7 @@ def stop_deciding_id(turn):
     replacement ended it with nothing sampled afterwards, the last token of the
     response.
     """
-    sampled = turn["metrics"][turn["forced_prefix_tokens"]:]
+    sampled = turn["metrics"][turn.get("forced_prefix_tokens", 0):]
     if sampled:
         return sampled[-1]["token_id"]
     if turn.get("token_edit") and turn["metrics"]:
@@ -1129,18 +1138,25 @@ def verify_carried_inserts(episode, turn_index, manager):
     the messages it keeps are asked both questions a live run asks: whether
     this tokenizer reads a special token out of one, and whether every kept
     response from the first message on, the edited one included, recorded the
-    prompt its history becomes under this template.
+    prompt its history becomes under this template. On a team each agent's
+    responses are read from its own first message on.
     """
-    inserts = [i for i in episode.config.get("context_inserts", ()) if i["before_turn"] <= turn_index]
+    inserts = kept_inserts(episode, turn_index)
     if not inserts:
         return
     hidden = manager.hidden_token_ids
-    for insert in inserts:
+    for insert, answer in inserts:
         if any(set(manager.encode(value)) & hidden for value in (insert["text"], insert.get("sender") or "")):
             raise ValueError(f"The loaded model reads a special token out of the message inserted before response "
-                             f"{insert['before_turn'] + 1}, so it cannot be carried into a fork.")
-    for index in range(inserts[0]["before_turn"], turn_index + 1):
+                             f"{answer + 1}, so it cannot be carried into a fork.")
+    first = {}
+    for insert, answer in inserts:
+        first.setdefault(insert.get("agent", 0), answer)
+    for index in range(min(first.values()), turn_index + 1):
         turn = episode.turns[index]
+        agent = turn.get("agent", 0)
+        if agent not in first or index < first[agent]:
+            continue
         if not turn.get("prompt_ids") or (turn.get("model_id") or episode.model_id) != manager.model_id:
             continue
         context = context_messages(episode, index)
@@ -1149,13 +1165,28 @@ def verify_carried_inserts(episode, turn_index, manager):
         except (IndexError, KeyError, OverflowError, TypeError, ValueError):
             prompt = None
         try:
-            templated = manager.prompt_text(context, TOOLS)
+            templated = manager.prompt_text(context, episode.tools)
         except Exception:
             templated = None
+        following = episode.agents[agent]["messages"][len(context):]
         if prompt is None or not (prompt == templated if templated is not None
-                                  else prompt_holds(prompt, context, episode.messages[len(context):])):
+                                  else prompt_holds(prompt, context, following)):
             raise ValueError(f"Response {index + 1}'s recorded prompt is not the history the run records for it "
                              "with its inserted messages, so those messages cannot be carried into a fork.")
+
+
+def kept_inserts(episode, turn_index):
+    """The messages a fork before response ``turn_index`` keeps, each with the response it went in before.
+
+    One that went in before the edited response itself is kept: that response
+    was generated after it.
+    """
+    if not episode.team:
+        return [(insert, insert["before_turn"]) for insert in episode.config.get("context_inserts", ())
+                if insert["before_turn"] <= turn_index]
+    asked = {(turn["agent"], turn["round"]): index for index, turn in enumerate(episode.turns)}
+    return [(insert, asked[insert["agent"], insert["before_round"]]) for insert in episode.config.get("context_inserts", ())
+            if asked.get((insert["agent"], insert["before_round"]), turn_index + 1) <= turn_index]
 
 
 def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, candidate_id=None):
@@ -1165,12 +1196,16 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
     prefix. Only generated tokens are editable. The original remains untouched,
     including a run uploaded for replay: forking it rebuilds the maze, history
     and counters into a new live episode rather than reopening the saved one.
+
+    On a team the fork keeps every response before the edited one, which is
+    every round before its round and the teammates asked before it in its
+    own. Those teammates answered the state the round began with, as the
+    edited agent did, so nothing in them depends on the response being
+    replaced, and the fork finishes their round rather than asking them again.
     """
     with episode.lock:
         if episode.busy:
             raise ValueError("Pause or stop the episode before editing tokens.")
-        if episode.team:
-            raise ValueError("Token edits fork a run of one agent.")
         # The fork replays stored token IDs, so the tokenizer has to match. The
         # model ID is the cheap gate; a later load of the same ID is allowed,
         # which is what lets an uploaded run be forked at all, but only after
@@ -1211,48 +1246,11 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
             raise ValueError("Enter replacement text or choose a token alternative.")
         if any(t in stop_ids for t in replacement_ids[:-1]):
             raise ValueError("A stop token can only appear at the end of the replacement.")
-        # The fork rebuilds the run one response at a time, so the closures it
-        # keeps are replayed at their own boundaries below rather than being in
-        # force from the start. Closures after the edited response are left
-        # behind with the responses that followed them.
-        carried, config = [], copy.deepcopy(episode.config)
-        if episode.map_changes:
-            carried = [u for u in config.get("map_updates", []) if u["before_turn"] <= turn_index]
-            config["map_updates"] = []
-        # Insertions follow the same rule, and one at exactly the edited
-        # boundary stays: the edited response was generated after it.
-        inserts = [i for i in config.pop("context_inserts", []) if i["before_turn"] <= turn_index]
-        result = Episode(episode.maze, config)
-        # The fork continues under the weights in memory now, not the ones that
-        # produced the original; token_edit keeps the original stamp.
-        result.model_id, result.load_id = manager.model_id, manager.load_id
-        result.manual_intervention = True
-        # Closures the map refused are carried on the same rule as the ones it
-        # accepted. The fork keeps the responses that were generated after a
-        # failed intervention, so a fork reporting none would say those
-        # responses ran under a map nobody had asked to change.
-        result.dropped_closures = copy.deepcopy(
-            [d for d in episode.dropped_closures if d["before_turn"] <= turn_index])
-        # Rebuild history and recovery counters through the same simulator path
-        # used during generation, excluding the edited response and its future.
-        for i, previous in enumerate(episode.turns[:turn_index]):
-            if carried:
-                result.config["map_updates"].extend(u for u in carried if u["before_turn"] == i)
-            for insert in inserts:
-                if insert["before_turn"] == i:
-                    land_insert(result, insert)
-            turn = copy.deepcopy({key: value for key, value in previous.items() if key not in DERIVED})
-            result.turns.append(turn)
-            if episode.interrupted and episode.intervention_turn == i:
-                mark_interruption(result, 0, i)
-            result.phase = "running"
-            action = finish_response(result, turn, stop_ids, result.config["per_turn_tokens"])
-            resolve_round(result, [action] if action else [])
-        if carried:
-            result.config["map_updates"].extend(u for u in carried if u["before_turn"] == turn_index)
-        for insert in inserts:
-            if insert["before_turn"] == turn_index:
-                land_insert(result, insert)
+        if episode.team:
+            result = fork_team(episode, turn_index)
+        else:
+            result = fork_single(episode, turn_index, stop_ids)
+        agent = original.get("agent", 0)
         prefix = kept_ids + replacement_ids
         result.token_edit = dict(parent_run_id=episode.run_id, turn=turn_index,
                                  token_index=token_index, original_token_id=metrics[token_index]["token_id"],
@@ -1260,11 +1258,94 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                                  replacement_text=replacement if candidate_id is None else manager.decode(replacement_ids),
                                  parent_model_id=episode.model_id, parent_load_id=episode.load_id,
                                  parent_replay=episode.replay_only, created_at=time.time())
+        parent = episode.agents[agent]
         result.pending_edit = dict(forced_ids=prefix,
                                    literal_prefill_tokens=literal_prefill_tokens,
-                                   interruption_here=bool(episode.interrupted and episode.intervention_turn == turn_index))
+                                   interruption_here=bool(parent["interrupted"] and parent["intervention_turn"] == turn_index))
+        if episode.team:
+            result.pending_edit["agent"] = agent
+        # The fork continues under the weights in memory now, not the ones that
+        # produced the original; token_edit keeps the original stamp.
+        result.model_id, result.load_id = manager.model_id, manager.load_id
+        result.manual_intervention = True
         result.phase, result.detail = "paused", "Token edit prepared. Regeneration will replace this response and its later moves in a new run."
         return result
+
+
+def fork_single(episode, turn_index, stop_ids):
+    """A run of one agent rebuilt up to the response a token edit replaces.
+
+    The fork rebuilds the run one response at a time, so the closures it
+    keeps are replayed at their own boundaries rather than being in force from
+    the start. Closures after the edited response are left behind with the
+    responses that followed them.
+    """
+    carried, config = [], copy.deepcopy(episode.config)
+    if episode.map_changes:
+        carried = [u for u in config.get("map_updates", []) if u["before_turn"] <= turn_index]
+        config["map_updates"] = []
+    # Insertions follow the same rule, and one at exactly the edited
+    # boundary stays: the edited response was generated after it.
+    inserts = [i for i in config.pop("context_inserts", []) if i["before_turn"] <= turn_index]
+    result = Episode(episode.maze, config)
+    # Closures the map refused are carried on the same rule as the ones it
+    # accepted. The fork keeps the responses that were generated after a
+    # failed intervention, so a fork reporting none would say those
+    # responses ran under a map nobody had asked to change.
+    result.dropped_closures = copy.deepcopy(
+        [d for d in episode.dropped_closures if d["before_turn"] <= turn_index])
+    # Rebuild history and recovery counters through the same simulator path
+    # used during generation, excluding the edited response and its future.
+    for i, previous in enumerate(episode.turns[:turn_index]):
+        if carried:
+            result.config["map_updates"].extend(u for u in carried if u["before_turn"] == i)
+        for insert in inserts:
+            if insert["before_turn"] == i:
+                land_insert(result, insert)
+        turn = copy.deepcopy({key: value for key, value in previous.items() if key not in DERIVED})
+        result.turns.append(turn)
+        if episode.interrupted and episode.intervention_turn == i:
+            mark_interruption(result, 0, i)
+        result.phase = "running"
+        action = finish_response(result, turn, stop_ids, result.config["per_turn_tokens"])
+        resolve_round(result, [action] if action else [])
+    if carried:
+        result.config["map_updates"].extend(u for u in carried if u["before_turn"] == turn_index)
+    for insert in inserts:
+        if insert["before_turn"] == turn_index:
+            result.edit_insert = (0, result.messages)
+            land_insert(result, insert)
+    return result
+
+
+def fork_team(episode, turn_index):
+    """A team rebuilt up to the response a token edit replaces, its round left open for the fork to finish.
+
+    Read through the replay a saved team run is read through, so the fork
+    holds exactly what the run recorded up to there: every closure and
+    message landed where it did, every interruption where it opened a
+    response. A message that went in before the edited response stays, since
+    that response was generated after it.
+    """
+    edited = episode.turns[turn_index]
+    config = copy.deepcopy(episode.config)
+    updates = [u for u in config.pop("map_updates", []) if u["before_round"] <= edited["round"]]
+    config.pop("context_inserts", None)
+    carried = {(insert["agent"], insert["before_round"]): copy.deepcopy(insert)
+               for insert, _ in kept_inserts(episode, turn_index)}
+    result = Episode(episode.maze, config)
+    kept = copy.deepcopy(episode.turns[:turn_index])
+    result.open_round = replay_rounds(result, kept, edited["round"], updates, carried, True, open_round=True)
+    own = carried.pop((edited["agent"], edited["round"]), None)
+    if own is not None:
+        result.edit_insert = (edited["agent"], result.agents[edited["agent"]]["messages"])
+        land_insert(result, own)
+    # Closures the map refused are carried on the same rule as the ones it
+    # accepted. The fork keeps the responses that were generated after a
+    # failed intervention, so a fork reporting none would say those
+    # responses ran under a map nobody had asked to change.
+    result.dropped_closures = copy.deepcopy([d for d in episode.dropped_closures if d["before_round"] <= edited["round"]])
+    return result
 
 
 def assistant_content(turn):
@@ -1598,18 +1679,26 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             # meets the change in the simulator's reply to whatever it does
             # next, which carries the current grid whether the call was
             # accepted or refused.
-            apply_closure(episode)
+            opened, episode.open_round = episode.open_round, None
             moving = [index for index, agent in enumerate(episode.agents) if agent["status"] == "active"]
-            caps = episode.response_caps(moving)
-            if caps is None:
-                episode.phase = "budget"
-                episode.detail = ("The team's remaining sampled tokens cannot give every moving agent a response."
-                                  if team else "The sampled-token budget is exhausted.")
-                break
-            actions = []
+            if opened is None:
+                apply_closure(episode)
+                caps = episode.response_caps(moving)
+                if caps is None:
+                    episode.phase = "budget"
+                    episode.detail = ("The team's remaining sampled tokens cannot give every moving agent a response."
+                                      if team else "The sampled-token budget is exhausted.")
+                    break
+                actions = []
+            else:
+                # A fork finishing the round its edit was in asks only the
+                # agents the round had not reached.
+                answered = {turn["agent"] for turn in episode.round_turns(episode.rounds)}
+                moving = [index for index in moving if index not in answered]
+                caps, actions = opened["caps"], opened["actions"]
             for index in moving:
                 agent = episode.agents[index]
-                edit = episode.pending_edit
+                edit = episode.pending_edit if (episode.pending_edit or {}).get("agent", 0) == index else None
                 forced = edit["forced_ids"] if edit else interrupted_prefix(episode, manager, index)
                 inserts_interruption = edit["interruption_here"] if edit else bool(forced)
                 limit = response_limit(episode, index, caps[index], inserts_interruption)
@@ -1620,6 +1709,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 # only ever recorded with the response that read it.
                 before = apply_insert(episode, manager, index)
                 inserted = None if before is None else (index, before)
+                if edit and episode.edit_insert is not None:
+                    inserted, episode.edit_insert = episode.edit_insert, None
                 turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": 0,
                         "prefix_ids": [], "prefix_text": "",
                         "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
@@ -1637,8 +1728,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                         episode.detail = "Steering starts with this response."
                 if edit:
                     turn["token_edit"] = copy.deepcopy(episode.token_edit)
+                    episode.pending_edit = None
                 episode.turns.append(turn)
-                episode.pending_edit = None
                 if team:
                     episode.selected_turn = len(episode.turns) - 1
                 yield episode
@@ -2165,35 +2256,123 @@ def read_interruption(episode, saved, index, manual):
     interrupted yet, and it lands on the first response after that agent's
     trigger unless the run records a reader asking for it sooner. A planned
     prefix the model never read belongs to a response stopped before it began.
+
+    A response a token edit regenerated plans a longer prefix: the tokens it
+    kept from the response it replaced and the replacement, of which only an
+    interruption the replaced response opened with, its literal prefill, is
+    the interruption.
     """
     agent, config = episode.agents[saved["agent"]], episode.config
     planned, consumed = saved.get("planned_prefix_ids", []), saved.get("forced_prefix_tokens", 0)
-    prefix = saved.get("prefix_ids", [])
+    prefix, edit = saved.get("prefix_ids", []), saved.get("token_edit")
     if not isinstance(planned, list) or any(type(i) is not int for i in planned) or type(consumed) is not int:
         raise ValueError("A response's interruption prefix must be a list of token IDs.")
-    if saved.get("literal_prefill_tokens", len(planned)) != len(planned):
+    literal = saved.get("literal_prefill_tokens", len(planned))
+    if edit is not None:
+        replaced = edit.get("replacement_ids") if isinstance(edit, dict) else None
+        if not manual or not isinstance(replaced, list) or not replaced or any(type(i) is not int for i in replaced) \
+                or planned[len(planned) - len(replaced):] != replaced or type(literal) is not int \
+                or not 0 <= literal <= len(planned) - len(replaced):
+            raise ValueError("A token-edited response has to plan the tokens it kept and its replacement, and the run "
+                             "has to record the edit.")
+        interruption = planned[:literal]
+    elif literal != len(planned):
         raise ValueError("A response forces a prefix other than the interruption it planned.")
+    else:
+        interruption = planned
     eligible = (bool(config.get("interruption_text", "").strip()) and not agent["interrupted"]
                 and agent["status"] == "active"
                 and saved["agent"] in targeted(config, "interrupt_agents", len(episode.agents)))
     due = eligible and episode.agent_moves(saved["agent"]) >= config.get("interrupt_after", 0)
-    if not planned:
-        if consumed or prefix:
-            raise ValueError("A response records an interruption prefix it never planned.")
-        if due:
-            raise ValueError(f"{agent['name']} was due its interruption at a response that does not open with it.")
-        return False
-    if not eligible or (not due and not manual):
-        raise ValueError(f"A response of {agent['name']} opens with an interruption the run could not have given it there.")
-    if config.get("prefix_tokens") and len(planned) > config["prefix_tokens"]:
-        raise ValueError("A response's interruption is longer than the run's supplied token count.")
+    if not planned and (consumed or prefix):
+        raise ValueError("A response records an interruption prefix it never planned.")
+    if not interruption and due:
+        raise ValueError(f"{agent['name']} was due its interruption at a response that does not open with it.")
+    if interruption:
+        if not eligible or (not due and not manual):
+            raise ValueError(f"A response of {agent['name']} opens with an interruption the run could not have given it there.")
+        if config.get("prefix_tokens") and len(interruption) > config["prefix_tokens"]:
+            raise ValueError("A response's interruption is longer than the run's supplied token count.")
     if consumed:
         if consumed != len(planned) or prefix != planned or [m["token_id"] for m in saved["metrics"][:consumed]] != planned:
-            raise ValueError("A response's interruption is not the prefix its tokens open with.")
-        mark_interruption(episode, saved["agent"], index)
-    elif prefix or saved["metrics"]:
-        raise ValueError("A response that never read its interruption records tokens after it.")
-    return True
+            raise ValueError("A response's prefix is not the one its tokens open with.")
+        if interruption:
+            mark_interruption(episode, saved["agent"], index)
+    elif planned and (prefix or saved["metrics"]):
+        raise ValueError("A response that never read its prefix records tokens after it.")
+    return bool(interruption)
+
+
+def replay_rounds(result, turns, rounds, updates, by_answer, manual, *, open_round=False):
+    """Read saved team responses into ``result`` round by round, as the live run read them.
+
+    Each closure in ``updates`` lands before the round it names, and each
+    message in ``by_answer`` before the response it names, both consumed as
+    they land so the caller can refuse any left over. The first ``rounds``
+    rounds resolve. What the round after them holds is discarded, as a
+    stopped round's responses are, unless ``open_round`` keeps it open for a
+    fork to finish, and then its actions and caps come back.
+    """
+    by_round = {}
+    for turn in turns:
+        by_round.setdefault(turn["round"], []).append(turn)
+    for round_index in range(rounds + 1):
+        while updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
+            if result.phase in TERMINAL:
+                raise ValueError("The run records a map change after it had ended.")
+            land_saved_closure(result, updates.pop(0), round_index)
+        if round_index not in by_round:
+            continue
+        if result.phase in TERMINAL:
+            raise ValueError("The run records responses after it had ended.")
+        moving = [i for i, agent in enumerate(result.agents) if agent["status"] == "active"]
+        asked = [t["agent"] for t in by_round[round_index]]
+        resolved = round_index < rounds
+        if asked != moving if resolved else asked != moving[:len(asked)]:
+            raise ValueError("A round asks agents other than the ones still moving, in their order.")
+        # The caps the live run set for this round, which no response in it
+        # could have sampled past.
+        caps = result.response_caps(moving) or {}
+        actions = []
+        for saved in by_round[round_index]:
+            interrupting = read_interruption(result, saved, len(result.turns), manual)
+            if (saved["agent"], round_index) in by_answer:
+                land_saved_insert(result, by_answer.pop((saved["agent"], round_index)), saved)
+            limit = response_limit(result, saved["agent"], caps.get(saved["agent"], 0), interrupting)
+            if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
+                raise ValueError("A response in a finished round ends in a way no finished round records.")
+            # finish_response names the reason from the sampled tokens, so the
+            # tokens have to be ones that reason could have been named from.
+            count = len(saved["metrics"]) - saved.get("forced_prefix_tokens", 0)
+            if limit <= 0 or count > limit:
+                raise ValueError("A response holds more tokens than its round allowed each agent.")
+            if {"stop": count == 0, "length": count != limit, "incomplete_stream": count >= limit}.get(
+                    saved["finish_reason"], False):
+                raise ValueError("A response records a finish reason its tokens could not have produced.")
+            if saved.get("position_before") != list(result.agents[saved["agent"]]["position"]):
+                raise ValueError("A response records a starting position its agent was not in.")
+            if result.config.get("steering") is None:
+                if "steered" in saved:
+                    raise ValueError("A run without a steering vector cannot mark responses as steered.")
+            else:
+                expected = result.steers_next(saved["agent"])
+                never_generated = (saved is turns[-1] and not saved["metrics"]
+                                   and saved["finish_reason"] in ("user_stopped", "stopped"))
+                flag = saved.get("steered")
+                if type(flag) is not bool or (flag != expected and not (expected and never_generated)):
+                    raise ValueError("A response's steered flag does not match its agent's steering trigger.")
+            turn = copy.deepcopy({key: value for key, value in saved.items() if key not in DERIVED})
+            result.turns.append(turn)
+            action = take_action(result, turn, len(result.turns) - 1)
+            if action:
+                actions.append(action)
+        if resolved:
+            resolve_round(result, actions)
+        elif open_round:
+            return dict(actions=actions, caps=caps)
+        else:
+            discard_round(result)
+    return None
 
 
 def team_from_payload(data, read_prompt=None):
@@ -2276,60 +2455,7 @@ def team_from_payload(data, read_prompt=None):
     if -1 in places or places != sorted(places):
         raise ValueError("A team run's inserted messages are out of order, or name a response it never recorded.")
     updates = list(updates)
-    for round_index in range(rounds + 1):
-        while updates and isinstance(updates[0], dict) and updates[0].get("before_round") == round_index:
-            if result.phase in TERMINAL:
-                raise ValueError("The run records a map change after it had ended.")
-            land_saved_closure(result, updates.pop(0), round_index)
-        if round_index not in by_round:
-            continue
-        if result.phase in TERMINAL:
-            raise ValueError("The run records responses after it had ended.")
-        moving = [i for i, agent in enumerate(result.agents) if agent["status"] == "active"]
-        asked = [t["agent"] for t in by_round[round_index]]
-        resolved = round_index < rounds
-        if asked != moving if resolved else asked != moving[:len(asked)]:
-            raise ValueError("A round asks agents other than the ones still moving, in their order.")
-        # The caps the live run set for this round, which no response in it
-        # could have sampled past.
-        caps = result.response_caps(moving) or {}
-        actions = []
-        for saved in by_round[round_index]:
-            interrupting = read_interruption(result, saved, len(result.turns), manual)
-            if (saved["agent"], round_index) in by_answer:
-                land_saved_insert(result, by_answer.pop((saved["agent"], round_index)), saved)
-            limit = response_limit(result, saved["agent"], caps.get(saved["agent"], 0), interrupting)
-            if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
-                raise ValueError("A response in a finished round ends in a way no finished round records.")
-            # finish_response names the reason from the sampled tokens, so the
-            # tokens have to be ones that reason could have been named from.
-            count = len(saved["metrics"]) - saved.get("forced_prefix_tokens", 0)
-            if limit <= 0 or count > limit:
-                raise ValueError("A response holds more tokens than its round allowed each agent.")
-            if {"stop": count == 0, "length": count != limit, "incomplete_stream": count >= limit}.get(
-                    saved["finish_reason"], False):
-                raise ValueError("A response records a finish reason its tokens could not have produced.")
-            if saved.get("position_before") != list(result.agents[saved["agent"]]["position"]):
-                raise ValueError("A response records a starting position its agent was not in.")
-            if result.config.get("steering") is None:
-                if "steered" in saved:
-                    raise ValueError("A run without a steering vector cannot mark responses as steered.")
-            else:
-                expected = result.steers_next(saved["agent"])
-                never_generated = (saved is turns[-1] and not saved["metrics"]
-                                   and saved["finish_reason"] in ("user_stopped", "stopped"))
-                flag = saved.get("steered")
-                if type(flag) is not bool or (flag != expected and not (expected and never_generated)):
-                    raise ValueError("A response's steered flag does not match its agent's steering trigger.")
-            turn = copy.deepcopy({key: value for key, value in saved.items() if key not in DERIVED})
-            result.turns.append(turn)
-            action = take_action(result, turn, len(result.turns) - 1)
-            if action:
-                actions.append(action)
-        if resolved:
-            resolve_round(result, actions)
-        else:
-            discard_round(result)
+    replay_rounds(result, turns, rounds, updates, by_answer, manual)
     if updates:
         raise ValueError("A team run records a map change at a round it never reached, or out of order.")
     if by_answer:
@@ -2392,7 +2518,17 @@ def team_from_payload(data, read_prompt=None):
         if json.loads(json.dumps(recorded)) != json.loads(json.dumps(replayed)):
             raise ValueError(f"The run's {name} do not match what its responses produce."
                              if name.endswith("s") else f"The run's {name} does not match what its responses produce.")
-    result.rounds, result.manual_intervention = rounds, manual
+    # A fork names the edit it was made by, which its edited response records
+    # too; a fork of a fork keeps the earlier edit on the response it made.
+    token_edit = data.get("token_edit")
+    if token_edit is not None and (legacy or not manual or not isinstance(token_edit, dict)
+                                   or type(token_edit.get("turn")) is not int
+                                   or not 0 <= token_edit["turn"] < len(turns)
+                                   or turns[token_edit["turn"]].get("token_edit") != token_edit):
+        raise ValueError("The run's token edit is not one its edited response records.")
+    if token_edit is None and any("token_edit" in turn for turn in turns):
+        raise ValueError("A run with a token-edited response names the edit it was made by.")
+    result.rounds, result.manual_intervention, result.token_edit = rounds, manual, token_edit
     # A live run refuses to continue under another load, so every response
     # that reached the model names the load the run does.
     for key in ("model_id", "load_id"):
