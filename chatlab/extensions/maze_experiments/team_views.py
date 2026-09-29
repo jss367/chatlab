@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 
 from .dynamic_maze import maze_at_turn
-from .maze import GOAL_MODES
+from .maze import DIRECTIONS, GOAL_MODES
 from .runner import TERMINAL
 from .team import TEAM_GOALS
 
@@ -48,6 +48,25 @@ def positions_after(ep, index):
         if event["accepted"] and event_round(event) <= index:
             positions[event["agent"]] = tuple(event["after"])
     return positions
+
+
+def insert_mark(x, y, advised):
+    """The ring where a message went in, centred on ``x``, ``y``, and an arrow for the direction it advised."""
+    parts = [f'<circle cx="{x}" cy="{y}" r="21" stroke="#db2777" stroke-width="3" stroke-dasharray="4 3" fill="none"/>']
+    if advised in DIRECTIONS:
+        dr, dc = DIRECTIONS[advised]
+        tip = (x + dc * 38, y + dr * 38)
+        # Haloed in white, because advice pointing back along the path
+        # would otherwise sit on the path's own line.
+        line = f'x1="{x + dc * 21}" y1="{y + dr * 21}" x2="{tip[0] - dc * 7}" y2="{tip[1] - dr * 7}" stroke-linecap="round"'
+        parts.append(f'<line {line} stroke="#fff" stroke-width="7"/><line {line} stroke="#db2777" stroke-width="3"/>')
+        # The head as a triangle of its own, so the board needs no marker
+        # definition whose id another board on the page could share.
+        base = (tip[0] - dc * 10, tip[1] - dr * 10)
+        corners = [tip, (base[0] + dr * 6, base[1] + dc * 6), (base[0] - dr * 6, base[1] - dc * 6)]
+        parts.append(f'<polygon points="{" ".join(f"{px},{py}" for px, py in corners)}" fill="#db2777" '
+                     'stroke="#fff" stroke-width="1.5"/>')
+    return "".join(parts)
 
 
 def team_board(ep, index=None, reveal=False, map_round=None):
@@ -118,6 +137,10 @@ def team_board(ep, index=None, reveal=False, map_round=None):
             x, y = center(ep.turns[turn]["position_before"])
             parts.append(f'<circle cx="{x}" cy="{y}" r="23" stroke="#f59e0b" stroke-width="3" fill="none">'
                          f'<title>{html.escape(agent["name"])} interrupted</title></circle>')
+    # Where each message went in, from the round that read it, as a run of one agent draws its own.
+    for insert in ep.config.get("context_inserts", ()):
+        if insert["before_round"] <= map_round:
+            parts.append(insert_mark(*center(insert["position"]), insert.get("advised_direction")))
     x, y = center(maze.start)
     parts.append(f'<text x="{x}" y="{y+5}" text-anchor="middle" fill="#64748b" font-size="14" font-weight="700">S</text>')
     x, y = center(maze.goal)
@@ -158,6 +181,8 @@ def team_board(ep, index=None, reveal=False, map_round=None):
         legend.append('<span style="color:#b77906">○ Interruption</span>')
     if ep.map_changes:
         legend.append('<span style="color:#78350f">▪ Closed during the run</span>')
+    if ep.config.get("context_inserts"):
+        legend.append('<span style="color:#db2777">◌ Inserted message · → advised direction</span>')
     parts.append('<div class="maze-legend">' + "".join(legend) + '</div>')
     return "".join(parts)
 

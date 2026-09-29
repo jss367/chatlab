@@ -2,11 +2,12 @@
 import json
 import unittest
 
+from chatlab.extension_api import TokenInspector
 from chatlab.extensions.maze_experiments.dynamic_maze import changing
 from chatlab.extensions.maze_experiments.maze import Maze
-from chatlab.extension_api import TokenInspector
 from chatlab.extensions.maze_experiments.page import prompt_reading, views
 from chatlab.extensions.maze_experiments.runner import Episode, context_messages, from_payload, stream_episode
+from chatlab.extensions.maze_experiments.team_views import team_board
 from maze_support import Manager, call, scored
 
 ROOM = changing(Maze(("...", "...", "..."), (0, 0), (0, 2)))
@@ -157,6 +158,11 @@ class TeamInsertTests(unittest.TestCase):
         self.assertEqual(ep.config["context_inserts"], [dict(
             before_round=1, agent=1, channel="tool_note", text="The exit is east.", sender=None, position=[0, 1],
             advised_direction="east")])
+        # The board marks where it went in, from the round that read it, with the advice it gave.
+        ring = 'stroke="#db2777" stroke-width="3" stroke-dasharray="4 3"'
+        self.assertNotIn(ring, team_board(ep, 0))
+        self.assertIn(ring, team_board(ep, 1))
+        self.assertIn('fill="#db2777" stroke="#fff"', team_board(ep, 1))
         # A teammate message joins the messages the team already sends each other.
         ep.request_insert("teammate", "Keep going.", sender="coach", index=0)
         list(stream_episode(ep, manager, single_step=True))

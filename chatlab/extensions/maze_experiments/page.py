@@ -17,8 +17,8 @@ from .batch import BatchControl, cut_short, downloads, run_trials
 from .runner import (RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload,
                      insert_outcome, stream_episode)
 from .team import MAX_AGENTS, TEAM_GOALS, format_agents, parse_agents
-from .team_views import (HEADERS as TEAM_HEADERS, MARKDOWN, mail_text, response_line, team_board, team_history_rows,
-                         team_status, team_timeline)
+from .team_views import (HEADERS as TEAM_HEADERS, MARKDOWN, insert_mark, mail_text, response_line, team_board,
+                         team_history_rows, team_status, team_timeline)
 from .trials import prepare_trial, read_trials
 from chatlab.extension_api import TokenInspector, icon_classes, read_steering_vector
 
@@ -177,21 +177,7 @@ def board(ep, index=None, reveal=False, animate=False, map_round=None):
     for insert in ep.config.get("context_inserts", ()):
         if index is not None and index < insert["before_turn"]:
             continue
-        x, y = center(insert["position"])
-        parts.append(f'<circle cx="{x}" cy="{y}" r="21" stroke="#db2777" stroke-width="3" stroke-dasharray="4 3" fill="none"/>')
-        if insert.get("advised_direction") in DIRECTIONS:
-            dr, dc = DIRECTIONS[insert["advised_direction"]]
-            tip = (x + dc * 38, y + dr * 38)
-            # Haloed in white, because advice pointing back along the path
-            # would otherwise sit on the path's own line.
-            line = f'x1="{x + dc * 21}" y1="{y + dr * 21}" x2="{tip[0] - dc * 7}" y2="{tip[1] - dr * 7}" stroke-linecap="round"'
-            parts.append(f'<line {line} stroke="#fff" stroke-width="7"/><line {line} stroke="#db2777" stroke-width="3"/>')
-            # The head as a triangle of its own, so the board needs no marker
-            # definition whose id another board on the page could share.
-            base = (tip[0] - dc * 10, tip[1] - dr * 10)
-            corners = [tip, (base[0] + dr * 6, base[1] + dc * 6), (base[0] - dr * 6, base[1] - dc * 6)]
-            parts.append(f'<polygon points="{" ".join(f"{px},{py}" for px, py in corners)}" fill="#db2777" '
-                         'stroke="#fff" stroke-width="1.5"/>')
+        parts.append(insert_mark(*center(insert["position"]), insert.get("advised_direction")))
     x, y = center(position)
     motion = ""
     # Only the displayed response's own move animates. A response that was
