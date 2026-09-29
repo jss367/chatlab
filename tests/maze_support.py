@@ -136,3 +136,9 @@ def call(direction, message=None, maze_id=MAZE_ID):
         args["message"] = message
     text = "<tool_call>\n" + json.dumps({"name": "move", "arguments": args}) + "\n</tool_call>"
     return text, list(text.encode()) + [0]
+
+
+def team_episode(maze, config):
+    """A team run of two agents unless ``config`` names another count."""
+    from chatlab.extensions.maze_experiments.runner import Episode
+    return Episode(maze, {"agents": 2, **config})

@@ -25,9 +25,9 @@ import re
 import threading
 from dataclasses import dataclass, field
 
-from .maze import DIRECTIONS, TOOLS, parse_call
-from .runner import context_messages, from_payload as single_from_payload, visible_token_ids
-from .team import FORMAT as TEAM_FORMAT, MESSAGE_LIMIT, from_payload as team_from_payload
+from .maze import DIRECTIONS, parse_call
+from .runner import context_messages, from_payload, visible_token_ids
+from .team import MESSAGE_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -75,16 +75,14 @@ TEAMMATE = re.compile(r"\bagent-\d+\b|\bteammates?\b")
 
 def condition_of(ep):
     """The condition a run was made under, as the summary groups runs."""
-    if not hasattr(ep, "agents"):
+    if not ep.team:
         return "One agent"
     return f"Team of {len(ep.agents)} · messages {'on' if ep.config['communication'] else 'off'}"
 
 
 def load_run(data):
     """A saved one-agent or team run, checked as the workbench checks a replay."""
-    if isinstance(data, dict) and data.get("format") == TEAM_FORMAT:
-        return team_from_payload(data)
-    return single_from_payload(data)
+    return from_payload(data)
 
 
 def response_text(turn):
@@ -177,7 +175,7 @@ def read_responses(ep):
     interruption or an edited token, is left out: its reasoning is partly the
     reader's.
     """
-    team = hasattr(ep, "agents")
+    team = ep.team
     communicate = team and ep.config["communication"]
     label, condition = run_label(ep), condition_of(ep)
     rows = []
@@ -504,7 +502,7 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
     says the caller already holds the test's claim and releases it itself,
     once whatever it publishes from the results is out.
     """
-    team = hasattr(ep, "agents")
+    team = ep.team
     communicate = team and ep.config["communication"]
     chosen = [r for r in read_responses(ep) if indices is None or r.index in indices]
     if not claimed and not control.claim("test", runs):
@@ -533,7 +531,7 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
                              + (" Test the responses each model made separately." if len(recorded) > 1 else ""))
         if ep.config.get("steering") is not None and any(ep.turns[r.index - 1].get("steered") for r in chosen):
             session.check_steering(ep.config["steering"])
-        tools = ep.tools if team else TOOLS
+        tools = ep.tools
         # The same model ID can name an updated tokenizer or template, which
         # would read every cut in a context the response never saw.
         hidden = session.hidden_token_ids
@@ -544,7 +542,7 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
                 raise ValueError(f"Response {row.index} records no prompt, so there is no checking that its history "
                                  "rebuilds the context it was given. The truncation test only reads a response in "
                                  "the context it saw.")
-            messages = ep.context_messages(row.index - 1) if team else context_messages(ep, row.index - 1)
+            messages = context_messages(ep, row.index - 1)
             if session.prompt_ids(messages, tools) != list(turn["prompt_ids"]):
                 raise ValueError(f"Response {row.index}'s recorded prompt is not the one {session.model_id} builds "
                                  "from its history now. The model's tokenizer or chat template has changed since "
@@ -570,7 +568,7 @@ def truncation_test(ep, models, control, indices=None, runs=None, claimed=False)
         for row in chosen:
             index = row.index - 1
             turn = ep.turns[index]
-            messages = ep.context_messages(index) if team else context_messages(ep, index)
+            messages = context_messages(ep, index)
             result = Truncation(row)
             steering = ep.config["steering"] if turn.get("steered") else None
 

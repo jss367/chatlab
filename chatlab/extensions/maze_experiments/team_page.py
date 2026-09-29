@@ -11,8 +11,8 @@ import gradio as gr
 
 from .page import MARKDOWN, STEER_MODES, checkpoint_values, steering_config, vector_note
 from .maze import GOAL_MODES, SYSTEM, default_instruction, generate, unavoidable_cells
-from .team import (MAX_AGENTS, TEAM_GOALS, TERMINAL, TeamEpisode, format_agents, from_payload, parse_agents,
-                   stream_team)
+from .runner import TERMINAL, Episode, context_messages, from_payload, stream_episode
+from .team import MAX_AGENTS, TEAM_GOALS, format_agents, parse_agents
 from chatlab.extension_api import TokenInspector, icon_classes, read_steering_vector
 
 TOKENS = TokenInspector()
@@ -294,7 +294,7 @@ def context_text(ep, models):
         if text is not None and (load_id or "").rsplit("#", 1)[0] == recorded:
             return (f"**Round {turn['round'] + 1} · {html.escape(name)} · as recorded** · "
                     f"{len(turn['prompt_ids']):,} prompt tokens, decoded.", text)
-    messages = ep.context_messages(index)
+    messages = context_messages(ep, index)
     parts = [f"[tool schemas]\n{json.dumps(ep.tools, indent=2)}"]
     parts += [f"[{m['role']}]\n{m['content']}" for m in messages]
     return (f"**Round {turn['round'] + 1} · {html.escape(name)} · as recorded, untemplated** · {len(messages)} messages "
@@ -314,7 +314,7 @@ def stop_replay(ep):
 
 
 def build_team_page(context, runs_dir):
-    initial = TeamEpisode(generate(), dict(openness=.7))
+    initial = Episode(generate(), dict(agents=2, openness=.7))
     episode = gr.State(initial)
     with gr.Row(elem_id="team-workspace"):
         with gr.Column(elem_id="team-scenario"):
@@ -449,7 +449,7 @@ def build_team_page(context, runs_dir):
             chosen_agents = parse_agents(targets, int(count))
             if chosen_agents is not None:
                 checkpoint["steer_agents"] = chosen_agents
-            new = TeamEpisode(maze, dict(
+            new = Episode(maze, dict(
                 agents=int(count), communication=bool(talk), team_goal=goal, goal_mode=mode, goal_hint=hint,
                 system_prompt=system_text, instruction=instruction_text, temperature=float(temp),
                 sampling_seed=int(sample_seed), per_turn_tokens=int(per), agent_token_budget=int(total),
@@ -465,7 +465,7 @@ def build_team_page(context, runs_dir):
     def team_play(ep, show, single=False):
         last_board = None
         try:
-            for current in stream_team(ep, context.models, single_step=single, save_dir=runs_dir()):
+            for current in stream_episode(ep, context.models, single_step=single, save_dir=runs_dir()):
                 rendered = list(team_render(current, show))
                 if rendered[0] == last_board:
                     rendered[0] = gr.skip()

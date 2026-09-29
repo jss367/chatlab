@@ -1,4 +1,11 @@
-"""Single-episode controller: token generation is separate from authoritative maze movement."""
+"""Episode controller: token generation is separate from authoritative maze movement.
+
+An episode is one agent, or a team of them, in one maze. Either way it runs in
+rounds, each asking every agent still moving for one response and then
+applying the moves together, so a run of one agent is a round of one response
+at a time and a team is the same loop over more conversations. What a team
+adds to a round is in team.py.
+"""
 from __future__ import annotations
 
 import copy
@@ -16,7 +23,9 @@ from uuid import uuid4
 from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, close_cell, load_maze,
                            maze_at_turn, validate_drops, validate_pending, validate_updates)
 from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, check_insert, render_insert
-from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call
+from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call, unavoidable_cells
+from .team import (DROPPED, FORMAT as TEAM_FORMAT, MAX_AGENTS, MESSAGE_LIMIT, agent_names, check_config as check_team_config,
+                   team_paragraph, team_tools)
 from chatlab.extension_api import normalize_steering, write_private_text
 
 # One line for each response and each episode outcome, so a run read in
@@ -132,17 +141,35 @@ def steered_at(config, start, index, position, moves):
     return count == 0 or index - start < count
 
 
+READY = "Ready. Play the episode or use Next to generate one response."
+TEAM_READY = "Ready. Play runs rounds until the team finishes; Next runs one round."
+
+
 @dataclass
 class Episode:
+    """One run in one maze, by a single agent or by a team.
+
+    ``config["agents"]`` says how many play. Without it the run has one agent,
+    as every run did before teams, and is saved in the single-agent formats,
+    whose turns and events name no agent: each reads as agent 0, and each
+    turn's round is its index. A team's turns and events name their agent and
+    round, and every list here holds the whole team's, in the order the
+    rounds produced them.
+    """
     maze: Maze
     config: dict
     run_id: str = field(default_factory=lambda: uuid4().hex)
     phase: str = "ready"
-    detail: str = "Ready. Play the episode or use Next to generate one response."
-    messages: list = field(default_factory=list)
+    detail: str = ""
+    # One entry per agent: its name, position, status and its own conversation.
+    agents: list = field(default_factory=list)
+    # Every attempted call, in the order the rounds applied them, and every
+    # response, each run's supplied moves first.
     events: list = field(default_factory=list)
     turns: list = field(default_factory=list)
-    position: tuple = ()
+    # Every message a teammate sent, with the teammates who received it.
+    mail: list = field(default_factory=list)
+    rounds: int = 0
     model_id: str | None = None
     load_id: str | None = None
     sampled_tokens: int = 0
@@ -174,9 +201,12 @@ class Episode:
     replay_only: bool = False
     token_edit: dict | None = None
     pending_edit: dict | None = None
-    # The response the viewer last drew. Previous, Next and playback move
-    # relative to it, so a rapid second click cannot resend a stale index.
+    # The response the viewer last drew, or for a team the round. Previous,
+    # Next and playback move relative to it, so a rapid second click cannot
+    # resend a stale index.
     viewing: int = -1
+    # The team response selected in the round on screen.
+    selected_turn: int | None = None
     # Which playback run owns the view. Starting one supersedes the last, so
     # two runs in the same session cannot repaint each other's frames.
     playback_token: int = 0
@@ -203,6 +233,39 @@ class Episode:
         # stands at one moment rather than field by field.
         self.lock = threading.RLock()
         self.config = copy.deepcopy(self.config)
+        # A run of one agent names no count, as every run did before teams.
+        if self.config.get("agents") == 1:
+            del self.config["agents"]
+        if "agents" in self.config:
+            self._start_team()
+        else:
+            self._start_single()
+
+    def _start_team(self):
+        self.config = check_team_config(self.config)
+        check_checkpoint(self.config, self.maze)
+        checkpoint = checked_cell(self.config.get("required_checkpoint"), self.maze, "required checkpoint")
+        if checkpoint is not None:
+            if tuple(checkpoint) not in unavoidable_cells(self.maze):
+                raise ValueError("The required checkpoint must be before the destination on every route from the start.")
+            self.config["required_checkpoint"] = checkpoint
+        targets = self.config.get("steer_agents")
+        if targets is not None and (not isinstance(targets, list) or not targets
+                                   or any(type(i) is not int or not 0 <= i < self.config["agents"] for i in targets)
+                                   or len(set(targets)) != len(targets)):
+            raise ValueError("Choose one or more distinct agents in this team to steer.")
+        names = agent_names(self.config["agents"])
+        self.agents = [dict(name=name, position=self.maze.start, status="active", messages=[]) for name in names]
+        for index, agent in enumerate(self.agents):
+            instruction = "\n".join(filter(None, [
+                self.config["instruction"],
+                team_paragraph(agent["name"], names, self.config["team_goal"], self.config["communication"])]))
+            state = json.dumps(self.agent_state(index), separators=(",", ":"))
+            agent["messages"] = [{"role": "system", "content": self.config["system_prompt"]},
+                                 {"role": "user", "content": instruction + "\n" + state}]
+        self.detail = self.detail or TEAM_READY
+
+    def _start_single(self):
         self.config.setdefault("goal_mode", "coordinates")
         self.config.setdefault("goal_hint", "")
         # Runs predating editable wording carry no prompt, so they keep the
@@ -222,11 +285,82 @@ class Episode:
                 raise ValueError("The recovery window must be a positive number of sampled tokens and tool attempts.")
         check_checkpoint(self.config, self.maze)
         supplied = int(self.config.get("supplied_moves", 3))
-        self.messages, self.events, self.position = initial_history(
+        messages, self.events, position = initial_history(
             self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"],
             system=self.config["system_prompt"], instruction=self.config["instruction"],
             waypoint=self.config.get("waypoint"))
+        self.agents = [dict(name=agent_names(1)[0], position=position, status="active", messages=messages)]
         self.supplied_moves = supplied
+        self.detail = self.detail or READY
+
+    @property
+    def team(self):
+        """Whether more than one agent plays this run."""
+        return len(self.agents) > 1
+
+    @property
+    def names(self):
+        return [agent["name"] for agent in self.agents]
+
+    @property
+    def tools(self):
+        """The tools every response is offered: the move tool, carrying a message where a team may talk."""
+        return team_tools(self.config["communication"]) if self.team else TOOLS
+
+    def _solo(self):
+        if self.team:
+            raise AttributeError("A team has no single history or position. Read them from its agents.")
+        return self.agents[0]
+
+    # A run of one agent is read and written as that agent, which is how every
+    # run was before teams: its history and position are the run's own.
+    @property
+    def messages(self):
+        return self._solo()["messages"]
+
+    @messages.setter
+    def messages(self, value):
+        self._solo()["messages"] = value
+
+    @property
+    def position(self):
+        return self._solo()["position"]
+
+    @position.setter
+    def position(self, value):
+        self._solo()["position"] = tuple(value)
+
+    def round_turns(self, index):
+        """The responses of round ``index``: one per agent still moving, or one for a run of one agent."""
+        if not self.team:
+            return self.turns[index:index + 1]
+        return [turn for turn in self.turns if turn["round"] == index]
+
+    def agent_tokens(self):
+        """The tokens each agent has sampled so far, counted from its finished responses."""
+        spent = [0] * len(self.agents)
+        for turn in self.turns:
+            spent[turn.get("agent", 0)] += turn.get("sampled_tokens", 0)
+        return spent
+
+    def response_caps(self, moving):
+        """The most tokens each moving agent may sample this round, or None when the round cannot start.
+
+        A run of one agent is capped by what is left of its limit. On a team,
+        each agent is capped by what it has left of its own; a team run saved
+        under one limit for the whole team splits what is left of it evenly
+        before anyone answers, so an agent asked later in the round is capped
+        exactly as the first one was.
+        """
+        per_turn = self.config["per_turn_tokens"]
+        if not self.team:
+            caps = dict.fromkeys(moving, min(per_turn, self.config["token_budget"] - self.sampled_tokens))
+        elif "token_budget" in self.config:
+            caps = dict.fromkeys(moving, min(per_turn, (self.config["token_budget"] - self.sampled_tokens) // len(moving)))
+        else:
+            spent = self.agent_tokens()
+            caps = {i: min(per_turn, self.config["agent_token_budget"] - spent[i]) for i in moving}
+        return None if not moving or min(caps.values()) <= 0 else caps
 
     @property
     def current_maze(self):
@@ -243,10 +377,27 @@ class Episode:
         """Whether this run's walls can close while it is running."""
         return isinstance(self.maze, ChangingMaze)
 
+    def agent_state(self, index, error=None, inbox=()):
+        """What the simulator tells one agent: its own position, never its teammates'.
+
+        Teammates' positions are left out on purpose. With communication off,
+        an agent that could still see where the others stand would be
+        coordinating through the board, and the comparison the switch exists
+        for would measure nothing. A teammate's name, its team and its
+        messages are all a team agent is told of the others; a run of one
+        agent is told only the maze.
+        """
+        agent = self.agents[index]
+        state = {"agent": agent["name"], "teammates": [n for n in self.names if n != agent["name"]]} if self.team else {}
+        state.update(self.current_maze.state(agent["position"], error, goal_mode=self.config["goal_mode"],
+                                             goal_hint=self.config["goal_hint"], waypoint=self.config.get("waypoint"),
+                                             waypoint_reached=self.waypoint_turn is not None))
+        if self.team and self.config["communication"]:
+            state["messages"] = list(inbox)
+        return state
+
     def model_state(self, error=None):
-        return self.current_maze.state(self.position, error, goal_mode=self.config["goal_mode"],
-                                       goal_hint=self.config["goal_hint"], waypoint=self.config.get("waypoint"),
-                                       waypoint_reached=self.waypoint_turn is not None)
+        return self.agent_state(0, error)
 
     @property
     def waypoint_turn(self):
@@ -268,15 +419,26 @@ class Episode:
         """The first steered response, or None while steering has not started."""
         return next((i for i, turn in enumerate(self.turns) if turn.get("steered")), None)
 
-    def steers_next(self):
-        """Whether the response about to be generated is steered."""
-        return steered_at(self.config, self.steer_turn, len(self.turns), self.position, self.moves)
+    def steers_next(self, index=0):
+        """Whether agent ``index``'s next response is steered, judged on that agent's own responses and moves."""
+        if index not in (self.config.get("steer_agents") or range(len(self.agents))):
+            return False
+        turns = [turn for turn in self.turns if turn.get("agent", 0) == index]
+        start = next((i for i, turn in enumerate(turns) if turn.get("steered")), None)
+        moves = sum(e["accepted"] for e in self.events if e.get("agent", 0) == index)
+        return steered_at(self.config, start, len(turns), self.agents[index]["position"], moves)
 
     @property
     def moves(self):
         return sum(e["accepted"] for e in self.events)
 
     def payload(self):
+        if self.team:
+            keys = ("run_id", "phase", "detail", "agents", "turns", "events", "mail", "rounds", "model_id", "load_id",
+                    "sampled_tokens", "tool_attempts", "created_at")
+            with self.lock:
+                return {"format": TEAM_FORMAT, "maze": self.maze.to_dict(), "config": self.config, "exploratory": True,
+                        **{key: getattr(self, key) for key in keys}}
         keys = ("run_id", "phase", "detail", "messages", "events", "turns", "position", "model_id", "load_id",
                 "sampled_tokens", "tool_attempts", "supplied_moves", "interrupted", "intervention_turn",
                 "intervention_tokens", "intervention_attempts", "resumed", "first_move_progress", "latency",
@@ -324,7 +486,9 @@ class Episode:
             self.stop_requested = True
             if self.busy:
                 return  # The active stream owns cleanup and persistence.
-            self.phase, self.detail = "stopped", "Stopped by you. This is not scored as model abandonment."
+            self.phase = "stopped"
+            self.detail = ("Stopped by you. This is not scored as the team giving up." if self.team else
+                           "Stopped by you. This is not scored as model abandonment.")
             abandon_closure(self)
             abandon_insert(self)
             if save_dir:
@@ -400,6 +564,8 @@ class Episode:
         with self.lock:
             if self.phase in TERMINAL or self.replay_only:
                 raise ValueError("Start a new episode to insert a message. This episode is finished or is a saved replay.")
+            if self.team:
+                raise ValueError("Messages are inserted into a run of one agent.")
             if self.insert_next:
                 queued = self.insert_next
                 raise ValueError(f"{describe_insert(queued)} is already queued before the next response. "
@@ -595,8 +761,13 @@ def context_messages(episode, index):
     or a teammate message is written into a reply already counted.
 
     Counted from the record rather than kept as an index of its own, so the
-    two cannot disagree.
+    two cannot disagree. On a team, the history is the answering agent's own,
+    which grows by two messages for each round it made a call in.
     """
+    if episode.team:
+        turn = episode.turns[index]
+        calls = sum(1 for event in episode.events if event["agent"] == turn["agent"] and event["round"] < turn["round"])
+        return episode.agents[turn["agent"]]["messages"][:2 + 2 * calls]
     supplied = sum(event["source"] == "supplied" for event in episode.events)
     attempts = sum("event" in turn for turn in episode.turns[:max(index, 0)])
     users = sum(insert["channel"] == "user" and insert["before_turn"] <= index
@@ -749,7 +920,7 @@ def verify_visible_candidate(candidate_id, manager, stop_ids):
 def stop_deciding_id(turn):
     """The token whose membership in the stop set decides this turn's outcome.
 
-    finish_turn reads the last sampled token, and for an edited response whose
+    finish_response reads the last sampled token, and for an edited response whose
     replacement ended it with nothing sampled afterwards, the last token of the
     response.
     """
@@ -764,7 +935,7 @@ def stop_deciding_id(turn):
 def verify_recorded_stops(episode, turn_index, kept, literal_prefill_tokens, stop_ids):
     """Refuse a fork whose replayed tokens no longer behave as they did under the stop set.
 
-    Each earlier response is replayed through finish_turn against the stop set
+    Each earlier response is replayed through finish_response against the stop set
     of the load in memory now. An ID that decodes to the same text can still
     have stopped being configured as a stop token, and then a response that
     ended naturally is read as a length failure: its tool call is never parsed,
@@ -842,6 +1013,8 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
     with episode.lock:
         if episode.busy:
             raise ValueError("Pause or stop the episode before editing tokens.")
+        if episode.team:
+            raise ValueError("Token edits fork a run of one agent.")
         # The fork replays stored token IDs, so the tokenizer has to match. The
         # model ID is the cheap gate; a later load of the same ID is allowed,
         # which is what lets an uploaded run be forked at all, but only after
@@ -920,7 +1093,8 @@ def fork_token_edit(episode, turn_index, token_index, replacement, manager, *, c
                 result.intervention_tokens = result.sampled_tokens
                 result.intervention_attempts = result.tool_attempts
             result.phase = "running"
-            finish_turn(result, turn, stop_ids, result.config["per_turn_tokens"])
+            action = finish_response(result, turn, stop_ids, result.config["per_turn_tokens"])
+            resolve_round(result, [action] if action else [])
         if carried:
             result.config["map_updates"].extend(u for u in carried if u["before_turn"] == turn_index)
         for insert in inserts:
@@ -955,52 +1129,142 @@ def reply_messages(episode, turn, event):
             {"role": "tool", "content": json.dumps(episode.model_state(event["error"]), separators=(",", ":"))}]
 
 
-def finish_turn(episode, turn, stop_ids, max_tokens):
-    sampled = turn["metrics"][turn["forced_prefix_tokens"]:]
-    episode.sampled_tokens += len(sampled)
-    turn["sampled_tokens"] = len(sampled)
-    turn["tokens_cumulative"] = episode.sampled_tokens
+def finish_response(episode, turn, stop_ids, max_tokens):
+    """Name how a streamed response ended, then read the action it takes.
+
+    A stop requested while it streamed ends it as the reader's, whatever the
+    model was doing. Otherwise it ended by choice only where its last sampled
+    token is one the load stops on, or, for an edited response whose
+    replacement ended it with nothing sampled afterwards, its last token.
+    Anything else was cut off: by the limit when it used all of it.
+    """
+    sampled = turn["metrics"][turn.get("forced_prefix_tokens", 0):]
     natural_stop = bool(sampled and sampled[-1]["token_id"] in stop_ids)
     if turn.get("token_edit") and not sampled and turn["metrics"]:
         natural_stop = turn["metrics"][-1]["token_id"] in stop_ids
     if episode.stop_requested:
-        episode.phase, episode.detail = "stopped", "Stopped by you. Partial tokens were retained; no partial action executed."
         turn["finish_reason"] = "user_stopped"
-        return
-    if not natural_stop:
-        episode.phase, episode.detail = "budget", "The response reached its generation limit. No unfinished action executed."
+    elif not natural_stop:
         turn["finish_reason"] = "length" if len(sampled) >= max_tokens else "incomplete_stream"
-        return
-    turn["finish_reason"] = "stop"
-    text = assistant_content(turn)
+    else:
+        turn["finish_reason"] = "stop"
+    return take_action(episode, turn, len(episode.turns) - 1)
+
+
+def take_action(episode, turn, index):
+    """Count a response's tokens and read the action its finish reason allows.
+
+    Returns the action for resolve_round, or None for a response that takes
+    none. A response that ends without a call, or is cut off by a limit, takes
+    its agent out of the run; on a team its teammates carry on. The agent
+    leaves when the round resolves, so a round that never does leaves it in.
+    Shared by generation, by a fork rebuilding its earlier responses and by
+    replay of a saved team run, so a run is read back through exactly the
+    rules that produced it.
+    """
+    sampled = turn["metrics"][turn.get("forced_prefix_tokens", 0):]
+    episode.sampled_tokens += len(sampled)
+    turn["sampled_tokens"] = len(sampled)
+    turn["tokens_cumulative"] = episode.sampled_tokens
+    if turn["finish_reason"] == "user_stopped":
+        return None
+    if turn["finish_reason"] != "stop":
+        turn["outcome"] = "cut_off"
+        return None
+    content = assistant_content(turn)
     # Tool-looking text inside reasoning is not an external action.
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    text = re.sub(r"<think>.*?</think>", "", content, flags=re.S)
     if "<think>" in text:
         text = text.split("<think>", 1)[0]
-    args, error = parse_call(text)
+    communicate = episode.team and episode.config["communication"]
+    args, error = parse_call(text, message_limit=MESSAGE_LIMIT if communicate else None)
     if args is None and error is None:
-        episode.phase, episode.detail = "abandoned", "The model ended its response without making a movement call."
         turn["outcome"] = "no_call"
-        return
+        return None
     episode.tool_attempts += 1
-    if error:
-        event = {"accepted": False, "before": list(episode.position), "after": list(episode.position),
-                 "error": error, "arrived": False, "progress": False}
+    return dict(agent=turn.get("agent", 0), turn=index, content=content, args=args, error=error)
+
+
+def resolve_round(episode, actions):
+    """Apply every action of a round at once, then write each agent's reply.
+
+    Every call is judged from the position its agent held when the round
+    began, so the order the agents were asked in changes nothing. Agents may
+    share a cell. A message goes to every teammate that gets a reply this
+    round, which is every teammate that made a call in it.
+    """
+    round_index, team = episode.rounds, episode.team
+    for turn in episode.round_turns(round_index):
+        if turn.get("outcome") in DROPPED:
+            episode.agents[turn.get("agent", 0)]["status"] = DROPPED[turn["outcome"]]
+    sent = []
+    for action in actions:
+        agent = episode.agents[action["agent"]]
+        if action["error"]:
+            event = {"accepted": False, "before": list(agent["position"]), "after": list(agent["position"]),
+                     "error": action["error"], "arrived": False, "progress": False}
+        else:
+            event = apply_call(episode.current_maze, agent["position"], action["args"],
+                               goal_mode=episode.config["goal_mode"])
+            message = action["args"].get("message", "").strip()
+            if message:
+                event["message"] = message
+                sent.append((action["agent"], message))
+        if team:
+            event.update(source="model", agent=action["agent"], round=round_index, turn=action["turn"])
+        else:
+            event.update(source="model", turn=action["turn"])
+        episode.events.append(event)
+        episode.turns[action["turn"]]["event"] = event
+        action["event"] = event
+    for action in actions:
+        agent, event = episode.agents[action["agent"]], action["event"]
+        if event["accepted"]:
+            agent["position"] = tuple(event["after"])
+            if episode.interrupted and episode.resumed is None:
+                episode.resumed = True
+                episode.first_move_progress = event["progress"]
+                episode.latency = episode.sampled_tokens - episode.intervention_tokens
+        if event["arrived"]:
+            agent["status"] = "arrived"
+    if team and "agent_token_budget" in episode.config:
+        # A response cut off at the last of its agent's limit was stopped by
+        # the limit, so that agent is out of tokens rather than cut off.
+        for agent, spent in zip(episode.agents, episode.agent_tokens()):
+            if agent["status"] in ("active", "cut_off") and spent >= episode.config["agent_token_budget"]:
+                agent["status"] = "out_of_tokens"
+    readers = [action["agent"] for action in actions]
+    for sender, text in sent:
+        episode.mail.append(dict(round=round_index, sender=episode.agents[sender]["name"], text=text,
+                                 to=[episode.agents[i]["name"] for i in readers if i != sender]))
+    for action in actions:
+        inbox = [{"from": episode.agents[sender]["name"], "text": text}
+                 for sender, text in sent if sender != action["agent"]]
+        episode.agents[action["agent"]]["messages"].extend([
+            {"role": "assistant", "content": action["content"]},
+            {"role": "tool", "content": json.dumps(episode.agent_state(action["agent"], action["event"]["error"], inbox),
+                                                   separators=(",", ":"))}])
+    episode.rounds += 1
+    if team:
+        settle_team(episode, actions, sent)
     else:
-        event = apply_call(episode.current_maze, episode.position, args, goal_mode=episode.config["goal_mode"])
-    event.update(source="model", turn=len(episode.turns) - 1)
-    episode.events.append(event)
-    turn["event"] = event
+        settle_single(episode, actions)
+
+
+def settle_single(episode, actions):
+    """Decide what the round a run of one agent just resolved leaves it doing."""
+    outcome = episode.turns[episode.rounds - 1].get("outcome")
+    if outcome == "no_call":
+        episode.phase, episode.detail = "abandoned", "The model ended its response without making a movement call."
+        return
+    if outcome == "cut_off":
+        episode.phase, episode.detail = "budget", "The response reached its generation limit. No unfinished action executed."
+        return
+    event = actions[0]["event"]
     if event["accepted"]:
-        episode.position = tuple(event["after"])
-        if episode.interrupted and episode.resumed is None:
-            episode.resumed = True
-            episode.first_move_progress = event["progress"]
-            episode.latency = episode.sampled_tokens - episode.intervention_tokens
         episode.detail = f"Moved {event['direction']} to row {episode.position[0]}, column {episode.position[1]}."
     else:
         episode.detail = "Rejected call: " + event["error"].replace("_", " ") + ". The position did not change."
-    episode.messages.extend(reply_messages(episode, turn, event))
     if event["arrived"]:
         episode.phase, episode.detail = "arrived", "The simulator confirmed arrival at the destination."
     elif (episode.interrupted and episode.resumed is None
@@ -1011,14 +1275,64 @@ def finish_turn(episode, turn, stop_ids, max_tokens):
         episode.phase, episode.detail = "budget", "The episode reached its token or action limit."
 
 
+def settle_team(episode, actions, sent):
+    """Decide whether the round a team just resolved ends its run, and say what the round did."""
+    arrived = [agent["name"] for agent in episode.agents if agent["status"] == "arrived"]
+    moving = [agent for agent in episode.agents if agent["status"] == "active"]
+    moved = sum(action["event"]["accepted"] for action in actions)
+    if arrived and (episode.config["team_goal"] == "any" or len(arrived) == len(episode.agents)):
+        episode.phase = "arrived"
+        episode.detail = (f"{', '.join(arrived)} reached the destination in round {episode.rounds}."
+                          if episode.config["team_goal"] == "any" else
+                          f"Every agent reached the destination by round {episode.rounds}.")
+    elif not moving:
+        # Out of tokens only when that is what stopped every agent still out.
+        spent = all(agent["status"] in ("arrived", "out_of_tokens") for agent in episode.agents)
+        episode.phase = "budget" if spent else "abandoned"
+        episode.detail = "No agent is still moving: " + ", ".join(
+            f"{agent['name']} {agent['status'].replace('_', ' ')}" for agent in episode.agents) + "."
+    elif "token_budget" in episode.config and episode.sampled_tokens >= episode.config["token_budget"]:
+        episode.phase, episode.detail = "budget", "The team reached its sampled-token limit."
+    elif episode.rounds >= episode.config["round_limit"]:
+        episode.phase, episode.detail = "budget", "The team reached its round limit."
+    else:
+        episode.detail = (f"Round {episode.rounds}: {moved} of {len(actions)} call{'' if len(actions) == 1 else 's'} "
+                          f"moved an agent, {len(sent)} message{'' if len(sent) == 1 else 's'} sent.")
+
+
+def discard_round(episode):
+    """Mark the responses of a team round that will never resolve as not applied.
+
+    None of it is applied: the agents that answered would otherwise have moved
+    while their teammates had not. That includes a response that made no call
+    or was cut off, whose agent would otherwise have left the team in a round
+    that never happened; its text is kept either way. A resolved round has
+    nothing left to mark, so this is safe to call however the stream ends.
+    """
+    for waiting in episode.turns:
+        if waiting["round"] == episode.rounds and "event" not in waiting:
+            waiting["outcome"] = "not_applied"
+
+
 def stream_episode(episode, models, *, single_step=False, save_dir=None, session=None):
-    """Generate the episode's responses, yielding it after each change.
+    """Generate the episode's rounds, yielding it after each change.
+
+    A round asks every agent still moving for one response, then applies
+    them together, so a run of one agent generates one response a round. The
+    episode is yielded after every frame of every response and after every
+    round. Pause waits for the round to finish, so no agent is left having
+    moved while a teammate has not. Stop does not wait: the response it lands
+    in keeps its tokens and executes nothing, and on a team the round it
+    lands in is discarded, its finished responses kept and marked as never
+    applied.
 
     ``session`` is a model session the caller already holds and keeps: a batch
     of trials holds one for every episode it runs, so nothing else can take
     the model or load another between two trials. Without one, the episode
     opens its own session and closes it when it stops.
     """
+    team = episode.team
+    step = "round" if team else "response"
     with episode.lock:
         if episode.busy:
             raise ValueError("This episode is already generating. Pause it before changing the run.")
@@ -1040,9 +1354,15 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
         episode.phase = "running"
         episode.model_id = episode.model_id or manager.model_id
         episode.load_id = episode.load_id or manager.load_id
-    logger.info("Run %s generating with %s: %s responses so far, %s sampled tokens, %s moves, %s",
-                episode.run_id, episode.model_id, len(episode.turns), episode.sampled_tokens,
-                episode.moves, "one response" if single_step else "until it ends")
+    if team:
+        logger.info("Team run %s generating with %s: %s agents, communication %s, round %s, %s",
+                    episode.run_id, episode.model_id, len(episode.agents),
+                    "on" if episode.config["communication"] else "off", episode.rounds + 1,
+                    "one round" if single_step else "until it ends")
+    else:
+        logger.info("Run %s generating with %s: %s responses so far, %s sampled tokens, %s moves, %s",
+                    episode.run_id, episode.model_id, len(episode.turns), episode.sampled_tokens,
+                    episode.moves, "one response" if single_step else "until it ends")
     turn = None
     inserted = None
     autosave_error = None
@@ -1062,6 +1382,11 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
         that took no time rather than one nobody timed.
         """
         turn.setdefault("seconds", time.time() - turn["started_at"])
+        if team:
+            logger.info("Team run %s round %s %s: %s after %s sampled tokens in %.1fs",
+                        episode.run_id, turn["round"] + 1, episode.agents[turn["agent"]]["name"],
+                        turn.get("outcome") or turn["finish_reason"], turn.get("sampled_tokens", 0), turn["seconds"])
+            return
         logger.info("Run %s response %s%s: %s after %s sampled tokens in %.1fs. %s",
                     episode.run_id, len(episode.turns), ", steered" if turn.get("steered") else "",
                     turn["finish_reason"], turn.get("sampled_tokens", 0), turn["seconds"], episode.detail)
@@ -1081,100 +1406,144 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
     try:
         while episode.phase == "running":
             if episode.stop_requested:
-                episode.phase, episode.detail = "stopped", "Stopped by you before the next response."
+                episode.phase, episode.detail = "stopped", f"Stopped by you before the next {step}."
                 break
             if episode.pause_requested:
                 episode.phase = "paused"
-                episode.detail += " Paused before the next response."
+                episode.detail += f" Paused before the next {step}."
                 break
             if manager.load_id != episode.load_id:
                 raise ValueError("The model changed during this episode. Start a new episode with the selected model.")
-            # Before the response is generated, so its call is judged against
-            # the map as changed. The response's own prompt still shows the map
+            # Before the round is generated, so its calls are judged against
+            # the map as changed. A response's own prompt still shows the map
             # it was given, because the history is already written: the model
             # meets the change in the simulator's reply to whatever it does
             # next, which carries the current grid whether the call was
             # accepted or refused.
             apply_closure(episode)
-            edit = episode.pending_edit
-            forced = edit["forced_ids"] if edit else interrupted_prefix(episode, manager)
-            inserts_interruption = edit["interruption_here"] if edit else bool(forced)
-            limit = min(episode.config["per_turn_tokens"], episode.config["token_budget"] - episode.sampled_tokens)
-            window = episode.config["recovery_tokens"]
-            if inserts_interruption:
-                limit = min(limit, window)
-            elif episode.interrupted and episode.resumed is None:
-                limit = min(limit, window - (episode.sampled_tokens - episode.intervention_tokens))
-            if limit <= 0:
-                episode.phase, episode.detail = "budget", "The sampled-token budget is exhausted."
+            moving = [index for index, agent in enumerate(episode.agents) if agent["status"] == "active"]
+            caps = episode.response_caps(moving)
+            if caps is None:
+                episode.phase = "budget"
+                episode.detail = ("The team's remaining sampled tokens cannot give every moving agent a response."
+                                  if team else "The sampled-token budget is exhausted.")
                 break
-            # After the budget is known to allow a response, so an insertion is
-            # only ever recorded with the response that read it.
-            inserted = apply_insert(episode, manager)
-            turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": 0,
-                    "prefix_ids": [], "prefix_text": "",
-                    "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
-                    "position_before": list(episode.position), "started_at": time.time(), "finish_reason": None}
-            turn["literal_prefill_tokens"] = edit["literal_prefill_tokens"] if edit else len(forced)
-            steered = episode.steers_next()
-            if episode.config.get("steering") is not None:
-                # Unmarked until generation is entered below. The flag says the
-                # vector touched this response, and a Stop taken at the opening
-                # frame ends the run before the vector is ever installed.
-                turn["steered"] = False
-                if steered and episode.steer_turn is None:
-                    episode.detail = "Steering starts with this response."
-            if edit:
-                turn["token_edit"] = copy.deepcopy(episode.token_edit)
-            episode.turns.append(turn)
-            episode.pending_edit = None
-            yield episode
-            if episode.stop_requested:
+            actions = []
+            for index in moving:
+                agent, limit = episode.agents[index], caps[index]
+                edit = episode.pending_edit
+                forced = edit["forced_ids"] if edit else interrupted_prefix(episode, manager)
+                inserts_interruption = edit["interruption_here"] if edit else bool(forced)
+                if not team:
+                    window = episode.config["recovery_tokens"]
+                    if inserts_interruption:
+                        limit = min(limit, window)
+                    elif episode.interrupted and episode.resumed is None:
+                        limit = min(limit, window - (episode.sampled_tokens - episode.intervention_tokens))
+                    if limit <= 0:
+                        episode.phase, episode.detail = "budget", "The sampled-token budget is exhausted."
+                        break
+                # After the budget is known to allow a response, so an insertion is
+                # only ever recorded with the response that read it.
+                inserted = apply_insert(episode, manager)
+                turn = {"text": "", "metrics": [], "prompt_ids": [], "forced_prefix_tokens": 0,
+                        "prefix_ids": [], "prefix_text": "",
+                        "planned_prefix_ids": forced, "planned_prefix_text": manager.decode(forced),
+                        "position_before": list(agent["position"]), "started_at": time.time(), "finish_reason": None}
+                if team:
+                    turn = {"agent": index, "round": episode.rounds, **turn}
+                turn["literal_prefill_tokens"] = edit["literal_prefill_tokens"] if edit else len(forced)
+                steered = episode.steers_next(index)
+                if episode.config.get("steering") is not None:
+                    # Unmarked until generation is entered below. The flag says the
+                    # vector touched this response, and a Stop taken at the opening
+                    # frame ends the run before the vector is ever installed.
+                    turn["steered"] = False
+                    if steered and not team and episode.steer_turn is None:
+                        episode.detail = "Steering starts with this response."
+                if edit:
+                    turn["token_edit"] = copy.deepcopy(episode.token_edit)
+                episode.turns.append(turn)
+                episode.pending_edit = None
+                if team:
+                    episode.selected_turn = len(episode.turns) - 1
+                yield episode
+                if episode.stop_requested:
+                    if inserted is not None:
+                        withdraw_insert(episode, inserted)
+                        inserted = None
+                    finish_response(episode, turn, set(), limit)
+                    if team:
+                        record(turn)
+                    break
+                if steered:
+                    turn["steered"] = True
+                stop_ids = manager.stop_token_ids
+                generator = manager.generate(
+                    agent["messages"], temperature=episode.config["temperature"], top_p=1., top_k=0,
+                    max_new_tokens=limit,
+                    # Distinct per agent as well as per round: agents given the
+                    # same prompt would otherwise sample the same response.
+                    seed=episode.config["sampling_seed"] + 100003 * episode.rounds + 7919 * index,
+                    analyze_prompt=False, tools=episode.tools, forced_ids=forced,
+                    literal_prefill_tokens=turn["literal_prefill_tokens"],
+                    steering=episode.config["steering"] if steered else None,
+                )
+                try:
+                    for update in generator:
+                        turn.update(text=update.text, metrics=copy.deepcopy(update.metrics), prompt_ids=list(update.prompt_ids),
+                                    forced_prefix_tokens=update.forced_prefix_tokens, reasoning_prefilled=update.reasoning_prefilled,
+                                    load_id=update.load_id, model_id=update.model_id)
+                        # The prompt holding the message has been fed.
+                        if update.prompt_ids:
+                            inserted = None
+                        # The runtime emits prefix metrics only after prefill has
+                        # consumed them. An opening frame or a failed model call
+                        # alone is not evidence that an interruption was inserted.
+                        if forced and update.forced_prefix_tokens and update.metrics:
+                            turn.update(prefix_ids=forced, prefix_text=manager.decode(forced))
+                        if inserts_interruption and not episode.interrupted and update.forced_prefix_tokens and update.metrics:
+                            episode.interrupted = True
+                            episode.intervention_turn = len(episode.turns) - 1
+                            episode.intervention_tokens = episode.sampled_tokens
+                            episode.intervention_attempts = episode.tool_attempts
+                            episode.detail = "Interruption inserted. Watching for a real movement call."
+                        yield episode
+                        if episode.stop_requested:
+                            break
+                finally:
+                    generator.close()
                 if inserted is not None:
                     withdraw_insert(episode, inserted)
                     inserted = None
-                finish_turn(episode, turn, set(), limit)
-                record(turn)
-                break
-            if steered:
-                turn["steered"] = True
-            stop_ids = manager.stop_token_ids
-            generator = manager.generate(
-                episode.messages, temperature=episode.config["temperature"], top_p=1., top_k=0,
-                max_new_tokens=limit, seed=episode.config["sampling_seed"] + 100003 * (len(episode.turns) - 1),
-                analyze_prompt=False, tools=TOOLS, forced_ids=forced, literal_prefill_tokens=turn["literal_prefill_tokens"],
-                steering=episode.config["steering"] if steered else None,
-            )
-            try:
-                for update in generator:
-                    turn.update(text=update.text, metrics=copy.deepcopy(update.metrics), prompt_ids=list(update.prompt_ids),
-                                forced_prefix_tokens=update.forced_prefix_tokens, reasoning_prefilled=update.reasoning_prefilled,
-                                load_id=update.load_id, model_id=update.model_id)
-                    # The prompt holding the message has been fed.
-                    if update.prompt_ids:
-                        inserted = None
-                    # The runtime emits prefix metrics only after prefill has
-                    # consumed them. An opening frame or a failed model call
-                    # alone is not evidence that an interruption was inserted.
-                    if forced and update.forced_prefix_tokens and update.metrics:
-                        turn.update(prefix_ids=forced, prefix_text=manager.decode(forced))
-                    if inserts_interruption and not episode.interrupted and update.forced_prefix_tokens and update.metrics:
-                        episode.interrupted = True
-                        episode.intervention_turn = len(episode.turns) - 1
-                        episode.intervention_tokens = episode.sampled_tokens
-                        episode.intervention_attempts = episode.tool_attempts
-                        episode.detail = "Interruption inserted. Watching for a real movement call."
+                turn["seconds"] = time.time() - turn["started_at"]
+                action = finish_response(episode, turn, stop_ids, limit)
+                if action:
+                    actions.append(action)
+                if team:
+                    # A run of one agent says what its response did once the
+                    # round has applied it.
+                    record(turn)
                     yield episode
-                    if episode.stop_requested:
-                        break
-            finally:
-                generator.close()
-            if inserted is not None:
-                withdraw_insert(episode, inserted)
-                inserted = None
-            turn["seconds"] = time.time() - turn["started_at"]
-            finish_turn(episode, turn, stop_ids, limit)
-            record(turn)
+                # A run of one agent keeps a response that finished before the
+                # stop landed; the loop stops before the next one instead.
+                if episode.stop_requested and (team or turn["finish_reason"] == "user_stopped"):
+                    break
+            if episode.phase != "running":
+                break
+            if episode.stop_requested and (team or turn["finish_reason"] == "user_stopped"):
+                episode.phase = "stopped"
+                if team:
+                    discard_round(episode)
+                    episode.detail = (f"Stopped by you during round {episode.rounds + 1}. "
+                                      "Its responses were kept and none of its moves applied.")
+                else:
+                    episode.detail = "Stopped by you. Partial tokens were retained; no partial action executed."
+                    record(turn)
+                break
+            resolve_round(episode, actions)
+            if not team:
+                record(turn)
             if episode.phase in TERMINAL and episode.interrupted and episode.resumed is None:
                 episode.resumed = False if episode.phase not in ("stopped", "error") else None
                 episode.first_move_progress = False if episode.resumed is False else None
@@ -1188,6 +1557,8 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                     abandon_closure(episode)
                     abandon_insert(episode)
             autosave()
+            if team:
+                episode.viewing, episode.selected_turn = episode.rounds - 1, None
             yield episode
             if episode.phase in TERMINAL:
                 break
@@ -1195,7 +1566,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                 continue
             if single_step or episode.pause_requested:
                 episode.phase = "paused"
-                episode.detail += " Paused before the next response."
+                episode.detail += f" Paused before the next {step}."
                 break
             time.sleep(.25)
     except GeneratorExit:
@@ -1206,7 +1577,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
         # The panel says this too, but the panel is gone by the time anyone
         # asks, and a failure inside generation is what a log read after a
         # memory kill is looking for.
-        logger.exception("Run %s failed while generating", episode.run_id)
+        logger.exception("%s %s failed while generating", "Team run" if team else "Run", episode.run_id)
         episode.phase, episode.detail = "error", f"{type(exc).__name__}: {exc}"
     finally:
         # A model call that failed before feeding its prompt.
@@ -1216,9 +1587,16 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             count = max(0, len(turn["metrics"]) - turn["forced_prefix_tokens"])
             episode.sampled_tokens += count
             turn.update(sampled_tokens=count, tokens_cumulative=episode.sampled_tokens, finish_reason=episode.phase)
+            if team:
+                turn["outcome"] = "not_applied"
             # Only a turn no other path finalized reaches here, so this cannot
             # write a second line for a response already recorded.
             record(turn)
+        if team:
+            # A failure or a viewer hanging up mid-round never reaches the
+            # round's resolution either, so the teammates that already
+            # answered are marked the way a stop marks them.
+            discard_round(episode)
         with episode.lock:
             episode.busy = False
             # Before the autosave, so the file records the closure this run
@@ -1231,9 +1609,14 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             autosave()
             if autosave_error is not None:
                 episode.warn_autosave(autosave_error)
-        logger.info("Run %s %s after %s responses and %s sampled tokens, %s moves: %s",
-                    episode.run_id, episode.phase, len(episode.turns), episode.sampled_tokens,
-                    episode.moves, episode.detail)
+        if team:
+            logger.info("Team run %s %s after %s rounds, %s responses and %s sampled tokens, %s moves: %s",
+                        episode.run_id, episode.phase, episode.rounds, len(episode.turns), episode.sampled_tokens,
+                        episode.moves, episode.detail)
+        else:
+            logger.info("Run %s %s after %s responses and %s sampled tokens, %s moves: %s",
+                        episode.run_id, episode.phase, len(episode.turns), episode.sampled_tokens,
+                        episode.moves, episode.detail)
     yield episode
 
 
@@ -1466,15 +1849,21 @@ def validate_history(episode):
 def from_payload(data, read_prompt=None):
     """A saved run, checked against itself, ready to replay.
 
-    ``read_prompt`` is handed to :func:`validate_inserts` for a run carrying
-    inserted messages.
+    A team run is read by :func:`team_from_payload`. ``read_prompt`` is handed
+    to :func:`validate_inserts` for a run carrying inserted messages.
     """
+    if isinstance(data, dict) and data.get("format") == TEAM_FORMAT:
+        return team_from_payload(data)
     if not isinstance(data, dict) or data.get("format") not in (FORMAT, CHANGING_FORMAT, INSERT_FORMAT):
         raise ValueError("Choose a ChatLab maze run JSON file.")
     if not re.fullmatch(r"[a-f0-9]{32}", str(data.get("run_id", ""))):
         raise ValueError("Invalid run identifier.")
     if not isinstance(data.get("maze"), dict) or not isinstance(data.get("config"), dict):
         raise ValueError("The run is missing its map or its configuration.")
+    # A team is saved in a format of its own, so a count here would read one
+    # agent's record as a team's.
+    if "agents" in data["config"]:
+        raise ValueError(f"A team run has to be recorded as {TEAM_FORMAT}.")
     inserted = data["format"] == INSERT_FORMAT
     # An insertion shifts the context of every response after it, so a run
     # carrying one is only read under the format that says so.
@@ -1536,5 +1925,129 @@ def from_payload(data, read_prompt=None):
     result.position = position
     if inserted:
         validate_inserts(result, read_prompt)
+    # A response that ended before it could be read never finished its round.
+    result.rounds = sum(turn.get("finish_reason") in ("stop", "length", "incomplete_stream") for turn in result.turns)
     result.replay_only = True
+    return result
+
+
+def team_from_payload(data):
+    """A saved team run, rebuilt for replay from the responses it records.
+
+    Nothing the run derived is taken as written. Every recorded response is
+    read again through the rules that read it live, round by round, and the
+    moves, messages, histories, positions, statuses, counters and outcome that
+    produces are compared with the file's. A file that disagrees anywhere
+    describes a run these responses could not have made, and is refused.
+    """
+    if not isinstance(data, dict) or data.get("format") != TEAM_FORMAT:
+        raise ValueError("Choose a ChatLab maze team run JSON file.")
+    if not re.fullmatch(r"[a-f0-9]{32}", str(data.get("run_id", ""))):
+        raise ValueError("Invalid run identifier.")
+    if not isinstance(data.get("maze"), dict) or not isinstance(data.get("config"), dict):
+        raise ValueError("The run is missing its map or its configuration.")
+    # Checked here as well as by the team's own rules, because a count of one
+    # would otherwise be read as a run of one agent rather than refused.
+    count = data["config"].get("agents")
+    if type(count) is not int or not 2 <= count <= MAX_AGENTS:
+        raise ValueError(f"A team has 2 to {MAX_AGENTS} agents.")
+    result = Episode(Maze.from_dict(data["maze"]), data["config"])
+    turns, rounds = data.get("turns"), data.get("rounds")
+    if type(rounds) is not int or not 0 <= rounds <= result.config["round_limit"]:
+        raise ValueError("The run's round count must be within its round limit.")
+    if not isinstance(turns, list) or any(
+            not isinstance(t, dict) or type(t.get("agent")) is not int or not 0 <= t["agent"] < len(result.agents)
+            or type(t.get("round")) is not int or not isinstance(t.get("text"), str)
+            or not isinstance(t.get("metrics"), list) or not all(isinstance(m, dict) and type(m.get("token_id")) is int
+                                                                 for m in t["metrics"])
+            or not isinstance(t.get("finish_reason"), str) or t.get("forced_prefix_tokens", 0) != 0 for t in turns):
+        raise ValueError("Each saved response needs its agent, round, text, tokens and finish reason.")
+    by_round = {}
+    for turn in turns:
+        by_round.setdefault(turn["round"], []).append(turn)
+    if [t["round"] for t in turns] != sorted(t["round"] for t in turns) or set(by_round) - set(range(rounds + 1)) \
+            or set(range(rounds)) - set(by_round):
+        raise ValueError("The saved responses are not in round order.")
+    derived = {"event", "outcome", "sampled_tokens", "tokens_cumulative"}
+    for round_index in range(rounds + 1):
+        if round_index not in by_round:
+            continue
+        if result.phase in TERMINAL:
+            raise ValueError("The run records responses after it had ended.")
+        moving = [i for i, agent in enumerate(result.agents) if agent["status"] == "active"]
+        asked = [t["agent"] for t in by_round[round_index]]
+        resolved = round_index < rounds
+        if asked != moving if resolved else asked != moving[:len(asked)]:
+            raise ValueError("A round asks agents other than the ones still moving, in their order.")
+        # The caps the live run set for this round, which no response in it
+        # could have sampled past.
+        caps = result.response_caps(moving) or {}
+        actions = []
+        for saved in by_round[round_index]:
+            limit = caps.get(saved["agent"], 0)
+            if resolved and saved["finish_reason"] not in ("stop", "length", "incomplete_stream"):
+                raise ValueError("A response in a finished round ends in a way no finished round records.")
+            if limit <= 0 or len(saved["metrics"]) > limit:
+                raise ValueError("A response holds more tokens than its round allowed each agent.")
+            # finish_response names the reason from the tokens, so the tokens
+            # have to be ones that reason could have been named from.
+            count = len(saved["metrics"])
+            if {"stop": count == 0, "length": count != limit, "incomplete_stream": count >= limit}.get(
+                    saved["finish_reason"], False):
+                raise ValueError("A response records a finish reason its tokens could not have produced.")
+            if saved.get("position_before") != list(result.agents[saved["agent"]]["position"]):
+                raise ValueError("A response records a starting position its agent was not in.")
+            if result.config.get("steering") is None:
+                if "steered" in saved:
+                    raise ValueError("A run without a steering vector cannot mark responses as steered.")
+            else:
+                expected = result.steers_next(saved["agent"])
+                never_generated = (saved is turns[-1] and not saved["metrics"]
+                                   and saved["finish_reason"] in ("user_stopped", "stopped"))
+                flag = saved.get("steered")
+                if type(flag) is not bool or (flag != expected and not (expected and never_generated)):
+                    raise ValueError("A response's steered flag does not match its agent's steering trigger.")
+            turn = copy.deepcopy({key: value for key, value in saved.items() if key not in derived})
+            result.turns.append(turn)
+            action = take_action(result, turn, len(result.turns) - 1)
+            if action:
+                actions.append(action)
+        if resolved:
+            resolve_round(result, actions)
+        else:
+            discard_round(result)
+    if result.phase in TERMINAL:
+        if data.get("phase") != result.phase or len(by_round) > rounds:
+            raise ValueError("The run reports an outcome other than the one its responses reach.")
+    else:
+        phase = data.get("phase")
+        moving = [i for i, agent in enumerate(result.agents) if agent["status"] == "active"]
+        starved = bool(moving) and result.response_caps(moving) is None
+        if phase not in ("ready", "running", "paused", "stopped", "error", "budget") \
+                or (phase == "ready" and turns) or (phase == "budget" and not starved):
+            raise ValueError("The run reports an outcome other than the one its responses reach.")
+        result.phase = phase
+        if isinstance(data.get("detail"), str):
+            result.detail = data["detail"]
+    saved_agents = data.get("agents")
+    rebuilt = json.loads(json.dumps(result.agents))
+    checks = {"responses": (turns, result.turns), "moves": (data.get("events"), result.events),
+              "messages": (data.get("mail"), result.mail), "agents": (saved_agents, rebuilt),
+              "sampled-token count": (data.get("sampled_tokens"), result.sampled_tokens),
+              "call count": (data.get("tool_attempts"), result.tool_attempts)}
+    for name, (recorded, replayed) in checks.items():
+        if json.loads(json.dumps(recorded)) != json.loads(json.dumps(replayed)):
+            raise ValueError(f"The run's {name} do not match what its responses produce."
+                             if name.endswith("s") else f"The run's {name} does not match what its responses produce.")
+    result.rounds = rounds
+    # A live run refuses to continue under another load, so every response
+    # that reached the model names the load the run does.
+    for key in ("model_id", "load_id"):
+        if any(key in turn and turn[key] != data.get(key) for turn in turns):
+            raise ValueError("The run names a model other than the one its responses were generated by.")
+    for key in ("run_id", "model_id", "load_id", "created_at"):
+        if key in data:
+            setattr(result, key, data[key])
+    result.replay_only = True
+    result.viewing, result.selected_turn = -1, None
     return result
