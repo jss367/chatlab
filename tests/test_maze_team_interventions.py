@@ -5,7 +5,7 @@ import unittest
 
 from chatlab.extensions.maze_experiments.maze import Maze
 from chatlab.extensions.maze_experiments.runner import Episode, context_messages, from_payload, stream_episode
-from chatlab.extensions.maze_experiments.team_views import team_board, team_status
+from chatlab.extensions.maze_experiments.team_views import positions_after, team_board, team_status
 from maze_support import Manager, call
 
 CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
@@ -35,6 +35,22 @@ def reply_state(manager, call_index):
 
 
 class TeamSuppliedMovesTests(unittest.TestCase):
+    def test_the_board_includes_supplied_paths_before_the_first_round_and_in_replay(self):
+        ep = team(supplied_moves=2)
+        initial = team_board(ep)
+        self.assertEqual(initial.count('<line '), 4)
+        for name in ep.names:
+            self.assertIn(f"{name} at row 0, column 2", initial)
+        list(stream_episode(ep, Manager([step("east")] * 4)))
+        for run in (ep, from_payload(saved(ep))):
+            for round_index, column, lines in ((-1, 2, 4), (0, 3, 6), (1, 4, 8)):
+                with self.subTest(replay=run.replay_only, round=round_index):
+                    self.assertEqual(positions_after(run, round_index), [(0, column)] * 2)
+                    board = team_board(run, round_index)
+                    self.assertEqual(board.count('<line '), lines)
+                    for name in run.names:
+                        self.assertIn(f"{name} at row 0, column {column}", board)
+
     def test_every_agent_starts_after_the_same_supplied_moves_told_as_itself(self):
         ep = team(supplied_moves=2, communication=True)
         self.assertEqual([agent["position"] for agent in ep.agents], [(0, 2), (0, 2)])
@@ -199,6 +215,32 @@ class TeamInterruptionTests(unittest.TestCase):
         self.assertEqual([agent["status"] for agent in ep.agents], ["not_recovered", "arrived"])
         self.assertEqual(ep.phase, "budget")
         self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+
+    def test_manual_interruption_provenance_requires_an_eligible_queued_agent(self):
+        ep = team(interruption_text="Distracted", interrupt_after=9, interrupt_agents=[1])
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        # A run can report an intervention that left no mark: a message queued
+        # and withdrawn when its response was never generated leaves none.
+        unmarked = saved(ep)
+        unmarked["manual_intervention"] = True
+        self.assertTrue(from_payload(unmarked).manual_intervention)
+
+        ep.request_interruption(1)
+        # A request can be saved before any response has read it.
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        for clear_eligible in (False, True):
+            with self.subTest(clear_eligible=clear_eligible):
+                forged = saved(ep)
+                forged["agents"][0]["interrupt_next"] = True
+                if clear_eligible:
+                    forged["agents"][1]["interrupt_next"] = False
+                with self.assertRaisesRegex(ValueError, "queued interruption"):
+                    from_payload(forged)
+        # Blank text also makes a live interruption request impossible.
+        forged = saved(ep)
+        forged["config"]["interruption_text"] = "   "
+        with self.assertRaisesRegex(ValueError, "queued interruption"):
+            from_payload(forged)
 
     def test_a_shared_budget_that_cannot_start_a_round_scores_a_pending_recovery_as_no_return(self):
         # Five tokens for the whole team: a round of two-token responses leaves
