@@ -112,6 +112,18 @@ class TeamForkTests(unittest.TestCase):
         later = fork(ep, 5, 2, "x", Manager([]))
         self.assertTrue(later.agents[1]["interrupt_next"])
 
+    def test_a_fork_that_fails_before_it_regenerates_saves_a_run_that_reads_back(self):
+        ep = two_rounds()
+        forked = fork(ep, 3, 0, "x", Manager([]))
+        # Another load is in memory by the time regeneration starts.
+        moved = Manager([step("east")])
+        moved.load_id = "test/model#2"
+        with tempfile.TemporaryDirectory() as directory:
+            list(stream_episode(forked, moved, save_dir=Path(directory)))
+            written = json.loads((Path(directory) / f"{forked.run_id}.json").read_text())
+        self.assertEqual(forked.phase, "error")
+        self.assertEqual(from_payload(written).phase, "error")
+
     def test_a_team_run_saved_as_team_1_can_be_forked(self):
         # A chatlab-maze-team-1 file's responses record no prefix fields.
         ep = team()
