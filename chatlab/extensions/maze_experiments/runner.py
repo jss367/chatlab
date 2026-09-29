@@ -535,6 +535,7 @@ class Episode:
                            "Stopped by you. This is not scored as model abandonment.")
             abandon_closure(self)
             abandon_insert(self)
+            abandon_fork(self)
             if save_dir:
                 try:
                     self.save(save_dir)
@@ -733,6 +734,23 @@ def withdraw_insert(episode, before, index=0):
         episode.agents[index]["messages"] = before
     logger.warning("Run %s withdrew the %s before %s %s: that response was never generated", episode.run_id,
                    withdrawn["channel"], "round" if episode.team else "response", withdrawn[episode.boundary_key] + 1)
+
+
+def abandon_fork(episode):
+    """Take back what a fork set up for a regeneration that will now never run. The caller holds the lock.
+
+    A fork lands the message that went in before its edited response, and
+    leaves that response's round open with the teammates it kept. Ended before
+    the response is generated, neither happened as far as the record goes: no
+    prompt read the message, and the round never resolved, so its kept
+    responses are marked not applied as a stopped round's are.
+    """
+    if episode.edit_insert is not None:
+        (index, before), episode.edit_insert = episode.edit_insert, None
+        withdraw_insert(episode, before, index)
+    if episode.open_round is not None:
+        episode.open_round = None
+        discard_round(episode)
 
 
 def abandon_insert(episode):
@@ -1876,6 +1894,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             if episode.phase in TERMINAL:
                 abandon_closure(episode)
                 abandon_insert(episode)
+                abandon_fork(episode)
             if session is None:
                 manager.close()
             autosave()
@@ -2544,13 +2563,15 @@ def team_from_payload(data, read_prompt=None):
             raise ValueError(f"The run's {name} do not match what its responses produce."
                              if name.endswith("s") else f"The run's {name} does not match what its responses produce.")
     # A fork names the edit it was made by, which its edited response records
-    # too; a fork of a fork keeps the earlier edit on the response it made.
+    # too; a fork of a fork keeps the earlier edit on the response it made. A
+    # fork stopped before it regenerated names the response it never reached.
     token_edit = data.get("token_edit")
-    if token_edit is not None and (legacy or not manual or not isinstance(token_edit, dict)
-                                   or type(token_edit.get("turn")) is not int
-                                   or not 0 <= token_edit["turn"] < len(turns)
-                                   or turns[token_edit["turn"]].get("token_edit") != token_edit):
-        raise ValueError("The run's token edit is not one its edited response records.")
+    if token_edit is not None:
+        at = token_edit.get("turn") if isinstance(token_edit, dict) else None
+        recorded = type(at) is int and 0 <= at < len(turns) and turns[at].get("token_edit") == token_edit
+        unreached = at == len(turns) and result.phase in ("stopped", "paused")
+        if legacy or not manual or not (recorded or unreached):
+            raise ValueError("The run's token edit is not one its edited response records.")
     if token_edit is None and any("token_edit" in turn for turn in turns):
         raise ValueError("A run with a token-edited response names the edit it was made by.")
     result.rounds, result.manual_intervention, result.token_edit = rounds, manual, token_edit

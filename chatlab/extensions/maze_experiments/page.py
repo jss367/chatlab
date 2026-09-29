@@ -106,6 +106,11 @@ def runs_dir(context):
 def export_run(ep, directory):
     if ep.busy:
         raise gr.Error("Pause or stop the episode before exporting. Completed responses are also autosaved.")
+    # A fork holds what its edited response is about to read until that
+    # response is generated, and a file written in between would record a
+    # message no prompt read, or a round that never resolved.
+    if ep.edit_insert is not None or ep.open_round is not None:
+        raise gr.Error("Generate the edited response before exporting this fork. Stopping it discards the edit.")
     if not ep.replay_only:
         try:
             ep.save(directory)

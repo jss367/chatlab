@@ -1,9 +1,14 @@
 """Forking a team at one token of one agent's response."""
 import copy
 import json
+import tempfile
 import unittest
+from pathlib import Path
+
+import gradio as gr
 
 from chatlab.extensions.maze_experiments.maze import Maze
+from chatlab.extensions.maze_experiments.page import export_run
 from chatlab.extensions.maze_experiments.runner import (Episode, context_messages, fork_token_edit, from_payload,
                                                         stream_episode)
 from maze_support import Manager, call
@@ -117,6 +122,24 @@ class TeamForkTests(unittest.TestCase):
         self.assertEqual([t.get("outcome") for t in forked.turns[2:]], ["not_applied", "not_applied"])
         self.assertEqual([a["position"] for a in forked.agents], [(0, 1), (0, 1)])
         self.assertEqual(saved(from_payload(saved(forked))), saved(forked))
+
+
+    def test_a_prepared_fork_stopped_before_it_regenerates_saves_a_run_that_reads_back(self):
+        # Forked at agent-2's round-2 response: agent-1's is kept in an open
+        # round, and the message agent-2 read before it is landed again.
+        ep = two_rounds()
+        forked = fork(ep, 3, 0, "x", Manager([]))
+        self.assertIsNotNone(forked.open_round)
+        self.assertIsNotNone(forked.edit_insert)
+        with self.assertRaisesRegex(gr.Error, "Generate the edited response before exporting"):
+            export_run(forked, Path(tempfile.mkdtemp()))
+        with tempfile.TemporaryDirectory() as directory:
+            forked.request_stop(Path(directory))
+            written = json.loads((Path(directory) / f"{forked.run_id}.json").read_text())
+        self.assertEqual((forked.open_round, forked.edit_insert), (None, None))
+        self.assertEqual(forked.turns[2]["outcome"], "not_applied")
+        self.assertNotIn("context_inserts", forked.config)
+        self.assertEqual(from_payload(written).phase, "stopped")
 
 
 if __name__ == "__main__":

@@ -562,6 +562,13 @@ class ForkTests(unittest.TestCase):
         self.assertEqual(fork.messages, context_messages(replay, 1)[:-1])
         self.assertEqual(from_payload(json.loads(json.dumps(fork.payload()))).phase, "stopped")
 
+    def test_a_fork_stopped_while_idle_takes_back_the_message_before_its_edit(self):
+        replay, fork, _, _ = self.forked(hand_built(note("user")), 1, "west")
+        fork.request_stop()
+        self.assertNotIn("context_inserts", fork.config)
+        self.assertEqual(fork.messages, context_messages(replay, 1)[:-1])
+        self.assertEqual(from_payload(json.loads(json.dumps(fork.payload()))).phase, "stopped")
+
     def test_a_fork_later_than_the_message_replays_it_at_its_own_boundary(self):
         payload = hand_built(note(before_turn=0, position=(0, 1)), moves=("east", "east"))
         replay, fork, manager, suffix = self.forked(payload, 1, "west")
