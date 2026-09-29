@@ -41,10 +41,10 @@ def agent_color(k):
 
 
 def positions_after(ep, index):
-    """Where every agent stood after round ``index``, -1 being the start."""
+    """Where every agent stood after round ``index``, -1 being after the supplied moves."""
     positions = [ep.maze.start] * len(ep.agents)
     for event in ep.events:
-        if event["accepted"] and event["round"] <= index:
+        if event["accepted"] and (event.get("source") == "supplied" or event["round"] <= index):
             positions[event["agent"]] = tuple(event["after"])
     return positions
 
@@ -88,7 +88,7 @@ def team_board(ep, index=None, reveal=False):
     # agents so that no path leaves its own cells.
     offsets = [((k % 2) * 2 - 1) * 5 * (k // 2 % 4 + 1) if len(ep.agents) > 1 else 0 for k in range(len(ep.agents))]
     for event in ep.events:
-        if event["accepted"] and event["round"] <= index:
+        if event["accepted"] and (event.get("source") == "supplied" or event["round"] <= index):
             k = event["agent"]
             (x1, y1), (x2, y2) = center(event["before"]), center(event["after"])
             d = offsets[k]
@@ -211,23 +211,16 @@ def as_text(value):
 
 
 def statuses_after(ep, index):
-    """Each agent's status as of round ``index``, so a replay's start is not told how it ended."""
-    statuses = ["active"] * len(ep.agents)
-    spent = [0] * len(ep.agents)
+    """Each agent's status as of round ``index``, so a replay's start is not told how it ended.
+
+    An agent leaves the run in the round of its last response, so its final
+    status holds from that round on and it was moving before.
+    """
+    last = {}
     for turn in ep.turns:
-        if turn["round"] > index:
-            continue
-        spent[turn["agent"]] += turn.get("sampled_tokens", 0)
-        event = turn.get("event")
-        if event and event["arrived"]:
-            statuses[turn["agent"]] = "arrived"
-        elif turn.get("outcome") in ("no_call", "cut_off"):
-            statuses[turn["agent"]] = "abandoned" if turn["outcome"] == "no_call" else "cut_off"
-    limit = ep.config.get("agent_token_budget")
-    if limit is not None:
-        statuses = ["out_of_tokens" if status in ("active", "cut_off") and used >= limit else status
-                    for status, used in zip(statuses, spent)]
-    return statuses
+        last[turn["agent"]] = turn["round"]
+    return [agent["status"] if agent["status"] != "active" and last.get(k, index + 1) <= index else "active"
+            for k, agent in enumerate(ep.agents)]
 
 
 def mail_text(ep):
