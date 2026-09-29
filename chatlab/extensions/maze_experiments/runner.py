@@ -2499,6 +2499,9 @@ def team_from_payload(data, read_prompt=None):
             if type(queued) is not bool or (queued and not manual):
                 raise ValueError("An agent's queued interruption is not one anyone asked for.")
             if queued:
+                if (index not in targeted(result.config, "interrupt_agents", len(result.agents))
+                        or not result.config.get("interruption_text", "").strip()):
+                    raise ValueError("An agent's queued interruption is not one this run could request.")
                 queued_agents.add(index)
     turns, rounds = data.get("turns"), data.get("rounds")
     if type(rounds) is not int or not 0 <= rounds <= result.config["round_limit"]:
