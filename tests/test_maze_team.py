@@ -2,6 +2,7 @@ import json
 import re
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -545,8 +546,17 @@ class TeamPageTests(unittest.TestCase):
                 list(callbacks["step_forward"].fn(ep, False, session))
                 interrupt(ep, 1)
                 self.assertEqual([a["interrupt_next"] for a in ep.agents], [False, True])
-                callbacks["queue_message"].fn(ep, "tool_note", "Keep going.", "", "", 0)
+                with mock.patch("chatlab.extensions.maze_experiments.page.gr.Info") as told:
+                    callbacks["queue_message"].fn(ep, "tool_note", "Keep going.", "", "", 0)
+                self.assertIn("before its next response", told.call_args[0][0])
                 self.assertEqual(ep.agents[0]["insert_next"]["text"], "Keep going.")
+                # Queued once a round has begun, it says it waits for the next round.
+                ep.busy = ep.round_open = True
+                with mock.patch("chatlab.extensions.maze_experiments.page.gr.Info") as told:
+                    callbacks["queue_message"].fn(ep, "tool_note", "Later.", "", "", 1)
+                self.assertIn("in the next round", told.call_args[0][0])
+                ep.busy = ep.round_open = False
+                ep.agents[1]["insert_next"] = None
                 with self.assertRaisesRegex(gr.Error, "Pick an agent"):
                     callbacks["queue_message"].fn(ep, "user", "Hi.", "", "", 5)
                 list(callbacks["step_forward"].fn(ep, False, session))

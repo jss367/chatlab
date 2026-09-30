@@ -1438,8 +1438,15 @@ def _build_page(context):
             logger.warning("Run %s refused a %s: %s", ep.run_id, channel, exc)
             raise gr.Error(str(exc)) from exc
         logger.info("Run %s: a %s goes in before %s's next response", ep.run_id, channel, ep.agents[index]["name"])
-        gr.Info(f"The message goes into {ep.agents[index]['name']}'s context before its next response." if ep.team
-                else "The message goes into the context before the next generated response.")
+        if not ep.team:
+            gr.Info("The message goes into the context before the next generated response.")
+        elif ep.agents[index]["insert_next"]["for_boundary"] > ep.rounds:
+            # Queued once the round had begun, so every agent in it answers
+            # the state it began with and the message waits.
+            gr.Info(f"The message goes into {ep.agents[index]['name']}'s context before its response in the next "
+                    "round. The round being generated began without it.")
+        else:
+            gr.Info(f"The message goes into {ep.agents[index]['name']}'s context before its next response.")
         return status(ep), transport_text(ep), *transport_buttons(ep)
 
     def inspect(ep, show, i, session_id):
