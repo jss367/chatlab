@@ -704,6 +704,29 @@ class SaveLoadTests(unittest.TestCase):
         self.assertEqual(model_messages(edited)[-1], {"role": "assistant", "content": ""})
         self.assertNotIn("token_step_paused", forget_measurements(turns, 3)[-1])
 
+    def test_a_failed_reply_keeps_its_failure_in_the_file(self):
+        failed = dict(make_turn("assistant", "Half"), error="There is no Stream(gpu, 1) in current thread.")
+        turns = [make_turn("user", "one"), failed]
+        restored, _ = from_json(to_json(turns))
+        self.assertEqual(restored[1]["error"], failed["error"])
+        messages, index_map = display_messages(restored)
+        self.assertEqual(index_map, [(0, "content"), (1, "content"), (1, "error")])
+        self.assertEqual(messages[1]["content"], "Half")
+        self.assertIn("Generation failed: There is no Stream(gpu, 1)", messages[2]["content"])
+        # The notice is the screen's; the model reads the reply's text alone.
+        self.assertEqual(model_messages(restored)[-1], {"role": "assistant", "content": "Half"})
+        with self.assertRaises(ValueError):
+            from_json(json.dumps({"format": SAVE_FORMAT, "turns": [
+                {"role": "assistant", "content": "", "error": 3}
+            ]}))
+
+    def test_a_failure_notice_is_escaped(self):
+        empty = dict(make_turn("assistant", ""), error="no <pad> token")
+        messages, index_map = display_messages([empty])
+        # Nothing arrived, so the notice is the reply's only message.
+        self.assertEqual(index_map, [(0, "error")])
+        self.assertIn("no &lt;pad&gt; token", messages[0]["content"])
+
     def test_rejects_a_nonboolean_paused_marker(self):
         for value in ("false", 1, None):
             with self.subTest(value=value), self.assertRaises(ValueError):

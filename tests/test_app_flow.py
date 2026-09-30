@@ -670,8 +670,46 @@ class ChatFlowTests(unittest.TestCase):
 
         runtime.MANAGER = Exploding()
         final = self.last(app.chat("hi", [], *SETTINGS))[-1]
-        self.assertEqual([turn["role"] for turn in final["turns"]], ["user"])
+        # The failed reply stays, to show the failure where it happened...
+        self.assertEqual([turn["role"] for turn in final["turns"]], ["user", "assistant"])
+        self.assertEqual(final["turns"][1]["content"], "")
+        self.assertEqual(final["turns"][1]["error"], "out of memory")
+        self.assertEqual(len(final["chatbot"]), 2)
+        self.assertIn('class="failure"', final["chatbot"][1]["content"])
+        self.assertIn("Generation failed: out of memory", final["chatbot"][1]["content"])
         self.assertIn("out of memory", final["status"])
+        # ...but none of it is fed back to the model.
+        self.assertEqual(model_messages(final["turns"]), [{"role": "user", "content": "hi"}])
+
+    def test_a_failed_reply_leaves_the_chat_ready_to_retry(self):
+        def failing(*_args, **_kwargs):
+            raise RuntimeError("There is no Stream(gpu, 1) in current thread.")
+            yield  # pragma: no cover - makes this a generator
+
+        answer = runtime.MANAGER.generate
+        runtime.MANAGER.generate = failing
+        failed = self.last(app.chat("hi", [], *SETTINGS))[-1]
+        self.assertEqual((failed["send"], failed["stop"]), app.send_stop_buttons(False))
+        self.assertFalse(runtime.MANAGER.busy)
+        self.assertIn("There is no Stream(gpu, 1)", failed["chatbot"][-1]["content"])
+        self.assertIn("Press Retry", failed["chatbot"][-1]["content"])
+
+        runtime.MANAGER.generate = answer
+        # The chatbot's own retry button, pressed on the failure notice.
+        event = gr.RetryData(None, {"index": 1, "value": failed["chatbot"][1]["content"]})
+        retried = self.last(app.retry_message(event, "", failed["turns"], *SETTINGS))[-1]
+        self.assertEqual(
+            [turn["content"] for turn in retried["turns"]], ["hi", "Hello world"]
+        )
+        self.assertNotIn("error", retried["turns"][1])
+        self.assertNotIn("failure", str(retried["chatbot"]))
+
+    def test_a_failure_notice_cannot_be_edited(self):
+        turns = [make_turn("user", "hi"), dict(make_turn("assistant", "Hel"), error="gpu fell over")]
+        event = gr.EditData(None, {"index": 2, "previous_value": "", "value": "anything"})
+        final = self.last(app.edit_message(event, "draft", turns, *SETTINGS))[-1]
+        self.assertEqual(final["turns"], turns)
+        self.assertIn("cannot be edited", final["status"])
 
     def test_prefilled_reasoning_streams_into_the_reasoning_block(self):
         # The OLMo Think template ends the prompt with <think>, so the reply
@@ -730,6 +768,10 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(reply["reasoning"], "Hmm")
         self.assertEqual(reply["content"], "")
         self.assertTrue(reply["reasoning_closed"])
+        self.assertEqual(reply["error"], "gpu fell over")
+        # The reasoning that arrived, then the failure under it.
+        self.assertEqual(final["chatbot"][1]["content"], "Hmm")
+        self.assertIn("Generation failed: gpu fell over", final["chatbot"][2]["content"])
         self.assertIn("gpu fell over", final["status"])
 
 

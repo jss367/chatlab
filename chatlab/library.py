@@ -244,10 +244,11 @@ def parse(payload: str) -> dict:
         # kept as far as it got, and closed, so its reasoning block does not
         # spin for the rest of the next session. One that had produced
         # nothing yet is dropped, as Stop drops it. A completed invisible
-        # token step keeps its assistant slot even without visible text.
+        # token step keeps its assistant slot even without visible text, and
+        # a failed reply keeps the failure it shows.
         if turns and turns[-1]["role"] == "assistant":
             if (turns[-1].get("content") or turns[-1].get("reasoning")
-                    or turns[-1].get("token_step_paused")):
+                    or turns[-1].get("token_step_paused") or turns[-1].get("error")):
                 turns[-1]["reasoning_closed"] = True
             else:
                 turns.pop()

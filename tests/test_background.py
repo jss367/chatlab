@@ -225,7 +225,10 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("poll")
         self.assertFalse(self.manager.busy)
         self.assertEqual(self.state[self.turns._id][0]["content"], "Another conversation")
-        self.assertEqual(len(library.read()["branches"][MAIN_BRANCH]), 1)
+        # The source keeps the failed reply, so going back to it shows why.
+        saved = library.read()["branches"][MAIN_BRANCH]
+        self.assertEqual([turn["role"] for turn in saved], ["user", "assistant"])
+        self.assertEqual(saved[1]["error"], "test inference error")
 
     def test_completion_during_navigation_cannot_be_overwritten_by_its_snapshot(self):
         self.start()
