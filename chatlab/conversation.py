@@ -424,12 +424,13 @@ def model_messages(
             content = f"{THINK_OPEN}\n{reasoning}\n{THINK_CLOSE}\n{content}".strip()
         if not content:
             if turn["role"] == "assistant" and (
-                reasoning or turn.get("token_step_paused")
+                reasoning or turn.get("token_step_paused") or turn.get("error")
             ):
-                # A reasoning-only reply or an invisible token step still owns
-                # an assistant slot in the visible conversation. Keep it empty
-                # so a subsequent Send preserves alternating roles, without
-                # replaying hidden tokens or the display-only pause notice.
+                # A reasoning-only reply, an invisible token step or a reply
+                # that failed before any text still owns an assistant slot in
+                # the visible conversation. Keep it empty so a subsequent Send
+                # preserves alternating roles, without replaying hidden tokens,
+                # the display-only pause notice or the failure notice.
                 messages.append({"role": "assistant", "content": ""})
             continue
         messages.append({"role": turn["role"], "content": content})

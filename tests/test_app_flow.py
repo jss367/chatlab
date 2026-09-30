@@ -678,8 +678,12 @@ class ChatFlowTests(unittest.TestCase):
         self.assertIn('class="failure"', final["chatbot"][1]["content"])
         self.assertIn("Generation failed: out of memory", final["chatbot"][1]["content"])
         self.assertIn("out of memory", final["status"])
-        # ...but none of it is fed back to the model.
-        self.assertEqual(model_messages(final["turns"]), [{"role": "user", "content": "hi"}])
+        # ...but none of it is fed back to the model, which sees only the
+        # empty assistant slot that keeps a later Send's roles alternating.
+        self.assertEqual(
+            model_messages(final["turns"]),
+            [{"role": "user", "content": "hi"}, {"role": "assistant", "content": ""}],
+        )
 
     def test_a_failed_reply_leaves_the_chat_ready_to_retry(self):
         def failing(*_args, **_kwargs):
@@ -703,6 +707,13 @@ class ChatFlowTests(unittest.TestCase):
         )
         self.assertNotIn("error", retried["turns"][1])
         self.assertNotIn("failure", str(retried["chatbot"]))
+
+    def test_a_message_sent_after_an_empty_failure_keeps_roles_alternating(self):
+        failed = [make_turn("user", "hi"), dict(make_turn("assistant", ""), error="out of memory")]
+        final = self.last(app.chat("again", failed, *SETTINGS))[-1]
+        request = model_messages(final["turns"][:3])
+        self.assertEqual([m["role"] for m in request], ["user", "assistant", "user"])
+        self.assertEqual(request[1]["content"], "")
 
     def test_a_failure_notice_cannot_be_edited(self):
         turns = [make_turn("user", "hi"), dict(make_turn("assistant", "Hel"), error="gpu fell over")]

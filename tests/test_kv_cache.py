@@ -212,7 +212,6 @@ class TorchCacheTests(unittest.TestCase):
                 self.manager.read_kv_cache(held, 1)
 
 
-@needs_mlx
 def filled(cache):
     """``cache`` after six single-token steps whose keys and values count 1 to 6.
 
@@ -229,6 +228,7 @@ def filled(cache):
     return MLX_THREAD.run(fill)
 
 
+@needs_mlx
 class MlxCacheTests(unittest.TestCase):
     def test_the_view_matches_the_mlx_cache(self):
         from chatlab.mlx_runtime import MlxEngine
