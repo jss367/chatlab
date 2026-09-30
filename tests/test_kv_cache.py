@@ -11,6 +11,7 @@ from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3ForCau
 from chatlab import charts
 from chatlab import kv_cache
 from chatlab import model_inspection
+from chatlab.mlx_runtime import MLX_THREAD
 from chatlab.kv_cache import CacheLayer
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
@@ -211,6 +212,22 @@ class TorchCacheTests(unittest.TestCase):
                 self.manager.read_kv_cache(held, 1)
 
 
+def filled(cache):
+    """``cache`` after six single-token steps whose keys and values count 1 to 6.
+
+    Filled on the MLX thread the engine reads it on: an array built lazily
+    on another thread cannot be evaluated there (see mlx_runtime.MLX_THREAD).
+    """
+
+    def fill():
+        for position in range(6):
+            step = mx.full((1, 1, 1, 2), float(position + 1))
+            cache.update_and_fetch(step, step)
+        return cache
+
+    return MLX_THREAD.run(fill)
+
+
 @needs_mlx
 class MlxCacheTests(unittest.TestCase):
     def test_the_view_matches_the_mlx_cache(self):
@@ -244,10 +261,7 @@ class MlxCacheTests(unittest.TestCase):
     def test_a_rotating_cache_that_has_wrapped_is_read_in_order(self):
         from chatlab.mlx_runtime import MlxEngine
 
-        cache = RotatingKVCache(max_size=4)
-        for position in range(6):
-            step = mx.full((1, 1, 1, 2), float(position + 1))
-            cache.update_and_fetch(step, step)
+        cache = filled(RotatingKVCache(max_size=4))
         layer = MlxEngine(object(), {}).cache_layer([cache], 0, 6)
 
         self.assertEqual(layer.positions, [2, 3, 4, 5])
@@ -257,10 +271,7 @@ class MlxCacheTests(unittest.TestCase):
         from mlx_lm.models.cache import KVCache
         from chatlab.mlx_runtime import MlxEngine
 
-        cache = KVCache()
-        for position in range(6):
-            step = mx.full((1, 1, 1, 2), float(position + 1))
-            cache.update_and_fetch(step, step)
+        cache = filled(KVCache())
         with mock.patch.object(kv_cache, "MAX_POSITIONS", 3):
             layer = MlxEngine(object(), {}).cache_layer([cache], 0, 6)
 
@@ -273,10 +284,7 @@ class MlxCacheTests(unittest.TestCase):
     def test_a_rotating_cache_keeps_its_numbering_when_cut_short(self):
         from chatlab.mlx_runtime import MlxEngine
 
-        cache = RotatingKVCache(max_size=4, keep=1)
-        for position in range(6):
-            step = mx.full((1, 1, 1, 2), float(position + 1))
-            cache.update_and_fetch(step, step)
+        cache = filled(RotatingKVCache(max_size=4, keep=1))
         engine = MlxEngine(object(), {})
         whole = engine.cache_layer([cache], 0, 6)
         with mock.patch.object(kv_cache, "MAX_POSITIONS", 2):
@@ -293,8 +301,7 @@ class MlxCacheTests(unittest.TestCase):
         from chatlab.mlx_runtime import MlxEngine
 
         cache = QuantizedKVCache(group_size=32, bits=4)
-        step = mx.ones((1, 1, 1, 32))
-        cache.update_and_fetch(step, step)
+        MLX_THREAD.run(lambda: cache.update_and_fetch(*[mx.ones((1, 1, 1, 32))] * 2))
         self.assertEqual(MlxEngine(object(), {}).cache_shapes([cache]), [None])
 
 

@@ -298,18 +298,23 @@ def _capture_mlx(engine, wanted, states):
     import mlx.core as mx
     import torch
 
-    from chatlab.mlx_runtime import _Recorder
+    from chatlab.mlx_runtime import MLX_THREAD, _Recorder
 
     recorder = _Recorder()
     with engine._recording(recorder):
         yield
     hidden = recorder.hidden
-    # The recorder keeps the embedding first, then each block's output.
-    for layer in wanted:
-        if layer + 1 < len(hidden):
-            array = hidden[layer + 1][0].astype(mx.float32)
-            mx.eval(array)
-            states[layer] = torch.from_numpy(np.array(array))
+
+    def read():
+        # The recorder keeps the embedding first, then each block's output.
+        for layer in wanted:
+            if layer + 1 < len(hidden):
+                array = hidden[layer + 1][0].astype(mx.float32)
+                mx.eval(array)
+                states[layer] = torch.from_numpy(np.array(array))
+
+    # The states were recorded on the MLX thread; see mlx_runtime.MLX_THREAD.
+    MLX_THREAD.run(read)
 
 
 def _unembed(engine, layout: Layout, vectors):
@@ -321,16 +326,23 @@ def _unembed(engine, layout: Layout, vectors):
     import torch
 
     if layout.backend == "mlx":
-        import mlx.core as mx
+        from chatlab.mlx_runtime import MLX_THREAD
 
-        array = mx.array(vectors.numpy())[None]
-        logits = engine.read_head(layout.norm(array))[0].astype(mx.float32)
-        mx.eval(logits)
-        return torch.from_numpy(np.array(logits))
+        return torch.from_numpy(MLX_THREAD.run(_unembed_mlx, engine, layout, vectors.numpy()))
     norm_weight = next(layout.norm.parameters())
     head_weight = engine.model.get_output_embeddings().weight
     normed = layout.norm(vectors.to(device=norm_weight.device, dtype=norm_weight.dtype))
     return engine.read_head(normed.to(device=head_weight.device, dtype=head_weight.dtype)).float().cpu()
+
+
+def _unembed_mlx(engine, layout: Layout, vectors: np.ndarray) -> np.ndarray:
+    """:func:`_unembed` for an MLX model, run on the MLX thread."""
+    import mlx.core as mx
+
+    array = mx.array(vectors)[None]
+    logits = engine.read_head(layout.norm(array))[0].astype(mx.float32)
+    mx.eval(logits)
+    return np.array(logits)
 
 
 @dataclass

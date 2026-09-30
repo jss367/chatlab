@@ -340,13 +340,15 @@ def finalize_partial(turns: list[dict]) -> bool:
 
     Returns whether a partial response was worth keeping. Cancelling or failing
     mid-stream can leave a turn whose reasoning block is still marked pending,
-    which would keep the accordion spinning for the rest of the session.
+    which would keep the accordion spinning for the rest of the session. A
+    failed turn is kept even with nothing in it: it is where the failure is
+    shown, beside the message it failed to answer.
     """
 
     if not turns or turns[-1]["role"] != "assistant":
         return False
     if not (turns[-1].get("content") or turns[-1].get("reasoning")
-            or turns[-1].get("token_step_paused")):
+            or turns[-1].get("token_step_paused") or turns[-1].get("error")):
         turns.pop()
         return False
     turns[-1]["reasoning_closed"] = True

@@ -729,9 +729,11 @@ def _stream_reply(
         # Let the caller restore its original transcript on retry/branch.
         if first and isinstance(error, SteeringError):
             raise
-        # The diagnostic only goes to the status line. Storing it as the
-        # assistant turn would feed the failure back to the model next turn.
-        # The traceback goes to the log so the cause is recoverable.
+        # The failure is shown twice: in the status line, and on the reply
+        # itself under whatever it produced first, where a reader watching the
+        # conversation sees it. It is kept apart from the reply's text, which
+        # is what the next request replays, so the model never reads it. The
+        # traceback goes to the log so the cause is recoverable.
         logger.exception("Generation failed")
         if previous_turns is not None:
             yield previous_snapshot(failure_status("Generation failed", str(error)), busy=False)
@@ -744,7 +746,8 @@ def _stream_reply(
         )
         pending["reasoning"] = reasoning
         pending["content"] = answer
-        kept = finalize_partial(turns)
+        pending["error"] = str(error) or type(error).__name__
+        finalize_partial(turns)
         # A failed response is not a response to export, so the trace the
         # opening frame emptied stays empty. What did arrive is still on
         # screen, though, and can be branched from like a stopped response.
@@ -1027,6 +1030,11 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         return
 
     position, part = found
+    if part == "error":
+        yield idle_state(
+            prompt_text, turns, "A failure notice cannot be edited. Press Retry to answer again."
+        )
+        return
     new_value = event.value if isinstance(event.value, str) else str(event.value)
 
     if turns[position]["role"] == "assistant":

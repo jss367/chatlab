@@ -43,6 +43,7 @@ token would make that a multi-megabyte write per token.
 from __future__ import annotations
 
 import copy
+import html
 import json
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -52,6 +53,8 @@ from chatlab.steering import compact as compact_steering, export_assets, import_
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
 REASONING_TITLE = "Reasoning"
+# Leads the notice a failed reply carries under whatever it produced first.
+FAILURE_TITLE = "Generation failed"
 SAVE_FORMAT = "chatlab-conversation-1"
 MAIN_BRANCH = "Main"
 FORK_PREFIX = "Fork"
@@ -330,6 +333,7 @@ def display_messages(
     for position, turn in enumerate(turns or []):
         reasoning = turn.get("reasoning") or ""
         content = turn.get("content") or ""
+        error = turn.get("error") if turn["role"] == "assistant" else None
         if reasoning:
             status = "done" if turn.get("reasoning_closed", True) else "pending"
             messages.append(
@@ -340,15 +344,29 @@ def display_messages(
                 }
             )
             index_map.append((position, "reasoning"))
-        if content or not reasoning:
+        if content or not (reasoning or error):
             if not content and turn.get("token_step_paused"):
                 content = "Paused before visible text."
                 if turn_tokens(turn):
                     content += " Press Next token to continue."
             messages.append({"role": turn["role"], "content": content})
             index_map.append((position, "content"))
+        if error:
+            # A message of its own, after the text the reply did produce, so
+            # editing that text never picks the notice up with it.
+            messages.append({"role": "assistant", "content": failure_notice(error)})
+            index_map.append((position, "error"))
 
     return messages, index_map
+
+
+def failure_notice(error: str) -> str:
+    """What a failed reply shows in the conversation: the failure and what to do."""
+
+    return (
+        f'<div class="failure">{html.escape(f"{FAILURE_TITLE}: {error}")}</div>'
+        "\n\nPress Retry to answer again."
+    )
 
 
 def locate(turns: list[dict] | None, display_index) -> tuple[int, str] | None:
@@ -406,12 +424,13 @@ def model_messages(
             content = f"{THINK_OPEN}\n{reasoning}\n{THINK_CLOSE}\n{content}".strip()
         if not content:
             if turn["role"] == "assistant" and (
-                reasoning or turn.get("token_step_paused")
+                reasoning or turn.get("token_step_paused") or turn.get("error")
             ):
-                # A reasoning-only reply or an invisible token step still owns
-                # an assistant slot in the visible conversation. Keep it empty
-                # so a subsequent Send preserves alternating roles, without
-                # replaying hidden tokens or the display-only pause notice.
+                # A reasoning-only reply, an invisible token step or a reply
+                # that failed before any text still owns an assistant slot in
+                # the visible conversation. Keep it empty so a subsequent Send
+                # preserves alternating roles, without replaying hidden tokens,
+                # the display-only pause notice or the failure notice.
                 messages.append({"role": "assistant", "content": ""})
             continue
         messages.append({"role": turn["role"], "content": content})
@@ -770,6 +789,8 @@ def turn_entries(turns: list[dict] | None) -> list[dict]:
         # still owns an assistant slot after the token metrics are discarded.
         if turn["role"] == "assistant" and turn.get("token_step_paused") is True:
             entry["token_step_paused"] = True
+        if turn["role"] == "assistant" and isinstance(turn.get("error"), str) and turn["error"]:
+            entry["error"] = turn["error"]
         for key, kind in TURN_ORIGIN_FIELDS.items():
             value = turn.get(key)
             # bool is an int to isinstance(), and a True here would be a bug.
@@ -806,6 +827,11 @@ def turns_from_entries(raw_turns) -> list[dict]:
                 raise ValueError("Turn token_step_paused must be a bool.")
             if role == "assistant" and entry["token_step_paused"]:
                 turn["token_step_paused"] = True
+        if "error" in entry:
+            if not isinstance(entry["error"], str):
+                raise ValueError("Turn error must be a string.")
+            if role == "assistant" and entry["error"]:
+                turn["error"] = entry["error"]
         for key, kind in TURN_ORIGIN_FIELDS.items():
             if key not in entry:
                 continue

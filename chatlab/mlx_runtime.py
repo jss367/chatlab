@@ -18,6 +18,16 @@ attention kernel during that same step. What is different is hidden behind
 :class:`MlxEngine`, which answers the same questions
 :class:`torch_engine.TorchEngine` does.
 
+Every MLX array is built and evaluated on one thread, :data:`MLX_THREAD`.
+MLX gives each thread its own stream, and an array still waiting to be
+evaluated can only be evaluated on the thread that built it: anywhere else
+it raises ``There is no Stream(gpu, N) in current thread``. ChatLab reads a
+checkpoint on a load thread, streams each reply from a thread of its own and
+inspects from Gradio's workers, and a model can keep unevaluated arrays that
+``parameters()`` never names - the frequencies of Llama 3 and YaRN rotary
+embeddings, which OLMo 3 uses - so the engine hands its work to that one
+thread rather than letting each caller's thread touch the model.
+
 Imported lazily by :mod:`model_loading`, and only when an MLX repository is
 loaded: mlx installs on Apple silicon alone, and nothing here is needed to
 list the cache or to run a Transformers model.
@@ -29,11 +39,14 @@ import contextlib
 import importlib.util
 import json
 import logging
+import queue
 import re
 import sys
-from collections.abc import Iterator, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass, field
-from functools import cache
+from functools import cache, wraps
 from pathlib import Path
 from typing import Any
 
@@ -245,6 +258,73 @@ def clear_cache() -> None:
         pass
 
 
+class MlxThread:
+    """The one thread every MLX array in the application is built and evaluated on.
+
+    :meth:`run` hands a function to it and waits for the answer, so a caller
+    on any thread gets back what the function returned or the exception it
+    raised, with MLX's own traceback. A call made from the thread itself
+    runs in place, so engine methods that call one another do not wait on
+    themselves. The thread is started by the first call and lives as long as
+    the process: a stream is only ever the thread's while the thread is
+    alive, and one long-lived thread is what keeps a loaded model, a kept
+    inspection cache and the next reply on the same stream.
+
+    Work runs one call at a time, in the order it was handed over. A reply
+    feeds the model a step per call, so a Stop takes effect between steps
+    and never leaves a half-run step behind; the model lock, not this
+    thread, still decides whose steps those are.
+    """
+
+    def __init__(self, name: str = "chatlab-mlx") -> None:
+        self.name = name
+        self._tasks: queue.SimpleQueue = queue.SimpleQueue()
+        self._thread: threading.Thread | None = None
+        self._start_lock = threading.Lock()
+
+    def owns_current_thread(self) -> bool:
+        return self._thread is not None and threading.current_thread() is self._thread
+
+    def run(self, function: Callable[..., Any], /, *args, **kwargs) -> Any:
+        if self.owns_current_thread():
+            return function(*args, **kwargs)
+        with self._start_lock:
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._serve, name=self.name, daemon=True
+                )
+                self._thread.start()
+        future: Future = Future()
+        self._tasks.put((future, function, args, kwargs))
+        return future.result()
+
+    def _serve(self) -> None:
+        while True:
+            future, function, args, kwargs = self._tasks.get()
+            try:
+                result = function(*args, **kwargs)
+            except BaseException as error:  # noqa: BLE001 - raised again by run()
+                future.set_exception(error)
+            else:
+                future.set_result(result)
+            # Not kept until the next call arrives: an exception's traceback
+            # holds the failed step's arrays.
+            del future, function, args, kwargs
+
+
+MLX_THREAD = MlxThread()
+
+
+def on_mlx_thread(function):
+    """Run ``function`` on :data:`MLX_THREAD` whichever thread calls it."""
+
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        return MLX_THREAD.run(function, *args, **kwargs)
+
+    return wrapper
+
+
 def read_mlx_model(local_path: Path) -> tuple[Any, Any, dict[str, Any]]:
     """Read one MLX checkpoint out of ``local_path``: the model, its tokenizer, its config.
 
@@ -264,7 +344,9 @@ def read_mlx_model(local_path: Path) -> tuple[Any, Any, dict[str, Any]]:
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(local_path, local_files_only=True)
-    model, config = load_model(Path(local_path), lazy=False)
+    # Built on the MLX thread, so the arrays ``lazy=False`` leaves unevaluated
+    # belong to the stream every later forward pass runs on.
+    model, config = MLX_THREAD.run(load_model, Path(local_path), lazy=False)
     return model, tokenizer, config
 
 
@@ -274,11 +356,13 @@ class MlxLogits:
     def __init__(self, logits) -> None:
         self.logits = logits
 
+    @on_mlx_thread
     def row(self, index: int) -> np.ndarray:
         import mlx.core as mx
 
         return np.array(self.logits[0, index].astype(mx.float32))
 
+    @on_mlx_thread
     def best(self) -> tuple[np.ndarray, np.ndarray]:
         """Each position's highest-scoring token and its logit, as numpy."""
         import mlx.core as mx
@@ -288,6 +372,7 @@ class MlxLogits:
         mx.eval(ids, values)
         return np.array(ids), np.array(values)
 
+    @on_mlx_thread
     def pinned(self, token_id: int) -> tuple[np.ndarray, np.ndarray]:
         """``token_id``'s rank (1 is best) and logit at each position, as numpy."""
         import mlx.core as mx
@@ -375,11 +460,13 @@ class MlxEngine:
 
     # -- the forward pass ---------------------------------------------------
 
+    @on_mlx_thread
     def new_cache(self):
         from mlx_lm.models.cache import make_prompt_cache
 
         return make_prompt_cache(self.model)
 
+    @on_mlx_thread
     def forward(self, token_ids: Sequence[int], cache, cached: int) -> tuple[MlxLogits, Any]:
         """Feed ``token_ids`` after the ``cached`` tokens already in ``cache``.
 
@@ -421,6 +508,7 @@ class MlxEngine:
             return False
 
     @staticmethod
+    @on_mlx_thread
     def crop(cache, remove: int) -> None:
         from mlx_lm.models.cache import trim_prompt_cache
 
@@ -552,6 +640,7 @@ class MlxEngine:
             for module, function in patched:
                 setattr(module, ATTENTION_FUNCTION, function)
 
+    @on_mlx_thread
     def inspect_step(self, token_id: int, cache, cached: int) -> LensReading:
         """Feed one token and read every layer's prediction and attention.
 
@@ -639,6 +728,7 @@ class MlxEngine:
             arrays.append((keys, values, layer) if keys.shape[2] > 0 else None)
         return arrays
 
+    @on_mlx_thread
     def cache_shapes(self, cache) -> list[LayerShape | None]:
         """What every layer of ``cache`` holds, without copying any of it.
 
@@ -662,6 +752,7 @@ class MlxEngine:
             ))
         return shapes
 
+    @on_mlx_thread
     def cache_layer(self, cache, layer: int, total: int) -> CacheLayer | None:
         """Layer ``layer`` (from 0) of a cache holding ``total`` tokens, in numpy.
 
