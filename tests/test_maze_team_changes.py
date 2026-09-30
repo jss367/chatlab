@@ -2,11 +2,13 @@
 import json
 import unittest
 
+from chatlab.extension_api import TokenInspector
 from chatlab.extensions.maze_experiments.dynamic_maze import changing
 from chatlab.extensions.maze_experiments.maze import Maze
-from chatlab.extensions.maze_experiments.page import prompt_reading
+from chatlab.extensions.maze_experiments.page import prompt_reading, views
 from chatlab.extensions.maze_experiments.runner import Episode, context_messages, from_payload, stream_episode
-from maze_support import Manager, call
+from chatlab.extensions.maze_experiments.team_views import team_board
+from maze_support import Manager, call, scored
 
 ROOM = changing(Maze(("...", "...", "..."), (0, 0), (0, 2)))
 CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
@@ -55,6 +57,24 @@ class TeamClosureTests(unittest.TestCase):
         for agent in ep.agents:
             self.assertEqual(json.loads(agent["messages"][-1]["content"])["grid"], ["...", ".#.", "..."])
         self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+
+    def test_a_round_stopped_after_its_closure_is_drawn_under_the_closed_map(self):
+        ep = team()
+        list(stream_episode(ep, Manager([step("south"), step("south")]), single_step=True))
+        ep.request_closure((1, 1))
+        manager = Manager([step("east"), step("east")])
+        manager.generate = scored(manager.generate)
+        stream = stream_episode(ep, manager)
+        for frame in stream:
+            if len(ep.turns) == 3 and ep.turns[-1]["finish_reason"] == "stop":
+                ep.request_stop()
+        self.assertEqual((ep.phase, ep.rounds), ("stopped", 1))
+        closed = 'fill="#78350f"'
+        # Round 1's board had no closure; the unfinished round 2 began with one.
+        ep.selected_turn = None
+        self.assertNotIn(closed, views(ep, False, TokenInspector().selections(), "s", 0)[0])
+        ep.selected_turn = 2
+        self.assertIn(closed, views(ep, False, TokenInspector().selections(), "s", 0)[0])
 
     def test_a_closure_is_refused_where_it_would_strand_or_crush_an_agent(self):
         ep = team()
@@ -140,6 +160,11 @@ class TeamInsertTests(unittest.TestCase):
         self.assertEqual(ep.config["context_inserts"], [dict(
             before_round=1, agent=1, channel="tool_note", text="The exit is east.", sender=None, position=[0, 1],
             advised_direction="east")])
+        # The board marks where it went in, from the round that read it, with the advice it gave.
+        ring = 'stroke="#db2777" stroke-width="3" stroke-dasharray="4 3"'
+        self.assertNotIn(ring, team_board(ep, 0))
+        self.assertIn(ring, team_board(ep, 1))
+        self.assertIn('fill="#db2777" stroke="#fff"', team_board(ep, 1))
         # A teammate message joins the messages the team already sends each other.
         ep.request_insert("teammate", "Keep going.", sender="coach", index=0)
         list(stream_episode(ep, manager, single_step=True))

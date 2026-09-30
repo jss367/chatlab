@@ -12,10 +12,13 @@ import gradio as gr
 
 from .dynamic_maze import ChangingMaze, changing, maze_at_turn
 from .inserts import CHANNELS
-from .maze import DIRECTIONS, GOAL_MODES, PASSAGES, SYSTEM, TOOLS, default_instruction, generate
+from .maze import DIRECTIONS, GOAL_MODES, PASSAGES, SYSTEM, default_instruction, generate, unavoidable_cells
 from .batch import BatchControl, cut_short, downloads, run_trials
 from .runner import (RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload,
                      insert_outcome, stream_episode)
+from .team import MAX_AGENTS, TEAM_GOALS, format_agents, parse_agents
+from .team_views import (HEADERS as TEAM_HEADERS, MARKDOWN, insert_mark, mail_text, response_line, team_board,
+                         team_history_rows, team_status, team_timeline)
 from .trials import prepare_trial, read_trials
 from chatlab.extension_api import TokenInspector, icon_classes, read_steering_vector
 
@@ -37,63 +40,61 @@ CSS = """
 #maze-page h2 {font-size:16px; letter-spacing:-.02em; margin:0;}
 #maze-page .column {flex-wrap:nowrap;}
 #maze-page .column > * {flex-shrink:0;}
-/* The two modes share the page's height the way the workspace alone had it:
-   the tab row keeps its own, and the open panel takes the rest. */
+/* The workbench and the reasoning check share the page's height the way the
+   workspace alone had it: the tab row keeps its own, and the open panel takes
+   the rest. */
 #maze-modes {flex:1 1 0 !important; min-height:0; display:flex; flex-direction:column;}
 #maze-modes > .tab-wrapper {flex:none;}
 #maze-modes > .tabitem {flex:1 1 0; min-height:0; padding:12px 0 0; border:0;}
 #maze-modes > .tabitem > .column {height:100%; min-height:0;}
-#maze-workspace, #team-workspace {flex:1 1 0 !important; min-height:0; flex-wrap:nowrap; gap:20px;}
-#maze-scenario, #maze-inspector, #team-scenario, #team-inspector {flex:0 0 auto !important; min-width:240px !important; width:26%; max-width:30%; height:100%; overflow:auto; resize:horizontal; padding:0 12px 16px 0; scrollbar-width:thin; overscroll-behavior:contain;}
-#maze-inspector, #team-inspector {width:32%; min-width:280px !important; max-width:34%; padding:0 0 16px 12px; border-left:1px solid var(--border-color-primary);}
-#maze-center, #team-center {flex:1 1 0 !important; min-width:280px !important; min-height:0; height:100%; gap:12px; overflow:auto; scrollbar-width:thin;}
-#maze-board, #team-board {flex:1 1 0 !important; min-height:180px; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
-#maze-board .html-container, #maze-board .prose, #team-board .html-container, #team-board .prose {height:100%; min-height:0; display:flex; flex-direction:column;}
-#maze-board svg, #team-board svg {width:100%; flex:1 1 0; min-height:0; display:block; margin:auto;}
+#maze-workspace {flex:1 1 0 !important; min-height:0; flex-wrap:nowrap; gap:20px;}
+#maze-scenario, #maze-inspector {flex:0 0 auto !important; min-width:240px !important; width:26%; max-width:30%; height:100%; overflow:auto; resize:horizontal; padding:0 12px 16px 0; scrollbar-width:thin; overscroll-behavior:contain;}
+#maze-inspector {width:32%; min-width:280px !important; max-width:34%; padding:0 0 16px 12px; border-left:1px solid var(--border-color-primary);}
+#maze-center {flex:1 1 0 !important; min-width:280px !important; min-height:0; height:100%; gap:12px; overflow:auto; scrollbar-width:thin;}
+#maze-board {flex:1 1 0 !important; min-height:180px; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
+#maze-board .html-container, #maze-board .prose {height:100%; min-height:0; display:flex; flex-direction:column;}
+#maze-board svg {width:100%; flex:1 1 0; min-height:0; display:block; margin:auto;}
 .maze-legend {display:flex; justify-content:center; gap:8px 12px; flex-wrap:wrap; color:#647084; font:11px system-ui; padding-top:10px; flex-shrink:0;}
-#maze-transport, #team-transport {gap:6px; flex-wrap:nowrap;}
-#maze-transport button, #team-transport button {min-width:0; padding:8px 6px; font-size:12px;}
-#maze-transport-status, #team-transport-status {font-size:12px; min-height:42px;}
-#maze-transport-status p, #team-transport-status p {margin:0;}
+#maze-transport {gap:6px; flex-wrap:nowrap;}
+#maze-transport button {min-width:0; padding:8px 6px; font-size:12px;}
+#maze-transport-status {font-size:12px; min-height:42px;}
+#maze-transport-status p {margin:0;}
 #maze-status {font-size:12px;}
 /* A long conversation between agents scrolls rather than squeezing the board. */
-#team-board {min-height:300px;}
-#team-mail {max-height:24vh; overflow:auto; font-size:12px;}
-#maze-tokens, #team-tokens {max-height:32vh; min-height:110px; overflow:auto;}
+#maze-mail {max-height:24vh; overflow:auto; font-size:12px;}
+#maze-tokens {max-height:32vh; min-height:110px; overflow:auto;}
 #maze-token-editor {border:1px solid #c7d2fe; border-radius:12px; padding:12px;}
-#maze-history, #team-history {font-size:12px;}
+#maze-history {font-size:12px;}
 /* The inspector column is as tall as the window and nothing in it grows, so a
    history of a fixed height left the rest of that height empty between the
    table and the panels below it. The table takes the spare height instead, and
    gives it back when the panels open. What scrolls is the table element, whose
    max-height resolves only if every wrapper Gradio puts between it and the
    block, the virtual-table viewport included, has a height to measure. */
-#maze-page #maze-history, #maze-page #team-history {flex:1 1 auto !important; min-height:120px;}
+#maze-page #maze-history {flex:1 1 auto !important; min-height:120px;}
 #maze-history .table-container, #maze-history .table-wrap, #maze-history button,
-#maze-history svelte-virtual-table-viewport, #maze-history svelte-virtual-table-viewport > div,
-#team-history .table-container, #team-history .table-wrap, #team-history button,
-#team-history svelte-virtual-table-viewport, #team-history svelte-virtual-table-viewport > div {height:100%; min-height:0;}
-#maze-history svelte-virtual-table-viewport, #team-history svelte-virtual-table-viewport {display:block;}
-#maze-history table, #team-history table {max-height:100% !important;}
-#maze-history td, #maze-history th, #team-history td, #team-history th {font:12px/1.5 system-ui;}
-#maze-history td, #team-history td {cursor:pointer;}
-#maze-raw textarea, #maze-context textarea, #team-raw textarea, #team-context textarea {font-family:ui-monospace,monospace; font-size:12px;}
-#maze-scenario .form, #maze-inspector .form, #team-scenario .form, #team-inspector .form {min-width:0 !important;}
-#maze-scenario .row, #team-scenario .row {gap:8px;}
-#maze-scenario .row > *, #team-scenario .row > * {min-width:100px !important;}
-#maze-scenario .block, #maze-inspector .block, #team-scenario .block, #team-inspector .block {min-width:0 !important;}
+#maze-history svelte-virtual-table-viewport, #maze-history svelte-virtual-table-viewport > div {height:100%; min-height:0;}
+#maze-history svelte-virtual-table-viewport {display:block;}
+#maze-history table {max-height:100% !important;}
+#maze-history td, #maze-history th {font:12px/1.5 system-ui;}
+#maze-history td {cursor:pointer;}
+#maze-raw textarea, #maze-context textarea {font-family:ui-monospace,monospace; font-size:12px;}
+#maze-scenario .form, #maze-inspector .form {min-width:0 !important;}
+#maze-scenario .row {gap:8px;}
+#maze-scenario .row > * {min-width:100px !important;}
+#maze-scenario .block, #maze-inspector .block {min-width:0 !important;}
 @media(max-width:1100px) {
   #maze-page {padding:16px 12px;}
-  #maze-workspace, #team-workspace {gap:12px;}
-  #maze-scenario, #team-scenario {min-width:210px !important; width:24%; max-width:28%;}
-  #maze-inspector, #team-inspector {min-width:240px !important; width:30%; max-width:32%;}
-  #maze-center, #team-center {min-width:250px !important;}
+  #maze-workspace {gap:12px;}
+  #maze-scenario {min-width:210px !important; width:24%; max-width:28%;}
+  #maze-inspector {min-width:240px !important; width:30%; max-width:32%;}
+  #maze-center {min-width:250px !important;}
 }
 @media(max-width:850px) {
   #maze-page {overflow:auto;}
-  #maze-workspace, #team-workspace {flex:none !important; flex-wrap:wrap;}
-  #maze-center, #team-center {order:-1; flex:1 0 100% !important; height:560px;}
-  #maze-scenario, #maze-inspector, #team-scenario, #team-inspector {flex:1 1 280px !important; width:auto; max-width:none; height:560px; resize:none;}
+  #maze-workspace {flex:none !important; flex-wrap:wrap;}
+  #maze-center {order:-1; flex:1 0 100% !important; height:560px;}
+  #maze-scenario, #maze-inspector {flex:1 1 280px !important; width:auto; max-width:none; height:560px; resize:none;}
 }
 """
 
@@ -122,7 +123,10 @@ def export_run(ep, directory):
     return path
 
 
-def board(ep, index=None, reveal=False, animate=False):
+def board(ep, index=None, reveal=False, animate=False, map_round=None):
+    """The board after response ``index``, or for a team after round ``index`` under the map of ``map_round``."""
+    if ep.team:
+        return team_board(ep, index, reveal, map_round)
     updates = [u for u in ep.config.get("map_updates", ())
                if index is None or u["before_turn"] <= index]
     maze = maze_at_turn(ep.maze, updates, None)
@@ -178,21 +182,7 @@ def board(ep, index=None, reveal=False, animate=False):
     for insert in ep.config.get("context_inserts", ()):
         if index is not None and index < insert["before_turn"]:
             continue
-        x, y = center(insert["position"])
-        parts.append(f'<circle cx="{x}" cy="{y}" r="21" stroke="#db2777" stroke-width="3" stroke-dasharray="4 3" fill="none"/>')
-        if insert.get("advised_direction") in DIRECTIONS:
-            dr, dc = DIRECTIONS[insert["advised_direction"]]
-            tip = (x + dc * 38, y + dr * 38)
-            # Haloed in white, because advice pointing back along the path
-            # would otherwise sit on the path's own line.
-            line = f'x1="{x + dc * 21}" y1="{y + dr * 21}" x2="{tip[0] - dc * 7}" y2="{tip[1] - dr * 7}" stroke-linecap="round"'
-            parts.append(f'<line {line} stroke="#fff" stroke-width="7"/><line {line} stroke="#db2777" stroke-width="3"/>')
-            # The head as a triangle of its own, so the board needs no marker
-            # definition whose id another board on the page could share.
-            base = (tip[0] - dc * 10, tip[1] - dr * 10)
-            corners = [tip, (base[0] + dr * 6, base[1] + dc * 6), (base[0] - dr * 6, base[1] - dc * 6)]
-            parts.append(f'<polygon points="{" ".join(f"{px},{py}" for px, py in corners)}" fill="#db2777" '
-                         'stroke="#fff" stroke-width="1.5"/>')
+        parts.append(insert_mark(*center(insert["position"]), insert.get("advised_direction")))
     x, y = center(position)
     motion = ""
     # Only the displayed response's own move animates. A response that was
@@ -228,11 +218,44 @@ def scenario_values(ep):
     return (maze.size, maze.seed, len(maze.route()) - 1, gr.skip() if openness is None else openness,
             config.get("supplied_moves", 0), config.get("interrupt_after", 0), text,
             config.get("prefix_tokens", 0), config.get("temperature", .7), config.get("sampling_seed", 0),
-            config.get("per_turn_tokens", 1024), config.get("token_budget", 8192), config.get("attempt_budget", 32),
+            config.get("per_turn_tokens", 1024), agent_budget(ep), attempt_limit(ep),
             config["recovery_tokens"], config["recovery_attempts"],
             mode, gr.update(value=config["goal_hint"], visible=mode == "hint"),
             config["system_prompt"], config["instruction"], ep.map_changes,
             "None" if not text else named or "Custom")
+
+
+def agent_budget(ep):
+    """The sampled-token limit each agent of a run had, which a run of one agent calls its own.
+
+    A team run saved under one limit for the whole team offers each agent its
+    even share of it for a new episode.
+    """
+    config = ep.config
+    if not ep.team:
+        return config.get("token_budget", 8192)
+    return config.get("agent_token_budget") or max(1, config["token_budget"] // config["agents"])
+
+
+def attempt_limit(ep):
+    """Each agent's call limit, or for a team without one, its round limit.
+
+    A team agent makes one call a round at most, and a new episode leaves out
+    a call limit the round limit reaches first, so this reads back as the
+    team without one it was.
+    """
+    if "attempt_budget" in ep.config or not ep.team:
+        return ep.config.get("attempt_budget", 32)
+    return ep.config["round_limit"]
+
+
+def team_values(ep):
+    """The team controls in the order `team_controls` lists them, a run of one agent filling them as one."""
+    config = ep.config
+    return (len(ep.agents), config.get("communication", True), config.get("team_goal", "any"),
+            config.get("round_limit", 24), format_agents(config.get("interrupt_agents"), len(ep.agents)),
+            format_agents(config.get("steer_agents"), len(ep.agents)), config.get("required_checkpoint") is not None,
+            gr.update(visible=ep.team))
 
 
 STEER_MODES = {"off": "Off", "cell": "When the character reaches a cell", "moves": "After accepted moves"}
@@ -267,9 +290,15 @@ def checkpoint_values(ep):
     vector, when = config.get("steering"), config.get("steer_when") or {}
     off = vector is None or not vector.get("enabled", True)
     mode = "off" if off else "cell" if "cell" in when else "moves"
+    # A team steering at its generated checkpoint was set up with the cell
+    # left blank, which is what steers at whichever checkpoint a new maze
+    # generates, so the box is left blank again rather than pinned to this one.
+    cell = when.get("cell")
+    if cell is not None and cell == config.get("required_checkpoint"):
+        cell = None
     return (cell_text(config.get("waypoint")), vector,
             vector["strength"] if vector else 1.0, vector["layer"] if vector else 0,
-            mode, cell_text(when.get("cell")), when.get("moves", 3), config.get("steer_responses", 1),
+            mode, cell_text(cell), when.get("moves", 3), config.get("steer_responses", 1),
             vector_note(vector))
 
 
@@ -337,6 +366,8 @@ def edited_prompt(config):
 
 
 def status(ep):
+    if ep.team:
+        return team_status(ep) + map_line(ep) + insert_line(ep)
     partial = 0
     if ep.turns and ep.turns[-1]["finish_reason"] is None:
         t = ep.turns[-1]
@@ -416,11 +447,16 @@ def insert_line(ep):
         if move is None:
             then = "no accepted model move after it" + ("" if ep.phase in TERMINAL else " yet")
         else:
-            then = (f"first model move after it: {move['direction']} in response {move['turn'] + 1}"
+            when = f"round {move['round'] + 1}" if ep.team else f"response {move['turn'] + 1}"
+            then = (f"first model move after it: {move['direction']} in {when}"
                     + (f", which {FOLLOWED[outcome['followed']]}" if outcome["followed"] else ""))
-        parts.append(f"**Inserted before response {insert['before_turn'] + 1}:** "
-                     f"{CHANNELS[insert['channel']]}{sender} · {advice} · {then}")
+        where = (f"for {ep.agents[insert['agent']]['name']} before round {insert['before_round'] + 1}" if ep.team
+                 else f"before response {insert['before_turn'] + 1}")
+        parts.append(f"**Inserted {where}:** {CHANNELS[insert['channel']]}{sender} · {advice} · {then}")
     return "".join(f"\n\n{part}" for part in parts)
+
+
+HEADERS = ["Response", "Position", "Direction", "Result"]
 
 
 def history_rows(ep):
@@ -429,6 +465,8 @@ def history_rows(ep):
     An inserted message has a row of its own between the two responses it
     separates, and selecting it shows the response that read it.
     """
+    if ep.team:
+        return team_history_rows(ep)
     supplied = [e for e in ep.events if e["source"] == "supplied"]
     position = supplied[-1]["after"] if supplied else ep.maze.start
     rows = [(-1, ["Initial / supplied", str(tuple(position)), "—", f"{len(supplied)} supplied moves" if supplied else "Initial position"])]
@@ -453,6 +491,8 @@ def history_rows(ep):
 
 
 def timeline(ep):
+    if ep.team:
+        return team_timeline(ep)
     rows = history_rows(ep)
     viewing = max(-1, min(ep.viewing, len(ep.turns) - 1))
     # The response's own row, never the message row sharing its index.
@@ -462,8 +502,39 @@ def timeline(ep):
     return rows
 
 
+def last_step(ep):
+    """The last step the transport shows: a run of one agent's last response, a team's last finished round."""
+    return ep.rounds - 1 if ep.team else len(ep.turns) - 1
+
+
+def queued_text(ep):
+    """What is queued to land before the next response or round, as the transport names it."""
+    queued = ""
+    for agent in ep.agents:
+        whose = f" for {agent['name']}" if ep.team else ""
+        if agent["interrupt_next"] and not agent["interrupted"]:
+            queued += f" · **Interruption queued{whose}**"
+        if agent["insert_next"]:
+            queued += f" · **{CHANNELS[agent['insert_next']['channel']]} queued{whose}**"
+    if ep.close_next:
+        queued += f" · **Closing ({ep.close_next[0]}, {ep.close_next[1]})**"
+    return queued
+
+
 def transport_text(ep):
-    index = max(-1, min(ep.viewing, len(ep.turns) - 1))
+    index = max(-1, min(ep.viewing, last_step(ep)))
+    if ep.team:
+        mode = "Generating" if ep.busy else "Replaying" if ep.playing else "Paused" if ep.turns else "Ready"
+        if ep.busy and ep.pause_requested:
+            mode = "Pausing after the round"
+        selected = "Start" if index < 0 else f"Round {index + 1} of {ep.rounds}"
+        if ep.replay_only:
+            end = "Saved replay"
+        elif ep.phase in TERMINAL:
+            end = ep.phase.title()
+        else:
+            end = "Live end · Next runs a round" if index == ep.rounds - 1 else "Play continues at the live end"
+        return f"**{mode}** · {selected}{queued_text(ep)}\n\n{end}"
     position = ep.maze.start
     for event in ep.events:
         if event["accepted"] and event.get("turn", -1) <= index:
@@ -478,17 +549,12 @@ def transport_text(ep):
         end = ep.phase.title()
     else:
         end = "Live end · Next generates" if index == len(ep.turns) - 1 else "Play continues at live end"
-    queued = " · **Interruption queued**" if ep.interrupt_next and not ep.interrupted else ""
-    if ep.close_next:
-        queued += f" · **Closing ({ep.close_next[0]}, {ep.close_next[1]})**"
-    if ep.insert_next:
-        queued += f" · **{CHANNELS[ep.insert_next['channel']]} queued**"
-    return f"**{mode}** · {selected} · ({position[0]}, {position[1]}){queued}\n\n{end}"
+    return f"**{mode}** · {selected} · ({position[0]}, {position[1]}){queued_text(ep)}\n\n{end}"
 
 
-def transcript(messages):
+def transcript(messages, tools):
     """The messages and the move tool as they were recorded, with no model to spell them."""
-    parts = [f"[tool schemas]\n{json.dumps(TOOLS, indent=2)}"]
+    parts = [f"[tool schemas]\n{json.dumps(tools, indent=2)}"]
     parts += [f"[{message['role']}]\n{message['content']}" for message in messages]
     return "\n\n".join(parts)
 
@@ -671,10 +737,18 @@ def context_view(ep, models, index=None):
     model is not loaded falls through to the template, which reads the
     messages themselves.
     """
+    if ep.team:
+        # A team's history is its agents', so the pane reads the response
+        # selected in the history and has nothing to read before one is.
+        index = ep.selected_turn if index is None else index
+        if index is None or not 0 <= index < len(ep.turns):
+            return "Select a response in the history to read the context its agent was given.", ""
     index = ep.viewing if index is None else index
     index = max(-1, min(index, len(ep.turns) - 1))
     turn = ep.turns[index] if index >= 0 else {}
     where = "Initial prompt" if index < 0 else f"Response {index + 1}"
+    if ep.team:
+        where = f"Round {turn['round'] + 1} · {html.escape(ep.agents[turn['agent']]['name'])}"
     supplied = turn.get("forced_prefix_tokens") or 0
     tail = (f" A supplied prefix of {supplied:,} tokens followed it, shown under **Supplied text & full response**."
             if supplied else "")
@@ -692,7 +766,7 @@ def context_view(ep, models, index=None):
             return (f"**{where} · as recorded** · {len(ids):,} prompt tokens, decoded"
                     f"{under_load(turn.get('load_id'), load_id)}.{tail}", text)
     messages = context_messages(ep, index)
-    text, load_id, refused = read_through(models.prompt_text, messages, TOOLS)
+    text, load_id, refused = read_through(models.prompt_text, messages, ep.tools)
     if text is not None:
         # Named by the load that spelled this template and by no earlier
         # reading: the load that answered one reading can be gone by the next,
@@ -725,7 +799,24 @@ def context_view(ep, models, index=None):
         aside = unnamed_model(len(ids)) if ids and not recorded else ""
     return (f"**{where} · as recorded, untemplated** · {unspelled(models, refused or failure)}, so the "
             f"{len(messages)} messages and the move tool are shown as the run recorded them. A template adds its own "
-            f"turn markers and writes the tool schemas its own way.{aside}{tail}", transcript(messages))
+            f"turn markers and writes the tool schemas its own way.{aside}{tail}", transcript(messages, ep.tools))
+
+
+def agent_index(ep, target):
+    """The agent an intervention reaches: the one picked, or a run of one agent's own."""
+    if not ep.team:
+        return 0
+    index = int(target or 0)
+    if not 0 <= index < len(ep.agents):
+        raise IndexError("Pick an agent of this run to intervene on.")
+    return index
+
+
+def run_pane_updates(ep):
+    """The panes a team shows and a run of one agent hides, in the order `run_panes` lists them."""
+    return (gr.update(visible=ep.team),
+            gr.update(choices=[(agent["name"], index) for index, agent in enumerate(ep.agents)], value=0,
+                      visible=ep.team))
 
 
 def transport_buttons(ep):
@@ -754,15 +845,39 @@ def stop_replay(ep):
         ep.playing = False
 
 
+def response_choices(ep):
+    """The responses the picker offers, each named as the history names it."""
+    if ep.team:
+        choices = [("Start", -1)]
+        for i, t in enumerate(ep.turns):
+            tags = (" · token edit" if t.get("token_edit") else
+                    " · interruption" if ep.agents[t["agent"]]["intervention_turn"] == i else "")
+            choices.append((f"Round {t['round'] + 1} · {ep.agents[t['agent']]['name']}{tags}"
+                            + (" · steered" if t.get("steered") else ""), i))
+        return choices
+    inserted = {insert["before_turn"] for insert in ep.config.get("context_inserts", ())}
+    return [("Initial / supplied history", -1)] + [
+        (f"Response {i+1}" + (" · token edit" if t.get("token_edit") else " · interruption" if t.get("prefix_ids") else "")
+         + (" · after an inserted message" if i in inserted else "") + (" · steered" if t.get("steered") else ""), i)
+        for i, t in enumerate(ep.turns)]
+
+
+def shown_response(ep, index):
+    """The response a frame shows: a run of one agent's at step ``index``, a team's selected one, or None."""
+    shown = ep.selected_turn if ep.team else index
+    return shown if shown is not None and 0 <= shown < len(ep.turns) else None
+
+
 def views(ep, reveal, selections, session_id, index=None, animate=False):
+    """The frame for step ``index``: a response of a run of one agent, or a team's round with its selected response."""
     if index is None:
-        index = len(ep.turns) - 1
+        index = last_step(ep)
     ep.viewing = index
-    t = ep.turns[index] if 0 <= index < len(ep.turns) else {}
+    shown = shown_response(ep, index)
+    t = ep.turns[shown] if shown is not None else {}
     metrics = t.get("metrics", [])
     forced = t.get("forced_prefix_tokens", 0)
-    stamped, changed = selections.view(session_id, (ep.run_id, id(ep), index), metrics[forced:])
-    inserted = {insert["before_turn"] for insert in ep.config.get("context_inserts", ())}
+    stamped, changed = selections.view(session_id, (ep.run_id, id(ep), -1 if shown is None else shown), metrics[forced:])
     origin = "Inside the template's open reasoning block" if t.get("reasoning_prefilled") else "At the beginning of the assistant response"
     note = (f"**Supplied interruption · {forced} tokens** · {origin}.\n\n" if forced else "No supplied interruption in this response.")
     if not forced and t.get("planned_prefix_ids"):
@@ -770,17 +885,17 @@ def views(ep, reveal, selections, session_id, index=None, animate=False):
     if t.get("token_edit"):
         note = (f"**{'Retained / edited' if forced else 'Pending retained / edited'} prefix · {forced or len(t.get('planned_prefix_ids', []))} tokens** · "
                 "Earlier token IDs and your replacement are supplied as context; only the new continuation counts toward sampled-token limits.")
-    return (board(ep, index, reveal, animate), status(ep), TOKENS.strip(metrics[forced:]),
-            t.get("text", ""), note, t.get("prefix_text") or t.get("planned_prefix_text", ""), timeline(ep), stamped,
-            gr.update(choices=[("Initial / supplied history", -1)] + [(f"Response {i+1}" + (" · token edit" if t.get("token_edit") else " · interruption" if t.get("prefix_ids") else "") + (" · after an inserted message" if i in inserted else "") + (" · steered" if t.get("steered") else ""), i) for i, t in enumerate(ep.turns)], value=index),
+    if ep.team:
+        note = "Select a response in the history to read it." if shown is None else f"{response_line(ep, shown)}\n\n{note}"
+    # A selected team response in a round that never resolved is shown on the
+    # board it was given: the positions the round before left, under the map
+    # its own round began with.
+    unfinished = ep.team and shown is not None and t["round"] >= ep.rounds
+    return (board(ep, index, reveal, animate, t["round"] if unfinished else None), status(ep), TOKENS.strip(metrics[forced:]),
+            t.get("text", ""), note, t.get("prefix_text") or t.get("planned_prefix_text", ""),
+            dict(headers=TEAM_HEADERS if ep.team else HEADERS, data=timeline(ep)), stamped,
+            gr.update(choices=response_choices(ep), value=-1 if shown is None else shown),
             "Select a model-generated token above." if changed else gr.skip(), [] if changed else gr.skip())
-
-
-# The note is Markdown, and the names in it come from a file that may have
-# been written anywhere. Escaping the HTML leaves `**` and `[…](…)` to be read
-# as syntax, which is enough to close the bold span the provenance is written
-# in and continue in a voice that looks like the workbench's own.
-MARKDOWN = str.maketrans({character: "\\" + character for character in "\\`*_{}[]()#+-.!>|~"})
 
 
 def as_text(value):
@@ -912,6 +1027,28 @@ def _build_page(context):
                 upload = gr.File(label="Saved run JSON", show_label=False, file_types=[".json"], type="filepath")
             gr.Markdown("The settings below apply to the next episode. Loading a trial or a saved run shows the settings it used.")
             prepare = gr.Button("New episode · apply settings", elem_id="maze-prepare")
+            agents = gr.Slider(1, MAX_AGENTS, value=1, step=1, label="Agents", elem_id="maze-agents",
+                               info="One loaded model plays every agent, each in its own conversation. With two or "
+                                    "more, each round asks every agent still moving for one response, then all the "
+                                    "moves land together.")
+            with gr.Accordion("Team", open=True, visible=False) as team_pane:
+                with gr.Row():
+                    team_goal = gr.Dropdown(choices=[(label, key) for key, label in TEAM_GOALS.items()], value="any",
+                                            label="Team goal", elem_id="maze-team-goal")
+                    round_limit = gr.Number(value=24, precision=0, minimum=1, maximum=256, label="Round limit",
+                                            elem_id="maze-round-limit")
+                communication = gr.Checkbox(value=True, label="Agents can message each other", elem_id="maze-communication",
+                                            info="Adds an optional message argument to the move call. Each message reaches every "
+                                                 "teammate in their next simulator reply. Off, the agents are told they cannot "
+                                                 "communicate. Agents never see where their teammates stand.")
+                with gr.Row():
+                    interrupt_agents = gr.Textbox(value="all", label="Agents to interrupt", elem_id="maze-interrupt-agents",
+                                                  info="all, or agent numbers and ranges such as 1, 3, 5-8.")
+                    steer_agents = gr.Textbox(value="all", label="Agents to steer", elem_id="maze-steer-agents",
+                                              info="all, or agent numbers and ranges.")
+                required = gr.Checkbox(label="Generate an unavoidable checkpoint", value=False, elem_id="maze-required",
+                                       info="Draws a maze whose every route crosses one cell, marked on the board and not "
+                                            "shown to the agents. Steering at a cell starts there unless you name another.")
             with gr.Accordion("Setup prompt", open=False):
                 system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2, elem_id="maze-system-prompt")
                 instruction = gr.Textbox(value=default_instruction("coordinates"), label="Task instruction", lines=6,
@@ -962,8 +1099,12 @@ def _build_page(context):
                 temperature = gr.Slider(0, 2, value=.7, step=.05, label="Maze sampling temperature")
                 sampling_seed = gr.Number(value=20260914, precision=0, minimum=0, maximum=2147483647, label="Maze sampling seed")
                 per_turn = gr.Number(value=1024, precision=0, minimum=1, maximum=8192, label="Tokens per response")
-                budget = gr.Number(value=8192, precision=0, minimum=1, maximum=32768, label="Total sampled-token limit")
-                attempts = gr.Number(value=32, precision=0, minimum=1, maximum=256, label="Tool-attempt limit")
+                budget = gr.Number(value=8192, precision=0, minimum=1, maximum=131072, label="Sampled-token limit",
+                                   elem_id="maze-budget",
+                                   info="Each agent's own on a team. An agent that spends it stops; its teammates continue.")
+                attempts = gr.Number(value=32, precision=0, minimum=1, maximum=256, label="Tool-attempt limit",
+                                     elem_id="maze-attempts",
+                                     info="Each agent's own on a team.")
                 recovery_tokens = gr.Number(value=RECOVERY_DEFAULTS["recovery_tokens"], precision=0, minimum=1, maximum=32768,
                                             label="Recovery window · sampled tokens", elem_id="maze-recovery-tokens",
                                             info="After the interruption, a first accepted move has to arrive inside this many sampled tokens.")
@@ -990,6 +1131,10 @@ def _build_page(context):
                 interrupt = gr.Button("Interrupt", size="sm", elem_id="maze-interrupt")
             turn_picker = gr.Dropdown(choices=[("Initial / supplied history", -1)], value=-1,
                                       label="Selected response", interactive=True)
+            target = gr.Dropdown(choices=[("agent-1", 0)], value=0, label="Intervene on", visible=False,
+                                 elem_id="maze-target", info="The agent Interrupt and Insert a message reach.")
+            with gr.Accordion("Messages between agents", open=True, visible=False) as mail_pane:
+                mail = gr.Markdown(mail_text(initial), elem_id="maze-mail")
             with gr.Accordion("Change the map", open=False):
                 with gr.Row():
                     close_row = gr.Number(value=0, precision=0, minimum=0, maximum=14, label="Row", elem_id="maze-close-row")
@@ -1015,9 +1160,13 @@ def _build_page(context):
                             "added there as `\"messages\"`, as a team run delivers one; a user message is a turn of its "
                             "own after that reply. One message is queued at a time.")
             with gr.Accordion("Playback & view", open=False):
-                pace = gr.Slider(.1, 4, value=1., step=.1, label="Seconds per recorded response")
+                pace = gr.Slider(.1, 4, value=1., step=.1, label="Seconds per recorded response or round")
                 reveal = gr.Checkbox(label="Show shortest route (viewer only)", value=False)
-                gr.Markdown("Play replays recorded responses, then continues generating in a live episode. Next advances one response, First returns to the initial history. Pause lets a generated response finish.")
+                gr.Markdown("Play replays recorded responses, then continues generating in a live episode. Next advances "
+                            "one response, First returns to the initial history. Pause lets a generated response "
+                            "finish. For a team each step is a round: Next at the live end asks every agent still "
+                            "moving for a response, Pause lets the round finish, and Stop discards the unfinished "
+                            "round, keeping its responses and applying none of its moves.")
                 stop = gr.Button("Stop now · end episode", size="sm", elem_id="maze-stop")
         with gr.Column(elem_id="maze-inspector"):
             gr.Markdown("## Emitted tokens")
@@ -1053,52 +1202,91 @@ def _build_page(context):
                 state_text = gr.Markdown(status(initial), elem_id="maze-status")
                 gr.Markdown("Movement requires a completed, valid move call. Supplied text is separate from generated tokens. Token edits rewind the selected response and regenerate later moves.")
     outputs = [maze_board, state_text, strip, raw, prefix_note, prefix_text, events, metrics_state, turn_picker, detail, alternatives,
-               transport_status, toggle, pause, editor]
+               transport_status, toggle, pause, editor, mail]
 
     def render(ep, show, session_id, index=None, animate=False):
         frame = views(ep, show, selections, session_id, index, animate)
         return (*frame, transport_text(ep), *transport_buttons(ep),
-                gr.update(visible=False) if frame[9] != gr.skip() else gr.skip())
+                gr.update(visible=False) if frame[9] != gr.skip() else gr.skip(), mail_text(ep))
 
     controls = [size, seed, distance, openness, supplied, after, text, prefix, temperature, sampling_seed, per_turn,
                 budget, attempts, recovery_tokens, recovery_attempts, goal_mode, goal_hint, system_prompt, instruction,
                 changing_map]
     checkpoint_controls = [waypoint, steer_vector, steer_strength, steer_layer, steer_mode, steer_cell, steer_after,
                            steer_responses]
+    # Last, so a caller naming none of them prepares a run of one agent.
+    team_controls = [agents, communication, team_goal, round_limit, interrupt_agents, steer_agents, required]
+    # What changes with the run on screen rather than with each frame of it.
+    run_panes = [mail_pane, target]
 
     def prepare_episode(ep, show, session_id, data, *values):
         if ep.busy:
             raise gr.Error("Stop or pause this episode before starting another.")
         (n, s, d, o, supplied_n, trigger, passage_text, count, temp, sample_seed, per, total, tries,
          window_tokens, window_attempts, mode, hint, system_text, instruction_text, map_changes,
-         waypoint_text, *steer) = values
+         waypoint_text, *rest) = values
+        steer, team_settings = rest[:7], rest[7:] or (1, True, "any", 24, "all", "all", False)
+        agent_count, talk, goal, rounds, interrupted, steered, required_cell = team_settings
         try:
+            agent_count = int(agent_count)
+            team = agent_count > 1
             waypoint_cell = parse_cell(waypoint_text, "waypoint")
+            drawn = generate(n, s, d, o, require_checkpoint=bool(required_cell) and team)
             checkpoint = dict(waypoint=waypoint_cell) if waypoint_cell else {}
-            checkpoint.update(steering_config(*steer, waypoint_cell))
-            drawn = generate(n, s, d, o)
-            new = Episode(changing(drawn) if map_changes else drawn,
-                          dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
-                               interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp),
-                               openness=float(o), sampling_seed=int(sample_seed), per_turn_tokens=int(per),
-                               token_budget=int(total), attempt_budget=int(tries),
-                               recovery_tokens=int(window_tokens), recovery_attempts=int(window_attempts),
-                               goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text,
-                               **checkpoint))
+            # A team's generated checkpoint is where steering at a cell starts
+            # unless a cell is named, as a waypoint is.
+            candidates = unavoidable_cells(drawn) if team and required_cell else []
+            chosen = list(candidates[len(candidates) // 2]) if candidates else None
+            if chosen is not None:
+                checkpoint["required_checkpoint"] = chosen
+            checkpoint.update(steering_config(*steer, waypoint_cell or chosen))
+            config = dict(supplied_moves=int(supplied_n), interrupt_after=int(trigger),
+                          interruption_text=passage_text, prefix_tokens=int(count), temperature=float(temp),
+                          openness=float(o), sampling_seed=int(sample_seed), per_turn_tokens=int(per),
+                          token_budget=int(total), attempt_budget=int(tries),
+                          recovery_tokens=int(window_tokens), recovery_attempts=int(window_attempts),
+                          goal_mode=mode, goal_hint=hint, system_prompt=system_text, instruction=instruction_text,
+                          **checkpoint)
+            if team:
+                config.update(agents=agent_count, communication=bool(talk), team_goal=goal, round_limit=int(rounds),
+                              agent_token_budget=config.pop("token_budget"))
+                # An agent makes one call a round, so a limit the round limit
+                # reaches first is no limit, and is left out as a team saved
+                # without one has it, rather than ending the last round on it.
+                if config["attempt_budget"] >= config["round_limit"]:
+                    del config["attempt_budget"]
+                for key, targets, verb in (("interrupt_agents", interrupted, "interrupt"),
+                                           ("steer_agents", steered, "steer")):
+                    chosen_agents = parse_agents(targets, agent_count, verb)
+                    if chosen_agents is not None:
+                        config[key] = chosen_agents
+            new = Episode(changing(drawn) if map_changes else drawn, config)
+            # Refused here rather than in the episode, which reads back runs
+            # saved before anyone checked: a trigger the supplied moves walk
+            # past is one no response ever stands on, so the run would read as
+            # steered while nothing steered it. Moves that end on it leave the
+            # first response standing there, which steers it.
+            cell = (new.config.get("steer_when") or {}).get("cell")
+            walked = any(e["source"] == "supplied" and list(e["after"]) == list(cell or ()) for e in new.events)
+            if cell is not None and walked and list(new.agents[0]["position"]) != list(cell):
+                raise ValueError("The supplied starting moves pass the steering cell, so steering there would never "
+                                 "start. Supply fewer moves, or steer at another cell.")
         except (ValueError, TypeError) as exc:
             logger.warning("Refused the scenario settings for a new episode: %s", exc)
             raise gr.Error(str(exc)) from exc
         interruption = str(new.config.get("interruption_text") or "").strip()
-        logger.info("New episode %s: %s x %s %s maze, seed %s, %s goal, %s supplied moves, interruption %s, "
+        logger.info("New episode %s: %s, %s x %s %s maze, seed %s, %s goal, %s supplied moves, interruption %s, "
                     "waypoint %s, steering %s",
-                    new.run_id, new.maze.size, new.maze.size, "changing" if new.map_changes else "fixed",
-                    new.maze.seed, new.config["goal_mode"], new.supplied_moves,
+                    new.run_id, f"{len(new.agents)} agents, communication {'on' if new.config['communication'] else 'off'}"
+                    if new.team else "one agent", new.maze.size, new.maze.size,
+                    "changing" if new.map_changes else "fixed", new.maze.seed, new.config["goal_mode"], new.supplied_moves,
                     f"after {new.config['interrupt_after']} moves" if interruption else "off",
                     new.config.get("waypoint") or "none",
                     f"{new.config['steer_when']} for {new.config['steer_responses'] or 'all'} responses"
                     if new.config.get("steering") else "off")
         stop_replay(ep)
-        return (new, *render(new, show, session_id), trial_note_text(new, data), None, *model_button(new))
+        return (new, *render(new, show, session_id), trial_note_text(new, data), None, *model_button(new),
+                *run_pane_updates(new))
 
     def load_trial_file(path, ep, loaded):
         if not path:
@@ -1129,7 +1317,7 @@ def _build_page(context):
         # The same description a loaded run gets: the trial is in the episode
         # now, so nothing here has to spell the controls out a second time.
         return (new, *render(new, show, session_id), *checkpoint_values(new), *scenario_values(new),
-                trial_note_text(new), None, None, *model_button(new))
+                trial_note_text(new), None, None, *model_button(new), *team_values(new), *run_pane_updates(new))
 
     def run_batch(data, control, source):
         """Run every trial in the loaded file, reporting each one as it finishes."""
@@ -1206,7 +1394,8 @@ def _build_page(context):
             gr.Warning(str(exc))
             yield render(ep, show, session_id)
 
-    def command(ep, kind):
+    def command(ep, kind, target=0):
+        step = "round" if ep.team else "response"
         try:
             if kind == "pause":
                 stop_replay(ep)
@@ -1215,12 +1404,16 @@ def _build_page(context):
                 stop_replay(ep)
                 ep.request_stop(runs_dir(context))
             else:
-                ep.request_interruption()
-        except ValueError as exc:
+                ep.request_interruption(agent_index(ep, target))
+        except (IndexError, ValueError) as exc:
             logger.warning("Run %s refused %s: %s", ep.run_id, kind, exc)
             raise gr.Error(str(exc)) from exc
         logger.info("Run %s: %s requested while %s", ep.run_id, kind, ep.phase)
-        gr.Info({"pause": "Pausing after the current response." if ep.busy else "Playback paused.", "stop": "Stopping; partial actions will not execute.", "interrupt": "Interruption queued for the next response."}[kind])
+        whose = f" for {ep.agents[agent_index(ep, target)]['name']}" if ep.team else ""
+        gr.Info({"pause": f"Pausing after the current {step}." if ep.busy else "Playback paused.",
+                 "stop": ("Stopping; the unfinished round will not be applied." if ep.team
+                          else "Stopping; partial actions will not execute."),
+                 "interrupt": f"Interruption queued{whose} for the next response."}[kind])
         return status(ep), transport_text(ep), *transport_buttons(ep)
 
     def close_map_cell(ep, row, column):
@@ -1232,51 +1425,72 @@ def _build_page(context):
         except (TypeError, ValueError) as exc:
             logger.warning("Run %s refused to close row %s, column %s: %s", ep.run_id, row, column, exc)
             raise gr.Error(str(exc)) from exc
-        logger.info("Run %s: row %s, column %s closes before response %s",
-                    ep.run_id, cell[0], cell[1], len(ep.turns) + 1)
-        gr.Info("The cell closes before the next generated response.")
+        logger.info("Run %s: row %s, column %s closes before %s %s", ep.run_id, cell[0], cell[1],
+                    "round" if ep.team else "response", ep.next_boundary() + 1)
+        gr.Info("The cell closes before the next round." if ep.team else "The cell closes before the next generated response.")
         return status(ep), transport_text(ep), *transport_buttons(ep)
 
-    def queue_message(ep, channel, text_value, sender, direction):
+    def queue_message(ep, channel, text_value, sender, direction, target=0):
         try:
-            ep.request_insert(channel, text_value, sender if channel == "teammate" else None, direction or None)
-        except (TypeError, ValueError, KeyError) as exc:
+            index = agent_index(ep, target)
+            ep.request_insert(channel, text_value, sender if channel == "teammate" else None, direction or None, index)
+        except (IndexError, TypeError, ValueError, KeyError) as exc:
             logger.warning("Run %s refused a %s: %s", ep.run_id, channel, exc)
             raise gr.Error(str(exc)) from exc
-        logger.info("Run %s: a %s goes in before response %s", ep.run_id, channel, len(ep.turns) + 1)
-        gr.Info("The message goes into the context before the next generated response.")
+        logger.info("Run %s: a %s goes in before %s's next response", ep.run_id, channel, ep.agents[index]["name"])
+        if not ep.team:
+            gr.Info("The message goes into the context before the next generated response.")
+        elif ep.agents[index]["insert_next"]["for_boundary"] > ep.rounds:
+            # Queued once the round had begun, so every agent in it answers
+            # the state it began with and the message waits.
+            gr.Info(f"The message goes into {ep.agents[index]['name']}'s context before its response in the next "
+                    "round. The round being generated began without it.")
+        else:
+            gr.Info(f"The message goes into {ep.agents[index]['name']}'s context before its next response.")
         return status(ep), transport_text(ep), *transport_buttons(ep)
 
     def inspect(ep, show, i, session_id):
         if ep.busy:
             raise gr.Error("Pause the episode before selecting a response to replay.")
         stop_replay(ep)
-        return render(ep, show, session_id, max(-1, min(int(i if i is not None else -1), len(ep.turns) - 1)))
+        index = max(-1, min(int(i if i is not None else -1), len(ep.turns) - 1))
+        if not ep.team:
+            return render(ep, show, session_id, index)
+        # A team response is shown on the board after its round, or, for a
+        # round that never resolved, on the board it was given.
+        ep.selected_turn = None if index < 0 else index
+        return render(ep, show, session_id, -1 if index < 0 else min(ep.turns[index]["round"], ep.rounds - 1))
 
     def viewing(ep):
         # Read from the episode rather than the dropdown: Gradio captures a
         # listener's inputs when the click is queued, so a second click sent
         # before the first reply arrives would carry the same stale response.
-        return max(-1, min(ep.viewing, len(ep.turns) - 1))
+        return max(-1, min(ep.viewing, last_step(ep)))
+
+    def step_to(ep, show, session_id, index):
+        """Show step ``index``; a team's steps are rounds, and moving to one clears the selected response."""
+        if ep.team:
+            ep.selected_turn = None
+        return render(ep, show, session_id, index, animate=True)
 
     def step_first(ep, show, session_id):
         if ep.busy:
             raise gr.Error("Pause the episode before stepping through responses.")
         stop_replay(ep)
-        return render(ep, show, session_id, -1, animate=True)
+        return step_to(ep, show, session_id, -1)
 
     def step_back(ep, show, session_id):
         if ep.busy:
             raise gr.Error("Pause the episode before stepping through responses.")
         stop_replay(ep)
-        return render(ep, show, session_id, max(-1, viewing(ep) - 1), animate=True)
+        return step_to(ep, show, session_id, max(-1, viewing(ep) - 1))
 
     def step_forward(ep, show, session_id):
         if ep.busy:
             raise gr.Error("Pause the episode before stepping through responses.")
         stop_replay(ep)
-        if viewing(ep) < len(ep.turns) - 1:
-            yield render(ep, show, session_id, viewing(ep) + 1, animate=True)
+        if viewing(ep) < last_step(ep):
+            yield step_to(ep, show, session_id, viewing(ep) + 1)
         elif not ep.replay_only and ep.phase not in TERMINAL:
             yield from play(ep, show, session_id, single=True)
         else:
@@ -1292,11 +1506,12 @@ def _build_page(context):
             ep.playing = True
             ep.reveal_route = show
         start = viewing(ep)
+        step = "round" if ep.team else "response"
         logger.info("Play on run %s from %s of %s recorded%s", ep.run_id,
-                    "the initial history" if start < 0 else f"response {start + 1}", len(ep.turns),
+                    "the initial history" if start < 0 else f"{step} {start + 1}", last_step(ep) + 1,
                     ", a saved replay that stops at its end" if ep.replay_only else "")
         try:
-            for index in range(start, len(ep.turns)):
+            for index in range(start, last_step(ep) + 1):
                 if index > start:
                     remaining = max(.1, float(seconds))
                     while remaining > 0:
@@ -1307,7 +1522,7 @@ def _build_page(context):
                         remaining = round(remaining - delay, 6)
                 if ep.playback_token != token:
                     return
-                yield render(ep, show, session_id, index, animate=True)
+                yield step_to(ep, show, session_id, index)
             if ep.playback_token == token and not ep.replay_only and ep.phase not in TERMINAL:
                 yield from play(ep, show, session_id)
         finally:
@@ -1344,7 +1559,8 @@ def _build_page(context):
             raise gr.Error("Pause or stop this episode before loading a replay.")
         if not path:
             logger.info("A replay upload arrived with no file; run %s is unchanged", ep.run_id)
-            return (gr.skip(),) * (len(outputs) + len(checkpoint_controls) + len(controls) + 6)
+            return (gr.skip(),) * (len(outputs) + len(checkpoint_controls) + len(controls) + 7 + len(team_controls)
+                                   + len(run_panes))
         try:
             if Path(path).stat().st_size > 50_000_000:
                 raise ValueError("Run files must be smaller than 50 MB.")
@@ -1353,6 +1569,7 @@ def _build_page(context):
             # Before the first frame: recovering the open-cell probability writes
             # it onto the run, and Run details reports whichever way that went.
             values = (*checkpoint_values(replay), *scenario_values(replay))
+            described = (*team_values(replay), *run_pane_updates(replay))
             # Every part of the frame is built inside this guard. One built on
             # the return would escape the handler if the run it read defeated
             # it, and Gradio abandons an event whole: the board, the controls
@@ -1366,11 +1583,11 @@ def _build_page(context):
         except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
             logger.warning("Could not load the run in %s: %s", path, exc)
             raise gr.Error(f"Could not load run: {exc}") from exc
-        logger.info("Loaded run %s from %s for replay: %s responses, %s moves, phase %s, model %s",
-                    replay.run_id, path, len(replay.turns), replay.moves, replay.phase,
-                    replay.model_id or "unrecorded")
+        logger.info("Loaded run %s from %s for replay: %s, %s responses, %s moves, phase %s, model %s",
+                    replay.run_id, path, f"{len(replay.agents)} agents" if replay.team else "one agent",
+                    len(replay.turns), replay.moves, replay.phase, replay.model_id or "unrecorded")
         stop_replay(ep)
-        return (replay, *rendered, *values, note, *buttons)
+        return (replay, *rendered, *values, note, *buttons, *described)
 
     def select_token(ep, session_id, metrics, evt: gr.SelectData):
         index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
@@ -1508,9 +1725,11 @@ def _build_page(context):
     # or an inspection click into a terminal stop with a partial response.
     toggle.click(play_back, [episode, reveal, selection_session, pace], outputs,
                  show_progress="hidden", concurrency_limit=None, trigger_mode="multiple")
-    prepare.click(prepare_episode, [episode, reveal, selection_session, trial_data, *controls, *checkpoint_controls],
-                  [episode, *outputs, trial_note, download, models, wanted_model],
+    prepare.click(prepare_episode,
+                  [episode, reveal, selection_session, trial_data, *controls, *checkpoint_controls, *team_controls],
+                  [episode, *outputs, trial_note, download, models, wanted_model, *run_panes],
                   concurrency_id="maze-view", show_progress="hidden")
+    agents.input(lambda count: gr.update(visible=int(count or 1) > 1), agents, team_pane, queue=False)
     # On the view's own queue, so a Load trial click cannot run between the
     # upload arriving and the picker it fills, preparing a trial from the
     # collection being replaced.
@@ -1531,7 +1750,7 @@ def _build_page(context):
     batch_stop.click(stop_batch, batch_control, None, queue=False)
     trial_load.click(load_trial, [trial_data, trial_picker, episode, reveal, selection_session],
                      [episode, *outputs, *checkpoint_controls, steer_note, *controls, passage, trial_note,
-                      edit_selection, download, models, wanted_model],
+                      edit_selection, download, models, wanted_model, *team_controls, team_pane, *run_panes],
                      concurrency_id="maze-view", show_progress="hidden")
     first.click(step_first, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
     back.click(step_back, [episode, reveal, selection_session], outputs, show_progress="hidden", concurrency_id="maze-view")
@@ -1539,9 +1758,9 @@ def _build_page(context):
     command_outputs = [state_text, transport_status, toggle, pause]
     pause.click(lambda ep: command(ep, "pause"), episode, command_outputs, queue=False)
     stop.click(lambda ep: command(ep, "stop"), episode, command_outputs, queue=False)
-    interrupt.click(lambda ep: command(ep, "interrupt"), episode, command_outputs, queue=False)
+    interrupt.click(lambda ep, agent: command(ep, "interrupt", agent), [episode, target], command_outputs, queue=False)
     close_cell_button.click(close_map_cell, [episode, close_row, close_column], command_outputs, queue=False)
-    insert_button.click(queue_message, [episode, insert_channel, insert_text, insert_sender, insert_direction],
+    insert_button.click(queue_message, [episode, insert_channel, insert_text, insert_sender, insert_direction, target],
                         command_outputs, queue=False)
     passage.input(lambda name: "" if name == "None" else PASSAGES.get(name, ""), passage, text, queue=False)
     def change_goal_mode(mode, wording):
@@ -1577,7 +1796,7 @@ def _build_page(context):
     save.click(export, episode, download, show_progress="hidden")
     upload.upload(load, [upload, episode, reveal, selection_session, trial_data],
                   [episode, *outputs, *checkpoint_controls, steer_note, *controls, passage, trial_note, models,
-                   wanted_model],
+                   wanted_model, *team_controls, team_pane, *run_panes],
                   concurrency_id="maze-view", show_progress="hidden")
     def import_vector(path):
         if not path:
@@ -1597,16 +1816,12 @@ def _build_page(context):
 
 
 def build_page(context):
-    # Imported here because the Team tab borrows this module's helpers.
-    from .team_page import build_team_page
     from .reasoning_page import build_reasoning_page
 
     with gr.Column(elem_id="maze-page"):
         gr.Markdown("# Maze workbench")
         with gr.Tabs(elem_id="maze-modes"):
-            with gr.Tab("One agent", elem_id="maze-single-tab"):
+            with gr.Tab("Run", elem_id="maze-run-tab"):
                 _build_page(context)
-            with gr.Tab("Team", elem_id="maze-team-tab"):
-                build_team_page(context, lambda: runs_dir(context))
             with gr.Tab("Reasoning check", elem_id="maze-reasoning-tab"):
                 build_reasoning_page(context)

@@ -372,7 +372,7 @@ class PageTests(unittest.TestCase):
         loaded = callbacks["load"].fn(str(ran.export()), episode, False, "s", None)
         outputs = callbacks["load"].outputs
         self.assertEqual(len(loaded), len(outputs))
-        start = 16
+        start = next(i for i, block in enumerate(outputs) if getattr(block, "elem_id", None) == "maze-waypoint")
         self.assertEqual(loaded[start:start + 8], ("1, 1", VECTOR, 4.0, 3, "cell", "1, 1", 3, 2))
         self.assertIn("layer 3", loaded[start + 8])
 

@@ -98,7 +98,7 @@ def team_paragraph(name, names, goal, communicate):
     return text
 
 
-def parse_agents(text, count):
+def parse_agents(text, count, verb="steer"):
     """The agents named by text such as "1, 3, 5-8", as indices, or None for every agent."""
     text = str(text or "").strip()
     if text.lower() in ("", "all"):
@@ -107,12 +107,12 @@ def parse_agents(text, count):
     for part in text.split(","):
         match = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+)\s*)?", part)
         if not match:
-            raise ValueError("Name the agents to steer by number, such as 1, 3, 5-8, or leave the box blank for all.")
+            raise ValueError(f"Name the agents to {verb} by number, such as 1, 3, 5-8, or leave the box blank for all.")
         low, high = int(match[1]), int(match[2] or match[1])
         if not 1 <= low <= high <= count:
-            raise ValueError(f"Agents to steer must be numbered 1 to {count}.")
+            raise ValueError(f"Agents to {verb} must be numbered 1 to {count}.")
         targets += [i - 1 for i in range(low, high + 1) if i - 1 not in targets]
-    # Naming every agent is steering every agent, and is stored as such.
+    # Naming every agent is naming all of them, and is stored as such.
     return None if sorted(targets) == list(range(count)) else targets
 
 

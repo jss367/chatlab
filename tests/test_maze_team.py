@@ -2,6 +2,7 @@ import json
 import re
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,9 +13,9 @@ from chatlab.extensions.maze_experiments.maze import Maze, parse_call
 from chatlab.extensions.maze_experiments.page import build_page
 from chatlab.extensions.maze_experiments.runner import Episode, from_payload, stream_episode
 from chatlab.extensions.maze_experiments.team import MAX_AGENTS, MESSAGE_LIMIT, format_agents, parse_agents, team_tools
-from chatlab.extensions.maze_experiments.team_page import (agent_color, mail_text, response_view, team_board,
-                                                           team_status, team_timeline)
-from maze_support import CONFIG, call, Manager, MAZE, MAZE_ID, scored
+from chatlab.extensions.maze_experiments.team_views import (agent_color, mail_text, response_line, team_board,
+                                                            team_status, team_timeline)
+from maze_support import CONFIG, call, Manager, MAZE, MAZE_ID, output_index, scenario, scored
 from ui_support import listeners_by_name
 
 # No walls, so a team placed on its start shares one cell.
@@ -428,11 +429,11 @@ class TeamEpisodeTests(unittest.TestCase):
         self.assertEqual(len(rows), MAX_AGENTS)
         self.assertTrue(all(abs(y - centre) <= 20 for y in rows))
         ep.selected_turn = MAX_AGENTS - 1
-        self.assertIn(f"{len(ep.turns[-1]['prompt_ids']):,} prompt tokens", response_view(ep)[0])
+        self.assertIn(f"{len(ep.turns[-1]['prompt_ids']):,} prompt tokens", response_line(ep, len(ep.turns) - 1))
 
     def test_a_small_group_on_one_cell_is_still_fanned_out(self):
         ep = team(maze=OPEN, agents=5)
-        ep.events.append(dict(accepted=True, round=0, agent=4, before=[1, 1], after=[1, 2]))
+        ep.events.append(dict(accepted=True, source="model", round=0, agent=4, before=[1, 1], after=[1, 2]))
         drawn = team_board(ep, 0)
         self.assertEqual(drawn.count('r="13"'), 4)
         self.assertEqual(drawn.count('r="16"'), 1)
@@ -458,7 +459,7 @@ class TeamEpisodeTests(unittest.TestCase):
 
 
 class TeamPageTests(unittest.TestCase):
-    def test_the_team_tab_prepares_runs_and_replays(self):
+    def test_the_workbench_prepares_a_team_steps_its_rounds_and_replays_it(self):
         manager = Manager([])
         manager.generate = scored(manager.generate)
         with tempfile.TemporaryDirectory() as directory:
@@ -468,32 +469,112 @@ class TeamPageTests(unittest.TestCase):
                 build_page(context)
             try:
                 callbacks = listeners_by_name(demo)
-                prepare = callbacks["team_prepare_episode"]
-                values = (2, True, "any", 3, 1, 2, .9, "coordinates", "", "Be brief.", "Reach the star.",
-                          .7, 1, 200, 1000, 10)
-                prepared = prepare.fn(team(), False, *values)
+                prepare = callbacks["prepare_episode"]
+                values = scenario(size=3, seed=1, distance=2, openness=.9, instruction="Reach the star.", budget=1000,
+                                  agents=2, round_limit=10)
+                prepared = prepare.fn(Episode(MAZE, CONFIG), False, "s", None, *values)
                 self.assertEqual(len(prepared), len(prepare.outputs))
                 ep = prepared[0]
-                self.assertEqual(ep.config["agents"], 2)
+                self.assertEqual((ep.config["agents"], ep.config["agent_token_budget"]), (2, 1000))
                 self.assertIn("Reach the star.", ep.agents[1]["messages"][1]["content"])
+                # A team shows the messages between its agents and a choice of agent to intervene on.
+                self.assertEqual(prepared[output_index(prepare, "maze-mail")], "No messages yet.")
+                picker = prepared[output_index(prepare, "maze-target")]
+                self.assertEqual((picker["choices"], picker["visible"]), ([("agent-1", 0), ("agent-2", 1)], True))
                 maze_id = ep.maze.tool_id()
                 manager.replies = iter([call("north", "go", maze_id), call("north", maze_id=maze_id)])
-                play = callbacks["team_step_forward"]
-                frames = list(play.fn(ep, False))
-                self.assertTrue(all(len(frame) == len(play.outputs) for frame in frames))
+                forward = callbacks["step_forward"]
+                frames = list(forward.fn(ep, False, "s"))
+                self.assertTrue(all(len(frame) == len(forward.outputs) for frame in frames))
                 self.assertEqual(ep.rounds, 1)
+                self.assertIn("Round 1 of 1", frames[-1][11])
+                self.assertEqual(frames[-1][6]["headers"][:2], ["Round", "Agent"])
                 self.assertTrue((Path(directory) / f"{ep.run_id}.json").exists())
-                load = callbacks["team_load"]
-                loaded = load.fn(str(ep.export()), team(), False)
+                load = callbacks["load"]
+                loaded = load.fn(str(ep.export()), Episode(MAZE, CONFIG), False, "s", None)
                 self.assertEqual(len(loaded), len(load.outputs))
-                # The per-agent limit field comes back as it was set.
-                self.assertEqual(loaded[25], 1000)
-                legacy = team(token_budget=3000)
-                self.assertEqual(load.fn(str(legacy.export()), team(), False)[25], 1500)
                 self.assertTrue(loaded[0].replay_only)
-                select = callbacks["team_select_history"]
-                shown = select.fn(loaded[0], False, SimpleNamespace(index=[1, 0]))
+                # The scenario pane describes the team the run was.
+                self.assertEqual(loaded[output_index(load, "maze-agents")], 2)
+                self.assertEqual(loaded[output_index(load, "maze-budget")], 1000)
+                legacy = team(token_budget=3000, round_limit=40)
+                reloaded = load.fn(str(legacy.export()), Episode(MAZE, CONFIG), False, "s", None)
+                self.assertEqual(reloaded[output_index(load, "maze-budget")], 1500)
+                # A team saved with no call limit fills the control with its round limit,
+                # which prepares a team with no call limit again.
+                self.assertEqual(reloaded[output_index(load, "maze-attempts")], 40)
+                again = prepare.fn(Episode(MAZE, CONFIG), False, "s", None, *scenario(
+                    size=3, seed=1, distance=2, openness=.9, agents=2, round_limit=40, attempts=40))[0]
+                self.assertNotIn("attempt_budget", again.config)
+                select = callbacks["select_history"]
+                shown = select.fn(loaded[0], False, "s", SimpleNamespace(index=[1, 0]))
+                self.assertEqual(shown[8]["value"], 0)
                 self.assertIn("agent-1", shown[4])
+                self.assertIn("▶ Round 1", shown[6]["data"][1][0])
+                # Back to one agent, the same pane prepares a run of one agent.
+                single = prepare.fn(loaded[0], False, "s", None, *scenario(size=3, seed=1, distance=2, openness=.9))
+                self.assertFalse(single[0].team)
+                self.assertFalse(single[output_index(prepare, "maze-target")]["visible"])
+            finally:
+                demo.close()
+
+
+    def test_the_workbench_intervenes_on_the_agent_picked_and_edits_a_team_response(self):
+        corridor = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
+
+        def step(direction):
+            text = "\n" + call(direction, maze_id=corridor.tool_id())[0]
+            return text, list(text.encode()) + [0]
+
+        manager = Manager([step("east")] * 8)
+        manager.generate = scored(manager.generate)
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = listeners_by_name(demo)
+                interrupt_button = next(b for b in demo.blocks.values() if getattr(b, "elem_id", None) == "maze-interrupt")
+                interrupt = next(fn.fn for fn in demo.fns.values() if fn.targets == [(interrupt_button._id, "click")])
+                ep = Episode(corridor, dict(agents=2, communication=False, team_goal="all",
+                                            interruption_text="Distracted", interrupt_after=9, prefix_tokens=2))
+                list(callbacks["step_forward"].fn(ep, False, session))
+                interrupt(ep, 1)
+                self.assertEqual([a["interrupt_next"] for a in ep.agents], [False, True])
+                with mock.patch("chatlab.extensions.maze_experiments.page.gr.Info") as told:
+                    callbacks["queue_message"].fn(ep, "tool_note", "Keep going.", "", "", 0)
+                self.assertIn("before its next response", told.call_args[0][0])
+                self.assertEqual(ep.agents[0]["insert_next"]["text"], "Keep going.")
+                # Queued once a round has begun, it says it waits for the next round.
+                ep.busy = ep.round_open = True
+                with mock.patch("chatlab.extensions.maze_experiments.page.gr.Info") as told:
+                    callbacks["queue_message"].fn(ep, "tool_note", "Later.", "", "", 1)
+                self.assertIn("in the next round", told.call_args[0][0])
+                ep.busy = ep.round_open = False
+                ep.agents[1]["insert_next"] = None
+                with self.assertRaisesRegex(gr.Error, "Pick an agent"):
+                    callbacks["queue_message"].fn(ep, "user", "Hi.", "", "", 5)
+                list(callbacks["step_forward"].fn(ep, False, session))
+                self.assertEqual(manager.calls[3][1]["forced_ids"], [68, 105])
+                self.assertEqual(json.loads(manager.calls[2][0][-1]["content"])["note"], "Keep going.")
+                # Pick agent-2's interrupted response, then branch it at its first generated token.
+                shown = callbacks["inspect"].fn(ep, False, 3, session)
+                self.assertEqual((ep.selected_turn, ep.viewing, shown[8]["value"]), (3, 1, 3))
+                self.assertIn("Round 2 · agent-2", shown[4])
+                metrics = shown[7]
+                selected = callbacks["select_token"].fn(ep, session, metrics, SimpleNamespace(index=0))
+                frames = list(callbacks["edit_token"].fn(ep, False, session, metrics, selected[2], "x", "text", None))
+                forked = frames[-1][0]
+                self.assertTrue(forked.team)
+                self.assertEqual(forked.token_edit["turn"], 3)
+                self.assertEqual(manager.calls[-1][1]["forced_ids"], [68, 105, ord("x")])
+                self.assertEqual((forked.agents[1]["interrupted"], forked.rounds), (True, 2))
+                self.assertTrue((Path(directory) / f"{forked.run_id}.json").exists())
             finally:
                 demo.close()
 

@@ -1998,16 +1998,19 @@ def insert_outcome(episode, insert):
     The advice is judged on the map as the response after it found it, from
     the cell the character stood on: whether the advised step is open, and
     whether it is on a shortest route to the destination. The move is the
-    first accepted model move from that response on, and it followed the
-    advice, went against it (the opposite direction), or took another.
+    first accepted model move from that response on, by the agent the message
+    went to, and it followed the advice, went against it (the opposite
+    direction), or took another.
     """
-    boundary, advised = insert["before_turn"], insert.get("advised_direction")
+    boundary, advised = insert[episode.boundary_key], insert.get("advised_direction")
+    agent = insert.get("agent", 0)
     move = next((e for e in episode.events
-                 if e["source"] == "model" and e["accepted"] and e["turn"] >= boundary), None)
+                 if e["source"] == "model" and e["accepted"] and e.get("agent", 0) == agent
+                 and (e["round"] if episode.team else e["turn"]) >= boundary), None)
     outcome = dict(advised=advised, move=move, legal=None, shortest=None, followed=None)
     if advised is None:
         return outcome
-    maze = maze_at_turn(episode.maze, episode.config.get("map_updates", ()), boundary)
+    maze = maze_at_turn(episode.maze, episode.config.get("map_updates", ()), boundary, episode.boundary_key)
     position = tuple(insert["position"])
     step = maze.neighbors(position).get(advised)
     distances = maze.distances(maze.goal)
