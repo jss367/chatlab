@@ -156,6 +156,22 @@ class AttachmentStoreTests(unittest.TestCase):
         with self.assertRaises(attachments.AttachmentError):
             attachments.import_images([name], {name: wrong})
 
+    def test_an_import_puts_embedded_pictures_through_the_paste_checks(self):
+        import hashlib
+
+        junk = b"not a picture"
+        name = f"{hashlib.sha256(junk).hexdigest()}.png"
+        with self.assertRaises(attachments.AttachmentError):
+            attachments.import_images([name], {name: base64.b64encode(junk).decode()})
+        self.assertFalse(attachments.image_path(name).exists())
+        big = attachments.store_image(png_bytes(size=(50, 50), color="tan"))
+        encoded = base64.b64encode(attachments.read_bytes(big)).decode()
+        attachments.image_path(big).unlink()
+        with mock.patch.object(attachments, "MAX_IMAGE_PIXELS", 100):
+            with self.assertRaises(attachments.AttachmentError):
+                attachments.import_images([big], {big: encoded})
+        self.assertFalse(attachments.image_path(big).exists())
+
 
 class PruneTests(unittest.TestCase):
     def test_only_old_pictures_nothing_names_are_swept(self):

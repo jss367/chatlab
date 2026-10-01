@@ -333,10 +333,17 @@ def import_images(names: Iterable[str], assets) -> None:
         encoded = assets.get(name)
         if not isinstance(encoded, str):
             raise AttachmentError("The conversation is missing an embedded picture.")
+        # Bounded before it is decoded: base64 is four characters per three bytes.
+        if len(encoded) > (MAX_IMAGE_BYTES + 2) // 3 * 4:
+            raise AttachmentError("An embedded picture is larger than a message takes.")
         try:
             data = base64.b64decode(encoded, validate=True)
         except ValueError as error:
             raise AttachmentError("An embedded picture is not valid base64.") from error
         if hashlib.sha256(data).hexdigest() != name.split(".", 1)[0]:
             raise AttachmentError("An embedded picture does not match its name.")
-        _write(name, data)
+        # Through the checks a pasted picture meets, size, pixels and format.
+        # A stored picture is kept as it arrived, so a genuine one comes back
+        # under the same name; anything else was not written by ChatLab.
+        if store_image(data) != name:
+            raise AttachmentError("An embedded picture does not match its name.")
