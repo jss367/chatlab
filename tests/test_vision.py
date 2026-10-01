@@ -78,6 +78,16 @@ class AttachmentStoreTests(unittest.TestCase):
                 attachments.store_image(png_bytes())
         self.assertIn("MB", str(caught.exception))
 
+    def test_a_picture_with_too_many_pixels_is_refused_before_decoding(self):
+        data = png_bytes(size=(200, 100))
+        name = attachments.store_image(data)
+        with mock.patch.object(attachments, "MAX_IMAGE_PIXELS", 100 * 100):
+            with self.assertRaises(attachments.AttachmentError) as caught:
+                attachments.store_image(png_bytes(size=(200, 101)))
+            self.assertIn("megapixels", str(caught.exception))
+            with self.assertRaises(attachments.AttachmentError):
+                attachments.open_for_model(name)
+
     def test_a_tampered_picture_fails_its_integrity_check(self):
         name = attachments.store_image(png_bytes(color="green"))
         attachments.image_path(name).write_bytes(png_bytes(color="purple"))

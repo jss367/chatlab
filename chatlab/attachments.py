@@ -41,6 +41,11 @@ from uuid import uuid4
 # screenshot of a 6K display is about 30 MB as PNG; anything past this is
 # more likely a mistake than a picture.
 MAX_IMAGE_BYTES = 40 * 1024 * 1024
+# The most pixels a picture may have, checked from its header before anything
+# is decoded: the byte limit says nothing about a flat-colour PNG of a
+# hundred megapixels, which is tiny on disk and hundreds of megabytes once
+# loaded. An 8K screenshot is 33 megapixels.
+MAX_IMAGE_PIXELS = 40 * 1024 * 1024
 # The most pictures one message carries. Each is hundreds to thousands of
 # prompt tokens once a model reads it.
 MAX_IMAGES_PER_MESSAGE = 8
@@ -109,6 +114,17 @@ def _write(name: str, data: bytes) -> None:
         staging.unlink(missing_ok=True)
 
 
+def _check_pixels(image) -> None:
+    """Refuse a picture whose header promises more pixels than are worth decoding."""
+
+    width, height = image.size
+    if width * height > MAX_IMAGE_PIXELS:
+        raise AttachmentError(
+            f"That picture is {width:,} × {height:,} pixels; the most a message "
+            f"takes is {MAX_IMAGE_PIXELS / 1e6:.0f} megapixels."
+        )
+
+
 def store_image(data: bytes) -> str:
     """Keep ``data`` as a picture and return the name a turn refers to it by."""
 
@@ -124,6 +140,7 @@ def store_image(data: bytes) -> str:
     try:
         with Image.open(io.BytesIO(data)) as image:
             image_format = image.format
+            _check_pixels(image)
             image.load()
             if image_format not in KEPT_FORMATS:
                 converted = io.BytesIO()
@@ -131,6 +148,8 @@ def store_image(data: bytes) -> str:
                     converted, format="PNG"
                 )
                 data, image_format = converted.getvalue(), "PNG"
+    except AttachmentError:
+        raise
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as error:
         raise AttachmentError("That file is not a picture ChatLab can read.") from error
     name = f"{hashlib.sha256(data).hexdigest()}.{KEPT_FORMATS[image_format]}"
@@ -180,6 +199,9 @@ def open_for_model(name: str, budget: int = MODEL_PIXEL_BUDGET):
     from PIL import Image, ImageOps
 
     with Image.open(io.BytesIO(read_bytes(name))) as image:
+        # A picture brought in with a conversation file never went through
+        # store_image, so its size is checked here too.
+        _check_pixels(image)
         image = ImageOps.exif_transpose(image)
         if image.mode in ("RGBA", "LA") or "transparency" in image.info:
             # A transparent screenshot region is white to the reader, not black.

@@ -697,6 +697,11 @@ class InspectionMixin:
             if steering_vectors.active(steering):
                 self._drop_inspect_cache()
             media = self._image_layout(ids, images)
+            # A picture read in both directions has to go in whole, and the
+            # slice ends at the clicked token, so a click inside one would
+            # read a picture missing its later tokens.
+            if media is not None and media.joined and media.is_placeholder(index):
+                raise ValueError(IMAGE_TOKEN_INSPECTED)
             start = max(0, index + 1 - max(1, int(positions)))
             if media is not None:
                 start = media.run_start(start)
