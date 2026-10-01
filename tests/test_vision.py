@@ -531,6 +531,22 @@ class SendTests(unittest.TestCase):
         self.assertEqual(frames[0]["turns"], [])
         self.assertNotIn("attachments", dict(frames[0]))
 
+    def test_a_text_model_refuses_a_follow_up_to_an_earlier_picture(self):
+        from chatlab.ui.generation import chat, retry_last
+
+        earlier = make_turn("user", "Look")
+        earlier["images"] = [self.picture]
+        history = [earlier, make_turn("assistant", "A gray square.")]
+        frames = list(chat("And now?", history, **self.settings))
+        self.assertEqual(len(frames), 1)
+        self.assertIn("can't be shown pictures", frames[0]["status"])
+        self.assertEqual(frames[0]["prompt"], "And now?")
+        self.assertEqual(len(frames[0]["turns"]), 2)
+        frames = list(retry_last("", history, *self.settings.values()))
+        self.assertEqual(len(frames), 1)
+        self.assertIn("can't be shown pictures", frames[0]["status"])
+        self.assertEqual(frames[0]["turns"][1]["content"], "A gray square.")
+
     def test_a_sent_picture_joins_the_turn_and_leaves_the_box(self):
         self.manager.processor = object()
         original = self.manager.generate

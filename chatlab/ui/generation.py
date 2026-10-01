@@ -35,6 +35,7 @@ from chatlab.token_metrics import (
     summarize,
 )
 from chatlab.trace_export import build_trace
+from chatlab.attachments import names_in
 from chatlab.vision import message_images
 from chatlab.ui import runtime
 from chatlab.ui.common import (
@@ -974,9 +975,10 @@ def _send(
     if not runtime.MANAGER.loaded:
         yield no_model_state(prompt_text, turns)
         return
-    if images and not runtime.MANAGER.accepts_images:
+    if (images or names_in(turns)) and not runtime.MANAGER.accepts_images:
         # Said before the message joins the conversation, which keeps both it
-        # and its pictures in the box for a model that can read them.
+        # and its pictures in the box for a model that can read them. An
+        # earlier picture counts too: the model would be fed it all the same.
         yield idle_state(prompt_text, turns, runtime.MANAGER.images_refusal())
         return
 
@@ -1049,6 +1051,13 @@ def regenerate_from(
         return
     if not runtime.MANAGER.loaded:
         yield no_model_state(prompt_text, turns)
+        return
+    if names_in(turns[: position + 1]) and not runtime.MANAGER.accepts_images:
+        # Refused before the reply it would replace is thrown away.
+        yield idle_state(
+            prompt_text, restore_turns if restore_turns is not None else turns,
+            runtime.MANAGER.images_refusal(),
+        )
         return
 
     try:
