@@ -525,6 +525,29 @@ body.column-dragging {{ user-select: none; }}
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 15%, transparent);
 }}
 #composer > * {{ flex: 0 0 auto; }}
+/* The pictures waiting to go with the message, as a row of thumbnails above
+   the text. The row takes no room until something is attached. */
+#composer-pictures {{ display: none; }}
+#composer-pictures:has(.picture-chip) {{ display: block; padding: 2px 0 6px; }}
+#composer-pictures .prose {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+#composer-pictures .picture-chip {{
+  position: relative; width: 72px; height: 72px; border-radius: 10px; overflow: hidden;
+  border: 1px solid var(--border-color-primary); background: var(--background-fill-secondary);
+}}
+#composer-pictures .picture-chip img {{ width: 100%; height: 100%; object-fit: cover; margin: 0; }}
+#composer-pictures .picture-remove {{
+  position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: 50%; line-height: 20px; font-size: 14px; cursor: pointer;
+  color: white; background: rgb(0 0 0 / 0.6);
+}}
+#composer-pictures .picture-remove:hover {{ background: rgb(0 0 0 / 0.8); }}
+/* A picture dragged over the box is answered before it is dropped. */
+#composer.dragging-picture {{
+  border-color: var(--color-accent); border-style: dashed;
+}}
+/* Gradio sizes a picture in the conversation to the bubble's full width; a
+   screenshot reads at a size that leaves the text around it in view. */
+#conversation .message-wrap img {{ max-height: 320px; width: auto; max-width: 100%; }}
 #message-input {{ border: 0 !important; background: transparent; padding: 0; }}
 #message-input textarea {{ border: 0; box-shadow: none; background: transparent; }}
 #chat-actions {{ gap: 4px; align-items: center; margin: 0; flex-wrap: wrap; }}

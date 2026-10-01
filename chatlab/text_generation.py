@@ -19,7 +19,7 @@ from typing import Any
 
 import numpy as np
 
-from chatlab import device_memory
+from chatlab import attachments, device_memory, vision
 from chatlab.conversation import THINK_CLOSE, THINK_OPEN
 from chatlab.device_memory import memory_note, reraise_out_of_memory
 from chatlab.engine import Engine
@@ -27,6 +27,7 @@ from chatlab.thinking import THINKING_MODES, supports_thinking
 from chatlab.token_metrics import (
     UNSCORED_BEYOND_LIMIT,
     UNSCORED_FIRST_TOKEN,
+    UNSCORED_IMAGE,
     TokenMetric,
     build_metric,
     normalize_log_probabilities,
@@ -366,6 +367,43 @@ class GenerationMixin:
     def supports_thinking(self) -> bool:
         return self.loaded and supports_thinking(self.model, self.tokenizer)
 
+    @property
+    def accepts_images(self) -> bool:
+        """Whether the model in memory can be shown the pictures in a message."""
+
+        return self.loaded and getattr(self, "processor", None) is not None
+
+    def images_refusal(self) -> str:
+        """Why the model in memory cannot be shown pictures, and what to load instead."""
+
+        name = self.model_id or "This model"
+        reason = getattr(self, "vision_note", None) or vision.NO_VISION
+        return (
+            f"{name} can't be shown pictures: it {reason}. Load a vision model, "
+            f"such as {vision.VISION_SUGGESTION}, to send them."
+        )
+
+    def _image_layout(self, token_ids: Sequence[int], names: Sequence[str]):
+        """The :class:`vision.MediaLayout` for ``token_ids`` and the pictures it holds.
+
+        ``None`` for a sequence without pictures, which is fed exactly as it
+        always was. Called under the model lock. The encoder's output is kept
+        for the last picture set it ran over, so a reply and then every click
+        through its tokens run the encoder once between them.
+        """
+
+        if not names:
+            return None
+        if not self.accepts_images:
+            raise vision.ImagesUnsupported(self.images_refusal())
+        key = (self.load_id, tuple(names))
+        kept = self._image_features
+        if kept is None or kept[:2] != key:
+            self._image_features = None
+            pictures = [attachments.open_for_model(name) for name in names]
+            self._image_features = (*key, vision.encode_images(self.model, self.processor, pictures))
+        return vision.MediaLayout(self.model, token_ids, self._image_features[2])
+
     def _prompt_token_ids(
         self, messages: list[dict], tools: list[dict] | None = None,
         *, thinking_mode: str = "default",
@@ -381,21 +419,37 @@ class GenerationMixin:
         assert self.tokenizer is not None
         tokenizer = self.tokenizer
         prefilled = False
+        names = vision.message_images(messages)
+        if names and not self.accepts_images:
+            raise vision.ImagesUnsupported(self.images_refusal())
+        # Pictures are placed by a chat template, the tokenizer's or failing
+        # that the processor's, which is where some vision repositories keep it.
+        renderer = tokenizer
+        if names and not tokenizer.chat_template:
+            renderer = self.processor
+            if not getattr(renderer, "chat_template", None):
+                raise vision.ImagesUnsupported(
+                    "This model has no chat template to place pictures in."
+                )
 
-        if tools is not None and not tokenizer.chat_template:
+        if tools is not None and not renderer.chat_template:
             raise ValueError("Tool use requires a model with a native chat/tool template.")
-        if tokenizer.chat_template:
+        if renderer.chat_template:
             tool_args = {"tools": tools} if tools is not None else {}
             if thinking_mode not in THINKING_MODES:
                 raise ValueError("Thinking mode must be default, on, or off.")
             if self.supports_thinking and thinking_mode != "default":
                 tool_args["enable_thinking"] = thinking_mode == "on"
-            rendered = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, **tool_args
+            template = vision.template_messages(messages) if names else messages
+            rendered = renderer.apply_chat_template(
+                template, add_generation_prompt=True, tokenize=False, **tool_args
             )
             prefilled = isinstance(rendered, str) and rendered.rstrip().endswith(
                 THINK_OPEN
             )
+            if names:
+                pictures = [attachments.open_for_model(name) for name in names]
+                return vision.expand_prompt(self.processor, rendered, pictures), prefilled
             encoded = tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=True, **tool_args
             )
@@ -936,6 +990,7 @@ class GenerationMixin:
         sample: Callable[[np.ndarray], np.ndarray] | None = None,
         past_key_values=None,
         cached: int = 0,
+        media=None,
     ):
         """Run the model over ``token_ids`` a chunk at a time.
 
@@ -959,6 +1014,12 @@ class GenerationMixin:
         sampler would have drawn from. It is applied to ``"response"`` tokens
         only, so a response prefix that is replayed rather than sampled still
         reports the sampling probability and shift it would have had.
+
+        ``media`` is the sequence's :class:`vision.MediaLayout` when it holds
+        pictures. A picture's tokens are recorded unscored: the model was
+        shown the picture there, and the placeholder it replaced is not a
+        token anything predicted. A chunk never ends inside a picture the
+        model reads in both directions.
         """
 
         assert self.model is not None
@@ -967,14 +1028,29 @@ class GenerationMixin:
         carry: np.ndarray | None = None
         total = len(token_ids)
 
-        for start in range(0, total, PREFILL_CHUNK_SIZE):
+        start = 0
+        while start < total:
             end = min(start + PREFILL_CHUNK_SIZE, total)
+            if media is not None:
+                end = min(media.chunk_end(cached + end) - cached, total)
             logits, past_key_values = engine.forward(
-                token_ids[start:end], past_key_values, cached + start
+                token_ids[start:end], past_key_values, cached + start, media
             )
 
             for index in range(max(start, collect_from), end):
                 token_id = token_ids[index]
+                if media is not None and media.is_placeholder(cached + index):
+                    metrics.append(
+                        unscored_metric(
+                            position=positions[index],
+                            token_id=token_id,
+                            token_text=self._decode_token(token_id),
+                            fallback_text=self._token_fallback(token_id),
+                            segment=segments[index],
+                            reason=UNSCORED_IMAGE,
+                        ).to_dict()
+                    )
+                    continue
                 if index == 0 or index < score_from:
                     metrics.append(
                         unscored_metric(
@@ -1014,6 +1090,7 @@ class GenerationMixin:
 
             carry = normalize_log_probabilities(logits.row(end - start - 1))
             del logits
+            start = end
 
         return metrics, past_key_values, carry
 
@@ -1241,11 +1318,13 @@ class GenerationMixin:
                 # size behind it. Refuse before the cache is allocated, not once
                 # the machine is already out of memory.
                 self._validate_prefix_within_limit(prompt_ids, forced)
+                media = self._image_layout(prompt_ids, vision.message_images(messages))
 
                 sample = _sampler(temperature, top_p, top_k, skip_top_below)
                 prompt_metrics, metrics, past_key_values, raw_log_probs, prompt_note = (
                     self._prefill_response(
-                        prompt_ids, prefix, analyze_prompt=analyze_prompt, sample=sample
+                        prompt_ids, prefix, analyze_prompt=analyze_prompt, sample=sample,
+                        media=media,
                     )
                 )
 
@@ -1287,6 +1366,7 @@ class GenerationMixin:
                     stop_ids=stop_ids,
                     limit=limit,
                     position_bound=position_bound,
+                    media=media,
                     # Taken before the prefix is published, so the time a
                     # reader spends on that first frame counts toward the
                     # next one's interval, as it always has.
@@ -1448,6 +1528,7 @@ class GenerationMixin:
         *,
         analyze_prompt: bool,
         sample: Callable[[np.ndarray], np.ndarray],
+        media=None,
     ) -> tuple[list[dict], list[dict], Any, np.ndarray | None, str]:
         """Feed the prompt and the forced prefix, and describe what was fed.
 
@@ -1472,6 +1553,7 @@ class GenerationMixin:
             score_from=score_from,
             collect_from=0 if analyze_prompt else len(prompt_ids),
             sample=sample,
+            media=media,
         )
         prompt_metrics = [
             metric for metric in prefilled_metrics if metric["segment"] == "prompt"
@@ -1530,6 +1612,7 @@ class GenerationMixin:
         limit: int,
         position_bound: bool,
         last_yield: float,
+        media=None,
     ) -> Iterator[GenerationUpdate]:
         """Publish the forced prefix, then sample the rest a token at a time.
 
@@ -1598,6 +1681,6 @@ class GenerationMixin:
             # and the tokens sampled before this one - is in the
             # cache; this token goes in after them.
             logits, past_key_values = engine.forward(
-                [token_id], past_key_values, prompt_length + position - 1
+                [token_id], past_key_values, prompt_length + position - 1, media
             )
             raw_log_probs = normalize_log_probabilities(logits.row(-1))

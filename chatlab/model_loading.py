@@ -2,9 +2,10 @@
 
 A load checks that the model fits, reads a text model through
 ``AutoModelForCausalLM`` (merging a LoRA adapter into its base when the
-repository is one), an MLX checkpoint through :mod:`mlx_runtime`, or an
-image pipeline through diffusers, and records what is in memory as one
-reading. The claims that decide whether a load may start at all stay on
+repository is one, and through ``AutoModelForImageTextToText`` with its
+processor when it is a vision model; see :mod:`vision`), an MLX checkpoint
+through :mod:`mlx_runtime`, or an image pipeline through diffusers, and
+records what is in memory as one reading. The claims that decide whether a load may start at all stay on
 :class:`model_runtime.ModelManager`.
 """
 
@@ -24,6 +25,7 @@ from chatlab import adapters
 from chatlab import device_memory
 from chatlab import mlx_runtime
 from chatlab import model_cache
+from chatlab import vision
 from chatlab.device_memory import (
     InsufficientMemoryError,
     OutOfMemoryError,
@@ -308,6 +310,9 @@ def _read_text_model(
                 f"A LoRA adapter merges into full-precision weights, not {precision} ones."
             )
         adapter, local_path = local_path, adapter_base_for_load(local_path)
+    # A vision model is read with its encoder, so it can be shown pictures; an
+    # adapter is merged into the language model alone, as it was trained.
+    model_class = AutoModelForCausalLM if adapter is not None else vision.model_class(local_path)
     # The adapter's own tokenizer where it ships one: it is the one its
     # embeddings were trained against, added tokens and chat template both.
     own_tokenizer = adapter is not None and adapters.has_tokenizer(adapter)
@@ -344,7 +349,7 @@ def _read_text_model(
         return model
 
     if backend == "cuda":
-        model = merged(AutoModelForCausalLM.from_pretrained(
+        model = merged(model_class.from_pretrained(
             local_path,
             local_files_only=True,
             dtype=dtype,
@@ -375,7 +380,7 @@ def _read_text_model(
             ) from error
 
         try:
-            model = AutoModelForCausalLM.from_pretrained(
+            model = model_class.from_pretrained(
                 local_path,
                 local_files_only=True,
                 dtype=dtype,
@@ -398,7 +403,7 @@ def _read_text_model(
         # to read and convert, 3 to copy across) and had not finished after
         # seven minutes the other way. An adapter is merged before the copy
         # too, in host memory, for the same reason.
-        model = merged(AutoModelForCausalLM.from_pretrained(
+        model = merged(model_class.from_pretrained(
             local_path,
             local_files_only=True,
             dtype=dtype,
@@ -406,7 +411,7 @@ def _read_text_model(
         )).to("mps")
         device_name = "Apple Metal (MPS)"
     else:
-        model = merged(AutoModelForCausalLM.from_pretrained(
+        model = merged(model_class.from_pretrained(
             local_path,
             local_files_only=True,
             dtype=dtype,
@@ -735,8 +740,15 @@ class LoadingMixin:
 
         if model is not None:
             model.eval()
+        processor, vision_note = (
+            vision.read_processor(local_path, model) if kind == TEXT_KIND else (None, None)
+        )
+        if kind == MLX_KIND and vision.checkpoint_has_vision(local_path):
+            vision_note = vision.MLX_VISION
         self.model = model
         self.tokenizer = tokenizer
+        self.processor = processor
+        self.vision_note = vision_note
         self.pipeline = pipeline
         self.kind = kind
         self.engine = (
@@ -855,9 +867,12 @@ class LoadingMixin:
 
         released, precision, estimated = self.model_id, self.precision, self.loaded_bytes
         self._inspect_cache = None
+        self._image_features = None
         self._jacobian_lens = None
         self.model = None
         self.tokenizer = None
+        self.processor = None
+        self.vision_note = None
         self.pipeline = None
         self.engine = None
         self.kind = None

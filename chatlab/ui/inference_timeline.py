@@ -14,6 +14,7 @@ from chatlab.ui import runtime
 from chatlab.ui.common import failure_status
 from chatlab.ui.inspection import render_lens, render_attention
 from chatlab.ui.panel import describe_token, event_index
+from chatlab.vision import message_images
 
 
 COLORS = {"Prompt / context": "#9fc8f8", "Response / passage": "#c3c2b7", "Selected": "#f5c451"}
@@ -122,6 +123,11 @@ def capture(document, expected, first, last, stride, mode, pin, keep_attention):
             raise ValueError("Position 1 has no preceding prediction. Start at position 2 for the Logit lens.")
         options = {"context_count": len(run.get("context_ids", [])),
                    "load_id": run["load_id"], "steering": run.get("settings", {}).get("steering")}
+        # The pictures behind the prompt's placeholders, from the messages the
+        # run was asked; a run without any is fed exactly as before.
+        pictures = message_images(run.get("messages") or [])
+        if pictures:
+            options["images"] = pictures
         if mode == "Jacobian" and runtime.MANAGER.jacobian_lens_import() is None:
             raise ValueError("Import a matching Jacobian lens in Layers and attention first.")
         yield skip, f"Recomputing {len(positions)} positions. Completed readouts are saved as they finish."

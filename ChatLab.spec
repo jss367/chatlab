@@ -60,6 +60,9 @@ for package in (
     "sentencepiece",
     "tiktoken",
     "tokenizers",
+    # A vision model's image processor. Transformers imports it lazily, when
+    # a picture is first prepared, and its image operators are compiled.
+    "torchvision",
 ):
     package_datas, package_binaries, package_imports = collect_all(package)
     datas += package_datas

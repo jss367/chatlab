@@ -46,6 +46,11 @@ protobuf>=4.25
 sentencepiece>=0.2
 tiktoken>=0.7
 torch>=2.5
+# Turns a pasted picture into a vision model's input. Transformers' image
+# processors run on it (their slow numpy versions are going away), and so do
+# the video processors a Qwen-VL processor loads beside its image one, which
+# refuse to be built without it. 0.20 is the release paired with torch 2.5.
+torchvision>=0.20
 # 5.3 is the first release with the Metal quantizer behind the 8-bit and
 # 4-bit weight precisions; everything else runs on 4.57, so that stays the
 # floor and an older install is told which version it needs.

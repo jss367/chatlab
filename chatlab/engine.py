@@ -92,11 +92,15 @@ class Engine(Protocol):
         """The stop tokens the model declares, as a set the caller may add to."""
         ...
 
-    def forward(self, token_ids: Sequence[int], cache: Any, cached: int) -> tuple[Logits, Any]:
+    def forward(
+        self, token_ids: Sequence[int], cache: Any, cached: int, media: Any = None
+    ) -> tuple[Logits, Any]:
         """Feed ``token_ids`` after the ``cached`` tokens already in ``cache``.
 
         Returns the logits for every fed position and the cache that now
-        holds them too.
+        holds them too. ``media`` is the :class:`vision.MediaLayout` of a
+        sequence with pictures in it, which only the Transformers backend
+        accepts.
         """
         ...
 
@@ -116,7 +120,7 @@ class Engine(Protocol):
         """Turn a normed residual vector into logits the way the model does."""
         ...
 
-    def inspect_step(self, token_id: int, cache: Any, cached: int) -> LensReading:
+    def inspect_step(self, token_id: int, cache: Any, cached: int, media: Any = None) -> LensReading:
         """Feed one token and read every layer's prediction and attention."""
         ...
 
