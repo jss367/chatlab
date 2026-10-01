@@ -33,7 +33,7 @@ import inspect
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -223,11 +223,19 @@ class ImageFeatures:
     reads ``mm_encoder_outputs`` back in the form it wrote it. ``grid`` is
     each picture's temporal, height and width patch count, for the models
     whose positions follow the picture's shape.
+
+    ``layers`` holds the encoder's per-token output for particular decoder
+    layers, flattened like ``rows``: Qwen3-VL's deepstack features, which it
+    adds to the residual stream at the picture's positions in its first few
+    layers. ``output_class`` is the type the model's encoder output came
+    back as, so a slice handed back to it carries the same fields.
     """
 
     rows: Any
     sequence: bool
     grid: Any = None
+    layers: dict[str, list[Any]] = field(default_factory=dict)
+    output_class: Any = None
 
     @property
     def count(self) -> int:
@@ -254,10 +262,22 @@ def encode_images(model, processor, images: Sequence[Any]) -> ImageFeatures:
     output = model.get_image_features(**arguments, return_dict=True)
     pooled = getattr(output, "pooler_output", output)
     sequence = isinstance(pooled, (list, tuple))
-    parts = list(pooled) if sequence else [pooled]
-    rows = torch.cat([part.reshape(-1, part.shape[-1]) for part in parts], dim=0)
-    grid = prepared.get("image_grid_thw")
-    return ImageFeatures(rows=rows.detach(), sequence=sequence, grid=grid)
+
+    def flat(value):
+        parts = list(value) if isinstance(value, (list, tuple)) else [value]
+        return torch.cat([part.reshape(-1, part.shape[-1]) for part in parts], dim=0).detach()
+
+    layers = {}
+    deepstack = getattr(output, "deepstack_features", None)
+    if deepstack:
+        layers["deepstack_features"] = [flat(layer) for layer in deepstack]
+    return ImageFeatures(
+        rows=flat(pooled),
+        sequence=sequence,
+        grid=prepared.get("image_grid_thw"),
+        layers=layers,
+        output_class=type(output) if hasattr(output, "pooler_output") else None,
+    )
 
 
 class MediaLayout:
@@ -365,10 +385,18 @@ class MediaLayout:
         placed = self.placed[inside]
         if bool(placed.any()):
             first = int(self.ordinal[inside][placed][0])
-            rows = self.features.rows[first : first + int(placed.sum())]
-            pooled = (rows,) if self.features.sequence else rows
+            taken = slice(first, first + int(placed.sum()))
+
+            def shaped(rows):
+                return (rows,) if self.features.sequence else rows
+
+            output_class = self.features.output_class or BaseModelOutputWithPooling
+            fields = {
+                name: [shaped(layer[taken]) for layer in layers]
+                for name, layers in self.features.layers.items()
+            }
             arguments["mm_encoder_outputs"] = {
-                "image": BaseModelOutputWithPooling(pooler_output=pooled)
+                "image": output_class(pooler_output=shaped(self.features.rows[taken]), **fields)
             }
         if self.positions is not None:
             known = self.positions[:, :, inside]

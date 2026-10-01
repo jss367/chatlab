@@ -375,6 +375,53 @@ class MediaLayoutTests(unittest.TestCase):
         ids = [1, 2, 3] + [120] * 17 + list(range(4, 30))
         self.check(model, ids, {"pixel_values": pixels}, {"pixel_values": pixels}, len(ids) - 5)
 
+    def check_qwen_vl(self, model):
+        grid = torch.tensor([[1, 4, 6]])
+        pixels = torch.randn(int(grid.prod(-1).sum()), 3 * 2 * 4 * 4)
+        ids = [1, 2, 3, 152] + [151] * 6 + [153] + list(range(4, 30))
+        prepared = {"pixel_values": pixels, "image_grid_thw": grid}
+        types = torch.tensor([[int(token == 151) for token in ids]])
+        self.check(model, ids, prepared, dict(prepared, mm_token_type_ids=types), len(ids) - 8)
+
+    def test_qwen2_5_vl_takes_the_same_four_row_positions(self):
+        from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
+
+        torch.manual_seed(4)
+        self.check_qwen_vl(Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLConfig(
+            text_config=dict(
+                vocab_size=160, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                num_attention_heads=4, num_key_value_heads=2,
+                rope_parameters={"rope_type": "default", "rope_theta": 10000, "mrope_section": [1, 1, 2]},
+            ),
+            vision_config=dict(
+                depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32,
+                patch_size=4, spatial_merge_size=2, temporal_patch_size=2, window_size=8,
+                fullatt_block_indexes=[0],
+            ),
+            image_token_id=151, vision_start_token_id=152, vision_end_token_id=153, video_token_id=154,
+        )).eval())
+
+    def test_qwen3_vl_deepstack_features_are_sliced_with_the_picture(self):
+        from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
+
+        torch.manual_seed(5)
+        self.check_qwen_vl(Qwen3VLForConditionalGeneration(Qwen3VLConfig(
+            text_config=dict(
+                vocab_size=160, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                num_attention_heads=4, num_key_value_heads=2, head_dim=8,
+                rope_parameters={
+                    "rope_type": "default", "rope_theta": 10000, "mrope_section": [1, 1, 2],
+                    "mrope_interleaved": True,
+                },
+            ),
+            vision_config=dict(
+                depth=2, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32,
+                patch_size=4, spatial_merge_size=2, temporal_patch_size=2,
+                num_position_embeddings=64, deepstack_visual_indexes=[0],
+            ),
+            image_token_id=151, vision_start_token_id=152, vision_end_token_id=153, video_token_id=154,
+        )).eval())
+
     def test_a_prompt_whose_picture_tokens_were_edited_is_refused(self):
         model = tiny_qwen()
         ids, prepared = qwen_inputs([[1, 4, 4]])
