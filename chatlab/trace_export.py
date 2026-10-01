@@ -60,6 +60,16 @@ def trace_to_json(trace: dict) -> str:
     if sampling.get("steering") is not None:
         sampling["steering"] = expand(sampling["steering"])
         trace = dict(trace, sampling=sampling)
+    # The pictures the prompt showed the model, embedded the way a saved
+    # conversation carries them, so the trace still holds its input when it
+    # leaves this machine. Added here rather than when the trace is built,
+    # since the built trace is rewritten on every streaming frame.
+    from chatlab.attachments import export_images
+    from chatlab.vision import message_images
+
+    pictures = message_images(trace.get("messages") or [])
+    if pictures:
+        trace = dict(trace, images=export_images(pictures))
     return json.dumps(trace, ensure_ascii=False, indent=2) + "\n"
 
 

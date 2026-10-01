@@ -49,6 +49,10 @@ MAX_IMAGE_PIXELS = 40 * 1024 * 1024
 # The most pictures one message carries. Each is hundreds to thousands of
 # prompt tokens once a model reads it.
 MAX_IMAGES_PER_MESSAGE = 8
+# The most a whole conversation may show a model at once. Every picture in
+# it is decoded and prepared for each reply before the prompt's length can
+# be judged, so the bound has to be on the count rather than on tokens.
+MAX_IMAGES_PER_PROMPT = 16
 # What a vision model is shown at most, in pixels: a picture larger than
 # this is scaled down, keeping its shape, before its processor sees it. The
 # processors cap pictures themselves, but Qwen's cap is 16 megapixels, which
@@ -152,6 +156,13 @@ def store_image(data: bytes) -> str:
         raise
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as error:
         raise AttachmentError("That file is not a picture ChatLab can read.") from error
+    if len(data) > MAX_IMAGE_BYTES:
+        # Only a converted picture can get here: a small GIF or TIFF can
+        # come out as a PNG many times its size.
+        raise AttachmentError(
+            f"That picture is {len(data) / 1024**2:.0f} MB once converted to PNG; "
+            f"the most a message takes is {MAX_IMAGE_BYTES // 1024**2} MB."
+        )
     name = f"{hashlib.sha256(data).hexdigest()}.{KEPT_FORMATS[image_format]}"
     _write(name, data)
     return name
@@ -276,6 +287,19 @@ def prune_unreferenced(sources: Iterable[Path], grace: float = UNREFERENCED_GRAC
         except OSError:
             continue
     return removed
+
+
+def too_many_pictures(count: int) -> str:
+    return (
+        f"This conversation would show the model {count} pictures; a reply can be "
+        f"given at most {MAX_IMAGES_PER_PROMPT}. Start a new conversation for more."
+    )
+
+
+def picture_count(turns: Iterable[dict] | None) -> int:
+    """How many pictures ``turns`` would show a model, a repeated one each time."""
+
+    return sum(len(turn.get("images") or []) for turn in turns or [])
 
 
 def names_in(turns: Iterable[dict] | None) -> list[str]:

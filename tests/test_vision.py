@@ -88,6 +88,28 @@ class AttachmentStoreTests(unittest.TestCase):
             with self.assertRaises(attachments.AttachmentError):
                 attachments.open_for_model(name)
 
+    def test_a_converted_picture_is_held_to_the_byte_limit_too(self):
+        buffer = io.BytesIO()
+        Image.new("RGB", (60, 60), "olive").save(buffer, format="BMP")
+        source = buffer.getvalue()
+        with mock.patch.object(attachments, "MAX_IMAGE_BYTES", len(source)):
+            with mock.patch("PIL.Image.Image.save", lambda self, out, format=None: out.write(b"x" * (len(source) + 1))):
+                with self.assertRaises(attachments.AttachmentError) as caught:
+                    attachments.store_image(source)
+        self.assertIn("once converted to PNG", str(caught.exception))
+
+    def test_an_exported_trace_carries_its_pictures(self):
+        from chatlab.trace_export import build_trace, trace_to_json
+
+        name = attachments.store_image(png_bytes(color="maroon"))
+        trace = build_trace(
+            model_id="m", messages=[{"role": "user", "content": "hi", "images": [name]}],
+            response="", sampling={}, metrics=[],
+        )
+        exported = json.loads(trace_to_json(trace))
+        self.assertEqual(base64.b64decode(exported["images"][name]), attachments.read_bytes(name))
+        self.assertNotIn("images", trace)
+
     def test_a_tampered_picture_fails_its_integrity_check(self):
         name = attachments.store_image(png_bytes(color="green"))
         attachments.image_path(name).write_bytes(png_bytes(color="purple"))
@@ -517,6 +539,14 @@ class VisionManagerTests(unittest.TestCase):
         self.assertIsNotNone(view["summary"])
         with self.assertRaises(Exception):
             self.manager.read_kv_cache(ids[: len(last.prompt_ids) + 1], 1)
+
+    def test_a_conversation_with_too_many_pictures_is_refused_before_any_is_opened(self):
+        self.messages[0]["images"] = [self.picture] * (attachments.MAX_IMAGES_PER_PROMPT + 1)
+        with mock.patch.object(attachments, "open_for_model") as opened:
+            with self.assertRaises(ValueError) as caught:
+                self.reply()
+        opened.assert_not_called()
+        self.assertIn("at most", str(caught.exception))
 
     def test_a_picture_token_is_not_inspected(self):
         last = self.reply()

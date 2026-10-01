@@ -422,6 +422,8 @@ class GenerationMixin:
         names = vision.message_images(messages)
         if names and not self.accepts_images:
             raise vision.ImagesUnsupported(self.images_refusal())
+        if len(names) > attachments.MAX_IMAGES_PER_PROMPT:
+            raise ValueError(attachments.too_many_pictures(len(names)))
         # Pictures are placed by a chat template, the tokenizer's or failing
         # that the processor's, which is where some vision repositories keep it.
         renderer = tokenizer

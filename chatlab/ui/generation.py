@@ -35,7 +35,7 @@ from chatlab.token_metrics import (
     summarize,
 )
 from chatlab.trace_export import build_trace
-from chatlab.attachments import names_in
+from chatlab.attachments import MAX_IMAGES_PER_PROMPT, names_in, picture_count, too_many_pictures
 from chatlab.vision import message_images
 from chatlab.ui import runtime
 from chatlab.ui.common import (
@@ -980,6 +980,10 @@ def _send(
         # and its pictures in the box for a model that can read them. An
         # earlier picture counts too: the model would be fed it all the same.
         yield idle_state(prompt_text, turns, runtime.MANAGER.images_refusal())
+        return
+    count = picture_count(turns) + len(images)
+    if count > MAX_IMAGES_PER_PROMPT:
+        yield idle_state(prompt_text, turns, too_many_pictures(count))
         return
 
     user_turn = make_turn("user", message)
