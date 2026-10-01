@@ -148,6 +148,11 @@ def read_processor(local_path: Path, model) -> tuple[Any, str | None]:
         return None, None
     if not callable(getattr(model, "get_image_features", None)):
         return None, None
+    # The encoder's output reaches the model through ``mm_encoder_outputs``,
+    # which older Transformers releases do not take; there a picture would
+    # load and then fail at its first prefill.
+    if "mm_encoder_outputs" not in inspect.signature(model.forward).parameters:
+        return None, "needs a newer Transformers release to be shown pictures"
     if getattr(_base(model), "get_rope_index", None) is not None and not _uses_mrope(model):
         return None, "numbers its picture tokens in a way ChatLab does not lay out yet"
     if not checkpoint_reads_images(local_path):

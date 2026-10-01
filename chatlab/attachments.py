@@ -208,6 +208,54 @@ def size_of(name: str) -> tuple[int, int] | None:
         return None
 
 
+# How long an unreferenced picture is kept before a startup sweep removes it.
+# A picture is stored the moment it is pasted, before any conversation names
+# it, and another window can be holding one in its message box; a day leaves
+# every draft in progress alone.
+UNREFERENCED_GRACE_SECONDS = 24 * 60 * 60
+
+
+def prune_unreferenced(sources: Iterable[Path], grace: float = UNREFERENCED_GRACE_SECONDS) -> int:
+    """Remove pictures nothing in ``sources`` names any more; return how many.
+
+    A picture taken off the message box, or left behind by a deleted
+    conversation, would otherwise be kept forever, at up to
+    :data:`MAX_IMAGE_BYTES` each. ``sources`` are the files that can name one
+    (the conversations file, saved experiments), searched as text for
+    picture names rather than parsed, so a file of any shape keeps what it
+    mentions. A source that exists but cannot be read stops the sweep:
+    deleting against a partial view of what is referenced would delete what
+    it could not see.
+    """
+
+    import time
+
+    referenced: set[str] = set()
+    for source in sources:
+        try:
+            text = Path(source).read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return 0
+        referenced.update(IMAGE_NAME.findall(text))
+    directory = image_directory()
+    if not directory.is_dir():
+        return 0
+    cutoff = time.time() - grace
+    removed = 0
+    for path in directory.iterdir():
+        if not is_image_name(path.name) or path.name in referenced:
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def names_in(turns: Iterable[dict] | None) -> list[str]:
     """Every picture ``turns`` refer to, once each, in the order they appear."""
 

@@ -22,7 +22,7 @@ from functools import partial
 
 import gradio as gr
 
-from chatlab import attachments, settings, themes
+from chatlab import attachments, experiment_runs, library, settings, themes
 from chatlab.conversation import MAIN_BRANCH, branch_choices, new_forks
 from chatlab.device_memory import warm_device
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
@@ -212,6 +212,11 @@ def build_app() -> gr.Blocks:
     pictures_directory = attachments.image_directory()
     pictures_directory.mkdir(parents=True, exist_ok=True)
     gr.set_static_paths([str(pictures_directory)])
+    # And the ones nothing names any more, taken off a message before it was
+    # sent or left by a deleted conversation, are swept out once per start.
+    attachments.prune_unreferenced(
+        [library.library_path(), *experiment_runs.directory().glob("*.json")]
+    )
     # Read the device beside the interface. Nothing here waits for it, and
     # the pages that describe a load - the fit verdicts in both model lists,
     # the hardware panel on the Settings page - are the fuller reading for it

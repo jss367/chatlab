@@ -125,6 +125,37 @@ class AttachmentStoreTests(unittest.TestCase):
             attachments.import_images([name], {name: wrong})
 
 
+class PruneTests(unittest.TestCase):
+    def test_only_old_pictures_nothing_names_are_swept(self):
+        import os
+        import time
+
+        kept = attachments.store_image(png_bytes(color=(1, 2, 3)))
+        orphan = attachments.store_image(png_bytes(color=(4, 5, 6)))
+        fresh = attachments.store_image(png_bytes(color=(7, 8, 9)))
+        old = time.time() - 2 * attachments.UNREFERENCED_GRACE_SECONDS
+        for name in (kept, orphan):
+            os.utime(attachments.image_path(name), (old, old))
+        source = attachments.image_directory().parent / "refs.json"
+        source.write_text(json.dumps({"turns": [{"images": [kept]}]}))
+        attachments.prune_unreferenced([source, source.with_name("absent.json")])
+        self.assertTrue(attachments.image_path(kept).is_file())
+        self.assertTrue(attachments.image_path(fresh).is_file())
+        self.assertFalse(attachments.image_path(orphan).exists())
+
+    def test_an_unreadable_source_stops_the_sweep(self):
+        import os
+        import time
+
+        orphan = attachments.store_image(png_bytes(color=(10, 11, 12)))
+        old = time.time() - 2 * attachments.UNREFERENCED_GRACE_SECONDS
+        os.utime(attachments.image_path(orphan), (old, old))
+        unreadable = attachments.image_directory().parent / "refs-dir.json"
+        unreadable.mkdir(exist_ok=True)
+        self.assertEqual(attachments.prune_unreferenced([unreadable]), 0)
+        self.assertTrue(attachments.image_path(orphan).is_file())
+
+
 class ConversationPictureTests(unittest.TestCase):
     def setUp(self):
         self.name = attachments.store_image(png_bytes(color="yellow"))
@@ -517,6 +548,19 @@ class SendTests(unittest.TestCase):
         self.assertEqual(frames[-1]["turns"][0]["images"], [self.picture])
         # Only the opening frame writes the box.
         self.assertTrue(all("attachments" not in dict(frame) for frame in frames[1:]))
+
+
+class ProcessorTests(unittest.TestCase):
+    def test_a_transformers_without_encoder_output_reuse_is_refused_up_front(self):
+        model = tiny_qwen()
+
+        def forward(input_ids=None, pixel_values=None):
+            raise AssertionError("not called")
+
+        with mock.patch.object(model, "forward", forward):
+            processor, note = vision.read_processor(attachments.image_directory(), model)
+        self.assertIsNone(processor)
+        self.assertIn("newer Transformers", note)
 
 
 class CheckpointTests(unittest.TestCase):
