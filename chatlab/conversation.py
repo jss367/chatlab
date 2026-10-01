@@ -9,6 +9,11 @@ straight to JSON:
 kept beside the answer rather than inside it so the interface can collapse it
 and so the next request can deliberately include or drop it.
 
+A user turn can carry the pictures pasted into it, by the names
+:mod:`attachments` keeps them under, in the order they were attached::
+
+    {"images": ["<sha256>.png", ...]}
+
 A generated assistant turn also records where it came from, so the list of
 conversations can say which model answered and how big the exchange was:
 
@@ -48,6 +53,7 @@ import json
 from collections.abc import Iterable
 from datetime import datetime, timezone
 
+from chatlab import attachments
 from chatlab.steering import compact as compact_steering, export_assets, import_assets
 
 THINK_OPEN = "<think>"
@@ -55,6 +61,9 @@ THINK_CLOSE = "</think>"
 REASONING_TITLE = "Reasoning"
 # Leads the notice a failed reply carries under whatever it produced first.
 FAILURE_TITLE = "Generation failed"
+# What stands in for a picture where only text can go: a conversation's title,
+# the token view.
+PICTURE_MARK = "[picture]"
 SAVE_FORMAT = "chatlab-conversation-1"
 MAIN_BRANCH = "Main"
 FORK_PREFIX = "Fork"
@@ -334,6 +343,12 @@ def display_messages(
         reasoning = turn.get("reasoning") or ""
         content = turn.get("content") or ""
         error = turn.get("error") if turn["role"] == "assistant" else None
+        images = turn.get("images") or [] if turn["role"] == "user" else []
+        for name in images:
+            # A message of its own per picture, ahead of the text that asks
+            # about it, the way the model is shown them.
+            messages.append({"role": "user", "content": picture_message(name)})
+            index_map.append((position, "image"))
         if reasoning:
             status = "done" if turn.get("reasoning_closed", True) else "pending"
             messages.append(
@@ -344,7 +359,7 @@ def display_messages(
                 }
             )
             index_map.append((position, "reasoning"))
-        if content or not (reasoning or error):
+        if content or not (reasoning or error or images):
             if not content and turn.get("token_step_paused"):
                 content = "Paused before visible text."
                 if turn_tokens(turn):
@@ -358,6 +373,18 @@ def display_messages(
             index_map.append((position, "error"))
 
     return messages, index_map
+
+
+def picture_message(name: str) -> dict:
+    """A stored picture as a chatbot message's content."""
+
+    try:
+        path = attachments.image_path(name)
+    except attachments.AttachmentError:
+        path = None
+    if path is None or not path.is_file():
+        return f'<div class="failure">{html.escape("This picture is no longer on this machine.")}</div>'
+    return {"path": str(path), "alt_text": "Pasted picture"}
 
 
 def failure_notice(error: str) -> str:
@@ -422,6 +449,12 @@ def model_messages(
         reasoning = turn.get("reasoning") or ""
         if include_reasoning and reasoning:
             content = f"{THINK_OPEN}\n{reasoning}\n{THINK_CLOSE}\n{content}".strip()
+        images = turn.get("images") or [] if turn["role"] == "user" else []
+        if images:
+            # Beside the text rather than inside it, so every reader of these
+            # messages that knows nothing of pictures still finds a string.
+            messages.append({"role": "user", "content": content, "images": list(images)})
+            continue
         if not content:
             if turn["role"] == "assistant" and (
                 reasoning or turn.get("token_step_paused") or turn.get("error")
@@ -694,6 +727,8 @@ def branch_title(turns: list[dict] | None, limit: int = TITLE_LIMIT) -> str:
     for turn in turns or []:
         if turn["role"] == "user":
             text = " ".join((turn.get("content") or "").split())
+            if turn.get("images"):
+                text = f"{PICTURE_MARK} {text}".strip()
             if len(text) > limit:
                 return text[: limit - 1].rstrip() + "…"
             return text
@@ -787,6 +822,8 @@ def turn_entries(turns: list[dict] | None) -> list[dict]:
         }
         # This is transcript structure, not a measurement: an invisible step
         # still owns an assistant slot after the token metrics are discarded.
+        if turn["role"] == "user" and turn.get("images"):
+            entry["images"] = list(turn["images"])
         if turn["role"] == "assistant" and turn.get("token_step_paused") is True:
             entry["token_step_paused"] = True
         if turn["role"] == "assistant" and isinstance(turn.get("error"), str) and turn["error"]:
@@ -822,6 +859,10 @@ def turns_from_entries(raw_turns) -> list[dict]:
         if not isinstance(content, str) or not isinstance(reasoning, str):
             raise ValueError("Turn content and reasoning must be strings.")
         turn = make_turn(role, content, reasoning)
+        if entry.get("images") is not None and role == "user":
+            images = attachments.image_names(entry["images"])
+            if images:
+                turn["images"] = images
         if "token_step_paused" in entry:
             if not isinstance(entry["token_step_paused"], bool):
                 raise ValueError("Turn token_step_paused must be a bool.")
@@ -860,6 +901,9 @@ def to_json(turns: list[dict] | None, *, system_prompt: str = "", steering: dict
     assets = export_assets([payload.get("steering"), *(turn.get("steering") for turn in payload["turns"])])
     if assets:
         payload["steering_vectors"] = assets
+    pictures = attachments.names_in(payload["turns"])
+    if pictures:
+        payload["images"] = attachments.export_images(pictures)
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
@@ -878,6 +922,7 @@ def from_json(payload: str) -> tuple[list[dict], str]:
         values.extend(turn.get("steering") for turn in raw_turns if isinstance(turn, dict))
     import_assets(values, data.get("steering_vectors"))
     turns = turns_from_entries(raw_turns)
+    attachments.import_images(attachments.names_in(turns), data.get("images"))
 
     system_prompt = data.get("system_prompt", "")
     if not isinstance(system_prompt, str):

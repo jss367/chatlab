@@ -19,7 +19,12 @@ from chatlab import logs
 from chatlab import device_memory
 from chatlab import updater
 from chatlab.app import build_app, current_manager
-from chatlab.desktop_smoke import smoke_test_metal, smoke_test_mlx, smoke_test_pipelines
+from chatlab.desktop_smoke import (
+    smoke_test_metal,
+    smoke_test_mlx,
+    smoke_test_pipelines,
+    smoke_test_vision,
+)
 from chatlab.version import __version__
 
 
@@ -111,11 +116,12 @@ def start_local_server():
 
 
 def smoke_test() -> int:
-    """Verify packaged Metal, MLX and diffusers support, and the local server."""
+    """Verify packaged Metal, MLX, diffusers and vision support, and the local server."""
 
     smoke_test_metal()
     smoke_test_mlx()
     smoke_test_pipelines()
+    smoke_test_vision()
     demo, local_url = start_local_server()
     try:
         with urlopen(local_url, timeout=15) as response:

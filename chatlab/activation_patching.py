@@ -11,6 +11,7 @@ import inspect
 import math
 
 from chatlab.steering import active
+from chatlab.vision import message_images
 
 
 SUPPORTED_MODELS = {"llama", "qwen2", "olmo3"}
@@ -48,6 +49,10 @@ def experiment(donor, recipient, target_index, donor_count, width, contrast_inde
             raise ValueError("Both runs must record the model load that produced them.")
         if active((run.get("settings") or {}).get("steering")):
             raise ValueError("Turn steering off and fill both slots again before patching.")
+        # The prefixes are rebuilt from token ids alone, and a picture's
+        # placeholders say nothing of the picture behind them.
+        if message_images(run.get("messages") or []):
+            raise ValueError("Patching cannot feed pictures yet. Choose runs whose messages have none.")
     if donor["load_id"] != recipient["load_id"] or donor["model_id"] != recipient["model_id"]:
         raise ValueError("Both runs must come from the same model load. Fill both slots again.")
     target_index = integer(target_index, "Answer token")

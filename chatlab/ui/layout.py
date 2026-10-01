@@ -22,7 +22,7 @@ from functools import partial
 
 import gradio as gr
 
-from chatlab import settings, themes
+from chatlab import attachments, experiment_runs, library, settings, themes
 from chatlab.conversation import MAIN_BRANCH, branch_choices, new_forks
 from chatlab.device_memory import warm_device
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
@@ -80,6 +80,7 @@ from chatlab.ui.generation import (
 from chatlab.ui.icons import icon_classes
 from chatlab.ui.images_layout import build_images_page, wire_images_page
 from chatlab.ui.inspection import JACOBIAN_CSS, JACOBIAN_JS
+from chatlab.ui.pictures import PICTURES_JS, REMOVE_BRIDGE_ID, attach_pictures, remove_picture
 from chatlab.ui.models_layout import (
     ModelRefresh,
     ModelsPage,
@@ -145,6 +146,7 @@ class SharedState:
     prompt_menu_request: gr.Textbox
     prompt_menu_response: gr.HTML
     prompt_menu_action: gr.Textbox
+    picture_remove: gr.Textbox
     selected_token: gr.State
     branch_pick: gr.State
     forks: gr.State
@@ -203,6 +205,18 @@ def build_app() -> gr.Blocks:
     # neighbour's would be a puzzle to explain.
     saved = settings.load()
     settings.ensure_file()
+    # The pictures pasted into conversations are served from where they are
+    # kept: each is stored once under its own hash and never rewritten, so
+    # copying one into Gradio's cache on every frame that draws it would buy
+    # nothing. See ui.pictures.
+    pictures_directory = attachments.image_directory()
+    pictures_directory.mkdir(parents=True, exist_ok=True)
+    gr.set_static_paths([str(pictures_directory)])
+    # And the ones nothing names any more, taken off a message before it was
+    # sent or left by a deleted conversation, are swept out once per start.
+    attachments.prune_unreferenced(
+        [library.library_path(), *experiment_runs.directory().glob("*.json")]
+    )
     # Read the device beside the interface. Nothing here waits for it, and
     # the pages that describe a load - the fit verdicts in both model lists,
     # the hardware panel on the Settings page - are the fuller reading for it
@@ -333,6 +347,11 @@ def _build_shared_state() -> SharedState:
     prompt_menu_request = gr.Textbox(elem_id=request_id, elem_classes=[MENU_BRIDGE_CLASS])
     prompt_menu_response = gr.HTML(elem_id=response_id, elem_classes=[MENU_BRIDGE_CLASS])
     prompt_menu_action = gr.Textbox(elem_id=action_id, elem_classes=[MENU_BRIDGE_CLASS])
+    # A thumbnail's remove button in the message box writes its picture's
+    # name here; see ui.pictures. Kept with the other bridges rather than in
+    # the composer, where Gradio would draw it in one form with the message
+    # box and the rule that hides a bridge's form would hide the box too.
+    picture_remove = gr.Textbox(elem_id=REMOVE_BRIDGE_ID, elem_classes=[MENU_BRIDGE_CLASS])
     selected_token = gr.State(None)
     branch_pick = gr.State(None)
     # Forking: the other transcripts, and the chatbot message last clicked.
@@ -387,6 +406,7 @@ def _build_shared_state() -> SharedState:
         prompt_menu_request=prompt_menu_request,
         prompt_menu_response=prompt_menu_response,
         prompt_menu_action=prompt_menu_action,
+        picture_remove=picture_remove,
         selected_token=selected_token,
         branch_pick=branch_pick,
         forks=forks_state,
@@ -580,6 +600,7 @@ def _wire_page_scripts(
     demo.load(None, None, None, js=TOKEN_MENU_JS)
     demo.load(None, None, None, js=TREE_JS)
     demo.load(None, None, None, js=JACOBIAN_JS)
+    demo.load(None, None, None, js=PICTURES_JS)
     chat_page.tree.action.input(
         select_tree_branch,
         [chat_page.tree.action, states.conversation, states.forks, states.tree_selection],
@@ -711,6 +732,8 @@ def _wire_conversations(
         "chat_context_ids": states.chat_context_ids,
         "selected_token": states.selected_token,
         "branch_pick": states.branch_pick,
+        "attachments": chat_page.chat.attachments,
+        "attachment_strip": chat_page.chat.attachment_strip,
         "token_editor": chat_page.chat.token_editor,
         "token_edit_target": states.token_edit_target,
         "forks": states.forks,
@@ -749,8 +772,22 @@ def _wire_conversations(
         [states.prompt_menu_action, states.context_ids, states.prompt_metrics, *chat_inputs],
         CHAT_OUTPUT_NAMES,
     )
-    start_response(chat_page.chat.send_button.click, chat, chat_inputs, CHAT_OUTPUT_NAMES)
-    start_response(chat_page.chat.prompt.submit, chat, chat_inputs, CHAT_OUTPUT_NAMES)
+    # Sending reads the pictures waiting in the composer as well as its text.
+    send_inputs = [*chat_inputs, chat_page.chat.attachments]
+    start_response(chat_page.chat.send_button.click, chat, send_inputs, CHAT_OUTPUT_NAMES)
+    start_response(chat_page.chat.prompt.submit, chat, send_inputs, CHAT_OUTPUT_NAMES)
+    # A picture pasted, dropped or chosen joins the message; one taken off
+    # leaves it. Neither touches the conversation.
+    chat_page.chat.attach_button.upload(
+        attach_pictures,
+        [chat_page.chat.attach_button, chat_page.chat.attachments],
+        [chat_page.chat.attachments, chat_page.chat.attachment_strip, chat_page.chat.generation_status],
+    )
+    states.picture_remove.input(
+        remove_picture,
+        [states.picture_remove, chat_page.chat.attachments],
+        [chat_page.chat.attachments, chat_page.chat.attachment_strip],
+    )
     start_response(chat_page.chat.retry_button.click, retry_last, chat_inputs, CHAT_OUTPUT_NAMES)
     start_response(chat_page.chat.next_token_button.click, next_token, [states.branch_pick, *chat_inputs], CHAT_OUTPUT_NAMES)
     start_response(chat_page.chat.chatbot.retry, retry_message, chat_inputs, CHAT_OUTPUT_NAMES)

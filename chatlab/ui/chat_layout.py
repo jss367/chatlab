@@ -28,7 +28,7 @@ from chatlab.compare import (
 from chatlab.conversation import new_forks
 from chatlab.token_metrics import COLOR_SCALES, DEFAULT_COLOR_SCALE
 from chatlab.trace_export import write_trace_export
-from chatlab.ui import runtime, experiments, experiment_compare
+from chatlab.ui import runtime, experiments, experiment_compare, pictures
 from chatlab.ui.activation_patching import build as build_activation_patching
 from chatlab.ui.common import (
     CONVERSATION_PANE_QUEUE,
@@ -178,6 +178,9 @@ class ChatTab:
     token_edit_save: gr.Button
     token_edit_cancel: gr.Button
     prompt: gr.Textbox
+    attachments: gr.State
+    attachment_strip: gr.HTML
+    attach_button: gr.UploadButton
     send_button: gr.Button
     stop_button: gr.Button
     retry_button: gr.Button
@@ -587,6 +590,11 @@ def _build_chat_tab(saved: settings.Settings, states: SharedState) -> tuple[Chat
     # part of the box rather than as four loose
     # buttons under it.
     with gr.Column(elem_id="composer"):
+        # The pictures waiting to go with the message, by stored name, and
+        # their thumbnails; see ui.pictures. A picture is pasted or dropped
+        # onto the box, or chosen with Attach below.
+        attachments = gr.State([])
+        attachment_strip = gr.HTML("", elem_id=pictures.STRIP_ID)
         prompt = gr.Textbox(
             label="Message",
             show_label=False,
@@ -618,6 +626,16 @@ def _build_chat_tab(saved: settings.Settings, states: SharedState) -> tuple[Chat
             retry_button = gr.Button("Retry", min_width=80, elem_classes=icon_classes("rotate-ccw"))
             next_token_button = gr.Button("Next token", min_width=90)
             undo_button = gr.Button("Undo last", min_width=90, elem_classes=icon_classes("undo"))
+            attach_button = gr.UploadButton(
+                "Attach",
+                file_types=["image"],
+                file_count="multiple",
+                type="filepath",
+                min_width=80,
+                variant="secondary",
+                elem_id=pictures.ATTACH_ID,
+                elem_classes=icon_classes("paperclip"),
+            )
 
     generation_status = gr.Markdown("Ready.", elem_id="generation-status")
     with gr.Accordion("Conversation tools", open=False, elem_id="conversation-tools"):
@@ -662,6 +680,9 @@ def _build_chat_tab(saved: settings.Settings, states: SharedState) -> tuple[Chat
         token_edit_save=token_edit_save,
         token_edit_cancel=token_edit_cancel,
         prompt=prompt,
+        attachments=attachments,
+        attachment_strip=attachment_strip,
+        attach_button=attach_button,
         send_button=send_button,
         stop_button=stop_button,
         retry_button=retry_button,

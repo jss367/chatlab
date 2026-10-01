@@ -35,6 +35,8 @@ from chatlab.token_metrics import (
     summarize,
 )
 from chatlab.trace_export import build_trace
+from chatlab.attachments import MAX_IMAGES_PER_PROMPT, names_in, picture_count, too_many_pictures
+from chatlab.vision import message_images
 from chatlab.ui import runtime
 from chatlab.ui.common import (
     CHART_EVERY,
@@ -47,12 +49,14 @@ from chatlab.ui.conversations import (
     conversation_list_update,
     panel_reset,
 )
+from chatlab.ui.pictures import strip_html as picture_strip
 from chatlab.ui.outputs import (
     CHAT_OUTPUT_NAMES,
     CLEAR_OUTPUT_NAMES,
     STOP_OUTPUT_NAMES,
     UNDO_OUTPUT_NAMES,
     Frame,
+    skipped,
 )
 from chatlab.ui.panel import (
     BRANCH_HINT,
@@ -693,11 +697,17 @@ def _stream_reply(
                             "prompt",
                         ),
                     )
+                    # The pictures ride last, after a steering slot that is
+                    # then always present: the inspector feeds them with the
+                    # ids, since the ids alone cannot say what was behind
+                    # each picture's placeholders.
+                    pictures = tuple(message_images(request))
                     context_ids = (
                         generation,
                         [int(v) for v in update.prompt_ids],
                         update.load_id,
-                        *([steering] if steering is not None else []),
+                        *([steering] if steering is not None or pictures else []),
+                        *([pictures] if pictures else []),
                     )
                     recorded_context = context_ids
                 yield snapshot(
@@ -881,7 +891,73 @@ def chat(
     steering_strength: float | None = None,
     steering_layer: int | None = None,
     thinking_mode: str = "default",
+    images: list[str] | None = None,
 ):
+    """Send the message in the box, and the pictures waiting with it, and stream the reply.
+
+    The pictures come last, after the settings, so the listener's inputs read
+    as every other generation handler's do with one more on the end. The
+    frame that empties the box empties the pictures too: the one whose
+    conversation has grown by the message, which is the opening frame of a
+    reply. A refusal leaves the conversation as it was, and the pictures
+    where they were.
+    """
+
+    before = len(turns or [])
+    cleared = False
+    for frame in _send(
+        prompt_text,
+        turns,
+        system_prompt,
+        keep_reasoning,
+        assistant_prefill,
+        temperature,
+        top_p,
+        top_k,
+        skip_top_below,
+        max_new_tokens,
+        seed,
+        randomize_seed,
+        analyze_prompt,
+        scale_name,
+        steering,
+        steering_enabled,
+        steering_strength,
+        steering_layer,
+        thinking_mode,
+        images=images,
+    ):
+        if not cleared and not skipped(frame["turns"]) and len(frame["turns"]) > before:
+            frame.update(attachments=[], attachment_strip=picture_strip([]))
+            cleared = True
+        yield frame
+
+
+def _send(
+    prompt_text: str,
+    turns: list[dict] | None,
+    system_prompt: str,
+    keep_reasoning: bool,
+    assistant_prefill: str,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    skip_top_below: float,
+    max_new_tokens: int,
+    seed,
+    randomize_seed: bool,
+    analyze_prompt: bool = True,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+    steering: dict | None = None,
+    steering_enabled: bool | None = None,
+    steering_strength: float | None = None,
+    steering_layer: int | None = None,
+    thinking_mode: str = "default",
+    *,
+    images: list[str] | None = None,
+):
+    """The body of :func:`chat`: send the message with ``images`` attached."""
+
     held = occupied()
     if held:
         # Before anything else, including the checks below: every other exit
@@ -892,14 +968,28 @@ def chat(
 
     turns = copy_turns(turns)
     message = (prompt_text or "").strip()
-    if not message:
+    images = list(images or [])
+    if not message and not images:
         yield idle_state(prompt_text, turns, "Enter a message first.")
         return
     if not runtime.MANAGER.loaded:
         yield no_model_state(prompt_text, turns)
         return
+    if (images or names_in(turns)) and not runtime.MANAGER.accepts_images:
+        # Said before the message joins the conversation, which keeps both it
+        # and its pictures in the box for a model that can read them. An
+        # earlier picture counts too: the model would be fed it all the same.
+        yield idle_state(prompt_text, turns, runtime.MANAGER.images_refusal())
+        return
+    count = picture_count(turns) + len(images)
+    if count > MAX_IMAGES_PER_PROMPT:
+        yield idle_state(prompt_text, turns, too_many_pictures(count))
+        return
 
-    turns.append(make_turn("user", message))
+    user_turn = make_turn("user", message)
+    if images:
+        user_turn["images"] = images
+    turns.append(user_turn)
     try:
         yield from generate_reply(
             turns,
@@ -965,6 +1055,13 @@ def regenerate_from(
         return
     if not runtime.MANAGER.loaded:
         yield no_model_state(prompt_text, turns)
+        return
+    if names_in(turns[: position + 1]) and not runtime.MANAGER.accepts_images:
+        # Refused before the reply it would replace is thrown away.
+        yield idle_state(
+            prompt_text, restore_turns if restore_turns is not None else turns,
+            runtime.MANAGER.images_refusal(),
+        )
         return
 
     try:
@@ -1035,6 +1132,12 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
             prompt_text, turns, "A failure notice cannot be edited. Press Retry to answer again."
         )
         return
+    if part == "image":
+        yield idle_state(
+            prompt_text, turns,
+            "A picture cannot be edited. Undo the message to take it back into the box.",
+        )
+        return
     new_value = event.value if isinstance(event.value, str) else str(event.value)
 
     if turns[position]["role"] == "assistant":
@@ -1082,7 +1185,7 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
         return
 
     edited = new_value.strip()
-    if not edited:
+    if not edited and not turns[position].get("images"):
         # An empty user turn is skipped by model_messages(), which would leave
         # the request with no user message at all.
         yield idle_state(prompt_text, turns, "A user message cannot be empty.")
@@ -1661,9 +1764,12 @@ def undo_from(
     # The selected-token details describe the response being removed, so they
     # go with it, exactly as Clear resets them. So do the prompt tokens, the
     # charts and the export: all of them measure the exchange that just left.
+    images = list(turns[position].get("images") or [])
     return Frame(
         UNDO_OUTPUT_NAMES,
         prompt=turns[position]["content"],
+        attachments=images,
+        attachment_strip=picture_strip(images),
         chatbot=messages,
         turns=remaining,
         status="Removed the last exchange.",

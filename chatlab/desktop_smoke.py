@@ -65,6 +65,32 @@ def smoke_test_pipelines() -> None:
     print("ChatLab diffusers pipeline class checks passed")
 
 
+def smoke_test_vision() -> None:
+    """Check the bundle can turn a picture into a vision model's input.
+
+    Transformers prepares a pasted picture with torchvision, which it imports
+    lazily and only once a vision model is shown one, so a bundle without it
+    loads every vision model and then refuses its first picture. Qwen's image
+    processor is run on a small picture here, the one ChatLab's suggested
+    vision model uses.
+    """
+
+    from PIL import Image
+
+    # Imported by name first, so a bundle built without it says so plainly
+    # rather than as a processor that will not build.
+    importlib.import_module("torchvision.transforms.v2.functional")
+    transformers = importlib.import_module("transformers")
+    for name in ("AutoModelForImageTextToText", "AutoProcessor", "Qwen2VLImageProcessor"):
+        if getattr(transformers, name, None) is None:
+            raise RuntimeError(f"The desktop bundle is missing transformers.{name}.")
+    processor = transformers.Qwen2VLImageProcessor()
+    prepared = processor(images=[Image.new("RGB", (64, 48), "white")], return_tensors="pt")
+    if "pixel_values" not in prepared or "image_grid_thw" not in prepared:
+        raise RuntimeError("The desktop bundle's image processor returned no pixels.")
+    print("ChatLab vision processor checks passed")
+
+
 def smoke_test_mlx() -> None:
     """Check the bundle can build and run an mlx-lm model, on Apple silicon.
 

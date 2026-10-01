@@ -13,6 +13,7 @@ import gradio as gr
 from gradio.context import LocalContext
 
 from chatlab.conversation import (
+    PICTURE_MARK,
     turn_tokens,
 )
 from chatlab.text_generation import PROMPT_SCORE_LIMIT
@@ -21,6 +22,7 @@ from chatlab.token_metrics import (
     DEFAULT_COLOR_SCALE,
     UNSCORED_BEYOND_LIMIT,
     UNSCORED_FIRST_TOKEN,
+    UNSCORED_IMAGE,
     category_for,
 )
 from chatlab.ui import runtime
@@ -102,6 +104,9 @@ def transcript_entries(
             continue
         reasoning = turn.get("reasoning") or ""
         content = turn.get("content") or ""
+        for _ in turn.get("images") or []:
+            spans.append((f"{PICTURE_MARK}\n", None))
+            index.append((position, None))
         if reasoning:
             spans.append((f"{reasoning}\n", None))
             index.append((position, None))
@@ -463,6 +468,11 @@ def unscored_explanation(metric: dict) -> str:
         )
     if reason == UNSCORED_FIRST_TOKEN:
         return "Nothing came before this token, so the model never predicted it."
+    if reason == UNSCORED_IMAGE:
+        return (
+            "This is one of a picture's tokens. The model was shown the picture "
+            "here, so nothing predicted it."
+        )
     return as_plain_text(reason)
 
 

@@ -315,6 +315,11 @@ class MlxThread:
 MLX_THREAD = MlxThread()
 
 
+def _refuse_media(media) -> None:
+    if media is not None:
+        raise ValueError("MLX models run as text alone and cannot be shown pictures.")
+
+
 def on_mlx_thread(function):
     """Run ``function`` on :data:`MLX_THREAD` whichever thread calls it."""
 
@@ -467,17 +472,22 @@ class MlxEngine:
         return make_prompt_cache(self.model)
 
     @on_mlx_thread
-    def forward(self, token_ids: Sequence[int], cache, cached: int) -> tuple[MlxLogits, Any]:
+    def forward(
+        self, token_ids: Sequence[int], cache, cached: int, media=None
+    ) -> tuple[MlxLogits, Any]:
         """Feed ``token_ids`` after the ``cached`` tokens already in ``cache``.
 
         The cache carries its own offset, so ``cached`` is only checked
         against it: a disagreement means the caller's bookkeeping and the
         cache have parted ways, and silently continuing would attach the
-        wrong positions to every token that followed.
+        wrong positions to every token that followed. ``media`` is always
+        ``None``: an MLX model is run as text alone, and the manager refuses
+        pictures before any reach here.
         """
 
         import mlx.core as mx
 
+        _refuse_media(media)
         if cache is None:
             cache = self.new_cache()
         offset = _cache_offset(cache)
@@ -641,7 +651,7 @@ class MlxEngine:
                 setattr(module, ATTENTION_FUNCTION, function)
 
     @on_mlx_thread
-    def inspect_step(self, token_id: int, cache, cached: int) -> LensReading:
+    def inspect_step(self, token_id: int, cache, cached: int, media=None) -> LensReading:
         """Feed one token and read every layer's prediction and attention.
 
         The intermediate rows are given only when reading the last residual
@@ -653,6 +663,7 @@ class MlxEngine:
 
         import mlx.core as mx
 
+        _refuse_media(media)
         if cache is None:
             cache = self.new_cache()
         offset = _cache_offset(cache)

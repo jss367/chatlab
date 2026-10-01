@@ -20,9 +20,12 @@ jobs:
       - name: Install dependencies
         # The CPU build of torch: the tests never touch a GPU, and the
         # default wheel carries a few gigabytes of CUDA libraries with it.
+        # torchvision comes from the same index: PyPI's wheel is built
+        # against the CUDA torch, and its operators fail to register
+        # against this one.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements.txt ruff
 
       - name: Lint

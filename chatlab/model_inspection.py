@@ -112,6 +112,19 @@ class SteeringExtraction:
 # the model and will release the cache when it starts.
 KV_CACHE_WAIT = 2.0
 
+# Said for a click on one of a picture's tokens, which the model was shown
+# rather than asked to predict.
+IMAGE_TOKEN_INSPECTED = (
+    "This is one of a picture's tokens. The model was shown the picture here, "
+    "so nothing predicted it. Inspect a token after the picture instead."
+)
+
+
+def _kept_images(kept) -> tuple[str, ...]:
+    """The pictures behind a kept inspection cache: its fourth entry, when it has one."""
+
+    return tuple(kept[3]) if len(kept) > 3 else ()
+
 
 @dataclass(frozen=True)
 class TokenInsight:
@@ -167,7 +180,7 @@ class InspectionMixin:
         self._inspect_cache = None
         self._release_device_cache()
 
-    def _inspect_cache_for(self, needed: list[int]):
+    def _inspect_cache_for(self, needed: list[int], media=None, images: Sequence[str] = ()):
         """A key-value cache holding exactly ``needed``, reusing the last one where it can.
 
         Clicking through the tokens of one response asks about the same
@@ -177,17 +190,23 @@ class InspectionMixin:
         cut back with ``crop()`` when it is earlier. A different sequence, a
         cache from another load, or one that cannot be cropped is thrown away
         and rebuilt from nothing. Called under the model lock.
+
+        ``images`` are the pictures the sequence holds and ``media`` its
+        :class:`vision.MediaLayout`. Two sequences can have the same token ids
+        and different pictures behind their placeholders, so a kept cache is
+        reused only for the same pictures.
         """
 
         engine = self._engine()
         kept = self._inspect_cache
         self._inspect_cache = None
         if kept is not None:
-            load_id, ids, cache = kept
+            load_id, ids, cache = kept[:3]
             shared = min(len(ids), len(needed))
             if (
                 load_id != self.load_id
                 or cache is None
+                or _kept_images(kept) != tuple(images)
                 or ids[:shared] != needed[:shared]
                 or (len(ids) > len(needed) and not engine.can_crop(cache, len(ids)))
             ):
@@ -197,7 +216,7 @@ class InspectionMixin:
             self._release_device_cache()
             ids, cache = [], None
         else:
-            _, ids, cache = kept
+            _, ids, cache = kept[:3]
             if len(ids) > len(needed):
                 engine.crop(cache, len(ids) - len(needed))
                 ids = ids[: len(needed)]
@@ -213,6 +232,7 @@ class InspectionMixin:
             collect_from=len(needed),
             past_key_values=cache,
             cached=len(ids),
+            media=media,
         )
         return cache
 
@@ -631,7 +651,7 @@ class InspectionMixin:
         self, token_ids: Sequence[int], index: int, *, lens_id: str | None,
         pinned_text: str = "", pinned_id: int | None = None, context_count: int = 0,
         load_id: str | None = None, steering: dict | None = None,
-        positions: int = jacobian_lens.SLICE_POSITIONS,
+        positions: int = jacobian_lens.SLICE_POSITIONS, images: Sequence[str] = (),
     ) -> jacobian_lens.JacobianInsight:
         """Read concepts after processing the clicked token, with no look-ahead.
 
@@ -676,10 +696,18 @@ class InspectionMixin:
             scope.enter_context(self._steering(steering))
             if steering_vectors.active(steering):
                 self._drop_inspect_cache()
+            media = self._image_layout(ids, images)
+            # A picture read in both directions has to go in whole, and the
+            # slice ends at the clicked token, so a click inside one would
+            # read a picture missing its later tokens.
+            if media is not None and media.joined and media.is_placeholder(index):
+                raise ValueError(IMAGE_TOKEN_INSPECTED)
             start = max(0, index + 1 - max(1, int(positions)))
-            cache = self._inspect_cache_for(ids[:start])
+            if media is not None:
+                start = media.run_start(start)
+            cache = self._inspect_cache_for(ids[:start], media, images)
             with lens.capture(engine) as states:
-                logits, cache = engine.forward(ids[start:index + 1], cache, start)
+                logits, cache = engine.forward(ids[start:index + 1], cache, start, media)
 
             decoded: dict[int, str] = {}
 
@@ -710,7 +738,7 @@ class InspectionMixin:
             ]
             del logits
             if cache is not None and not steering_vectors.active(steering):
-                self._inspect_cache = (self.load_id, ids[:index + 1], cache)
+                self._inspect_cache = (self.load_id, ids[:index + 1], cache, tuple(images))
             return jacobian_lens.JacobianInsight({
                 "kind": "jacobian", "index": index, "token_id": ids[index],
                 "token_text": decode(ids[index]), "layers": rows,
@@ -792,6 +820,7 @@ class InspectionMixin:
         context_count: int = 0,
         load_id: str | None = None,
         steering: dict | None = None,
+        images: Sequence[str] = (),
     ) -> TokenInsight:
         """Explain the prediction of ``token_ids[index]`` layer by layer.
 
@@ -835,14 +864,26 @@ class InspectionMixin:
             assert self.model is not None
             engine = self._engine()
             token_id = ids[index]
+            media = self._image_layout(ids, images)
+            if media is not None and media.is_placeholder(index):
+                raise ValueError(IMAGE_TOKEN_INSPECTED)
 
             # Everything before the predicting token, from the last click's
-            # cache where the sequence allows it.
-            past_key_values = self._inspect_cache_for(ids[: index - 1])
-            # The backend reads every layer's prediction, and withholds the
-            # intermediate ones when they cannot be trusted; see
-            # TorchEngine.inspect_step and MlxEngine.inspect_step.
-            reading = engine.inspect_step(ids[index - 1], past_key_values, index - 1)
+            # cache where the sequence allows it. The backend reads every
+            # layer's prediction, and withholds the intermediate ones when
+            # they cannot be trusted; see TorchEngine.inspect_step and
+            # MlxEngine.inspect_step.
+            if media is None:
+                past_key_values = self._inspect_cache_for(ids[: index - 1])
+                reading = engine.inspect_step(ids[index - 1], past_key_values, index - 1)
+            else:
+                # A picture read in both directions goes in whole, with the
+                # token it ends on; see MediaLayout.run_start.
+                start = media.run_start(index - 1)
+                past_key_values = self._inspect_cache_for(ids[:start], media, images)
+                reading = engine.inspect_step(
+                    ids[index - 1], past_key_values, start, media, before=ids[start : index - 1]
+                )
 
             layers: list[dict] = [
                 self._lens_row(layer, logits, token_id)
@@ -887,7 +928,7 @@ class InspectionMixin:
                 and self.load_id is not None
                 and not steering_vectors.active(steering)
             ):
-                self._inspect_cache = (self.load_id, ids[:index], reading.cache)
+                self._inspect_cache = (self.load_id, ids[:index], reading.cache, tuple(images))
             del reading, past_key_values
             return TokenInsight(
                 index=index,
@@ -900,7 +941,8 @@ class InspectionMixin:
             )
 
     def read_kv_cache(
-        self, token_ids: Sequence[int], layer: int, *, load_id: str | None = None
+        self, token_ids: Sequence[int], layer: int, *, load_id: str | None = None,
+        images: Sequence[str] = (),
     ) -> dict:
         """One layer of the key-value cache the last inspection kept.
 
@@ -927,7 +969,10 @@ class InspectionMixin:
                 )
             ids = [int(value) for value in token_ids]
             kept = self._inspect_cache
-            if kept is None or kept[0] != self.load_id or kept[1] != ids:
+            if (
+                kept is None or kept[0] != self.load_id or kept[1] != ids
+                or _kept_images(kept) != tuple(images)
+            ):
                 raise kv_cache.CacheGone(
                     "The cache from this inspection is no longer in memory. A reply, a "
                     "scoring pass and another inspection each release it; press "

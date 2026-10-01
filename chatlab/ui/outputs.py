@@ -133,7 +133,14 @@ CHAT_OUTPUT_NAMES = (
     "chat_context_ids",
     "selected_token",
     "branch_pick",
+    "attachments",
+    "attachment_strip",
 )
+
+# The message box: its text and the pictures waiting to go with it. Only the
+# frame a message is sent with may write these, since a later one would erase
+# whatever the reader has typed or attached since.
+COMPOSER_OUTPUT_NAMES = ("prompt", "attachments", "attachment_strip")
 
 # The token view's editor, which Save and regenerate closes or reopens beside
 # the reply it starts. These belong to the view rather than the conversation,
@@ -152,6 +159,8 @@ STOP_OUTPUT_NAMES = ("chatbot", "turns", "strip", "send", "stop", "status")
 
 UNDO_OUTPUT_NAMES = (
     "prompt",
+    "attachments",
+    "attachment_strip",
     "chatbot",
     "turns",
     "strip",

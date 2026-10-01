@@ -28,7 +28,9 @@ from chatlab.conversation import (
     display_messages, put_branch, put_branch_sampling,
 )
 from chatlab.ui.common import STOP_LABEL, finalize_partial
-from chatlab.ui.outputs import EDITOR_OUTPUT_NAMES, POLL_OUTPUT_NAMES, positional, skipped
+from chatlab.ui.outputs import (
+    COMPOSER_OUTPUT_NAMES, EDITOR_OUTPUT_NAMES, POLL_OUTPUT_NAMES, positional, skipped,
+)
 from chatlab.ui.panel import restore_chat_metrics_generation, transcript_update
 
 logger = logging.getLogger(__name__)
@@ -157,7 +159,10 @@ class ConversationJob:
                     # Only the opening frame may write the message box: it
                     # empties it for the message just sent, and a later frame
                     # putting it back would erase what the reader typed since.
-                    self._publish({name: value for name, value in frame.items() if name != "prompt"})
+                    self._publish({
+                        name: value for name, value in frame.items()
+                        if name not in COMPOSER_OUTPUT_NAMES
+                    })
         except Exception:
             logger.exception("Conversation generation failed")
             error = "Generation failed. Any partial response was kept."
@@ -257,9 +262,10 @@ class ConversationJob:
                 if metrics is not None:
                     restore_chat_metrics_generation(metrics[0])
                 values["strip"] = transcript_update(turns, scale)
-                # Navigation must never resurrect the prompt that launched a job.
+                # Navigation must never resurrect the message that launched a job.
                 if switched and self.rendered is not None:
-                    values.pop("prompt", None)
+                    for name in COMPOSER_OUTPUT_NAMES:
+                        values.pop(name, None)
                 # Editor controls and token selections are local to the view.
                 if switched and self.rendered is not None:
                     for name in EDITOR_OUTPUT_NAMES:

@@ -16,6 +16,7 @@ drove.
 - Every model in both lists marked *fits*, *tight* or *won't fit* against the memory this machine has free, at the weight precision chosen
 - A badge above the chat naming the model in memory and the device it runs on, or saying that none is loaded, with a progress bar while a model is being read in
 - A chat interface that collapses OLMo reasoning blocks into an expandable section
+- Pictures in a message: paste a screenshot into the message box, drop one on it, or attach one, and a vision model such as Qwen3.5 reads it with every token measurement, the logit lens and branching intact; see [Pictures in a message](#pictures-in-a-message)
 - Live token-by-token generation with a **Stop** button
 - Exact raw vocabulary rank for each generated token
 - Raw and post-sampling probabilities
@@ -549,6 +550,41 @@ average beside a moved frame would be quietly wrong.
 - **Retry** regenerates the last reply. Because **New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
 - Hovering a message in the transcript gives per-message retry, edit, and undo. Editing one of your messages truncates the conversation there and generates a new reply; editing a reply just corrects it in place. **Undo last** removes the last exchange and puts your message back in the input box.
 - **Save conversation** writes a JSON file containing every turn, its reasoning block, and the system prompt, along with the model and token counts behind each reply. **Load conversation** restores it.
+
+### Pictures in a message
+
+Paste a screenshot into the message box (⌘V after ⌘⌃⇧4 on a Mac), drop a
+picture on the box, or choose one with **Attach**. Each waits as a thumbnail
+above the text, with a button to take it off, and goes with the message when
+it is sent. A message can be pictures alone. **Undo last** puts a message's
+pictures back in the box with its text.
+
+Pictures need a vision model: a Transformers checkpoint whose config describes
+a vision tower and whose repository ships an image processor. Qwen3.5 is the
+family this was tried on with real weights (`Qwen/Qwen3.5-4B` is a good
+start); Gemma 3, LLaVA, Qwen2.5-VL, Qwen3-VL and the other image-text-to-text
+architectures Transformers supports go through the same path. Such a checkpoint is read with its vision encoder, which
+adds a few hundred megabytes to a text-only load of the same model. A text-only
+model refuses a message with pictures before it joins the conversation, and
+says so, leaving the text and pictures in the box. MLX models run as text
+alone.
+
+A model reads a picture as a run of placeholder tokens in its prompt, whose
+embeddings are swapped for what the vision encoder made of the pixels. The
+encoder runs once per set of pictures and its output is laid against the
+prompt, so the chunked prefill, the cache an inspection reuses, and each
+sampled token all see the picture exactly as the model's own one-call path
+would; Qwen's two-dimensional positions for picture tokens are worked out the
+same way. A picture larger than a megapixel is scaled down before the model
+sees it, which keeps a Retina screenshot near a thousand tokens rather than
+fifteen thousand. The picture's tokens appear in the prompt strip marked as not
+predicted, since nothing predicted them, and the token view writes
+`[picture]` where one was.
+
+Pictures are kept once each, under the hash of their bytes, in a
+`conversations-images` directory beside the conversations file, and a turn
+refers to them by name. **Save conversation** embeds them in the file it
+writes, so a conversation loaded on another machine has its pictures.
 
 ### Token view
 

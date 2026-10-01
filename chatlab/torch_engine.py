@@ -111,8 +111,16 @@ class TorchEngine:
     def _device(self):
         return next(self.model.parameters()).device
 
-    def forward(self, token_ids: Sequence[int], cache, cached: int) -> tuple[TorchLogits, Any]:
-        """Feed ``token_ids`` after the ``cached`` tokens already in ``cache``."""
+    def forward(
+        self, token_ids: Sequence[int], cache, cached: int, media=None
+    ) -> tuple[TorchLogits, Any]:
+        """Feed ``token_ids`` after the ``cached`` tokens already in ``cache``.
+
+        ``media`` is the :class:`vision.MediaLayout` of the sequence these
+        tokens belong to when it holds pictures: it supplies the encoder rows
+        for any picture tokens fed here, and the positions an architecture
+        that numbers pictures by row and column needs for all of them.
+        """
 
         import torch
 
@@ -124,6 +132,7 @@ class TorchEngine:
             ),
             past_key_values=cache,
             use_cache=True,
+            **(media.forward_arguments(cached, len(token_ids)) if media is not None else {}),
         )
         return TorchLogits(outputs.logits[0]), outputs.past_key_values
 
@@ -206,7 +215,9 @@ class TorchEngine:
             logits = torch.tanh(logits / softcap) * softcap
         return logits
 
-    def inspect_step(self, token_id: int, cache, cached: int) -> LensReading:
+    def inspect_step(
+        self, token_id: int, cache, cached: int, media=None, before: Sequence[int] = ()
+    ) -> LensReading:
         """Feed one token with the hidden states and attention switched on.
 
         The last hidden state is what the model's own head reads, so its
@@ -219,19 +230,30 @@ class TorchEngine:
         :meth:`read_head` does not replicate: reading the final hidden
         state (already normed) through it must reproduce the model's
         output, or the intermediate rows are not trustworthy either.
+
+        ``media`` is as for :meth:`forward`. ``before`` are tokens fed in the
+        same call ahead of ``token_id``, with only the last position read: a
+        picture whose tokens see one another in both directions has to go
+        through the model in one call, so an inspection that lands just after
+        one feeds the whole picture here rather than continuing from a cache
+        that holds part of it; see :meth:`vision.MediaLayout.run_start`.
         """
 
         import torch
 
         device = self._device()
+        fed = [int(value) for value in before] + [int(token_id)]
         with self.eager_attention():
             outputs = self.model(
-                input_ids=torch.tensor([[int(token_id)]], dtype=torch.long, device=device),
-                attention_mask=torch.ones((1, cached + 1), dtype=torch.long, device=device),
+                input_ids=torch.tensor([fed], dtype=torch.long, device=device),
+                attention_mask=torch.ones(
+                    (1, cached + len(fed)), dtype=torch.long, device=device
+                ),
                 past_key_values=cache,
                 use_cache=True,
                 output_hidden_states=True,
                 output_attentions=True,
+                **(media.forward_arguments(cached, len(fed)) if media is not None else {}),
             )
 
         def to_numpy(tensor) -> np.ndarray:

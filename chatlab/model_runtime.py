@@ -79,6 +79,13 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
     def __init__(self) -> None:
         self.model = None
         self.tokenizer = None
+        # What prepares pictures for a vision model, and why the model in
+        # memory has none when it cannot be shown them; see vision.py. The
+        # last picture set the encoder ran over, so clicking through one
+        # conversation's tokens does not run it again per click.
+        self.processor = None
+        self.vision_note: str | None = None
+        self._image_features: tuple[str, tuple[str, ...], Any] | None = None
         # :meth:`hidden_token_ids` for the load named beside it; see
         # :meth:`_hidden_ids`.
         self._hidden_ids_cache: tuple[str | None, frozenset[int]] = (None, frozenset())
@@ -187,8 +194,9 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
         self._run_note: tuple[str | None, int] | None = None
         self._run_device_bytes: int | None = None
         # The key-value cache the last inspection left behind, with the load
-        # it belongs to and the tokens it covers. See _inspect_cache_for().
-        self._inspect_cache: tuple[str, list[int], Any] | None = None
+        # it belongs to, the tokens it covers and the pictures behind them.
+        # See _inspect_cache_for().
+        self._inspect_cache: tuple[str, list[int], Any, tuple[str, ...]] | None = None
         # How Stop reaches the image run that is drawing right now, and only
         # that one. It belongs to the run holding the generation slot rather
         # than to the page, because button visibility is per browser tab: a

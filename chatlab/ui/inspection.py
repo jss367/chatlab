@@ -287,6 +287,7 @@ def inspect_layers(
     _prompt_generation, prompt_metrics = prompt_metrics_state
     context_generation, context_ids, load_id = context_state[:3]
     steering = context_state[3] if len(context_state) > 3 else None
+    images = list(context_state[4]) if len(context_state) > 4 else []
     if generation != target["generation"] or context_generation != generation:
         yield (*refused, INSPECT_GONE)
         return
@@ -344,6 +345,8 @@ def inspect_layers(
             options = {"context_count": len(context_ids), "load_id": load_id}
             if steering is not None:
                 options["steering"] = steering
+            if images:
+                options["images"] = images
             if lens_mode == "Jacobian":
                 # The state's import counts only for the load it was made for.
                 # Otherwise the manager's current lens serves, and when there
@@ -411,6 +414,7 @@ def inspect_layers(
         # The key-value cache view reads the cache this pass kept, and only
         # while it still came from this load. A steered pass keeps none.
         insight["load_id"] = load_id
+        insight["images"] = images
         insight["steered"] = steering_vectors.active(steering)
         from chatlab.experiment_runs import SESSION_ID
         insight["saved_session"] = SESSION_ID
@@ -482,7 +486,7 @@ def render_kv_cache(insight: dict | None, layer, metric):
     try:
         view = runtime.MANAGER.read_kv_cache(
             [int(token["token_id"]) for token in tokens], int(layer or 1),
-            load_id=insight.get("load_id"),
+            load_id=insight.get("load_id"), images=insight.get("images") or (),
         )
     except ModelChanged:
         return f'<div class="viz-empty">{html.escape(INSPECT_MODEL_CHANGED)}</div>', gr.skip()

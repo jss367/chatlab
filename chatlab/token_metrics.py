@@ -85,6 +85,9 @@ UNSCORED_FILL = "#c3c2b7"
 # keep a long prompt cheap.
 UNSCORED_FIRST_TOKEN = "first"
 UNSCORED_BEYOND_LIMIT = "beyond_limit"
+# A token a picture's encoder output took the place of: the model was shown
+# the picture there, so nothing predicted the placeholder.
+UNSCORED_IMAGE = "image"
 
 RANK_LABELS = ("Top choice", "Top 5", "Top 20", "Rank 21–100", "Rank 101+")
 
