@@ -550,6 +550,17 @@ class WorkbenchTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "not a valid"):
                         workbench.load_graph(path)
 
+    def test_feature_indices_are_bound_to_the_transcoder_width(self):
+        graph = small_graph()
+        feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for index in (-1, graph["transcoder_width"], "3"):
+                bad = dict(graph, nodes=[{**feature, "feature": index}])
+                path.write_text(json.dumps(bad))
+                with self.subTest(index=index), self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+
     def test_saved_graphs_round_trip_and_bad_files_are_refused(self):
         graph = small_graph()
         with tempfile.TemporaryDirectory() as directory:
@@ -605,6 +616,26 @@ class WorkbenchTests(unittest.TestCase):
                 self.assertEqual(changed["groups"]["new"], members[:1])
                 saved = workbench.load_graph(Path(directory) / "graphs" / f"{graph['id']}.json")
                 self.assertIsNone(saved["effects"])
+            finally:
+                demo.close()
+
+    def test_load_transcoders_cancellation_is_a_stopped_callback(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                def stopped(*args):
+                    raise attribution.Cancelled()
+                    yield
+                with mock.patch.object(workbench.Workbench, "background", stopped):
+                    frames = list(handlers_by_name(demo)["load_now"]("view"))
+                self.assertEqual(frames[-1][0], "Stopped.")
             finally:
                 demo.close()
 

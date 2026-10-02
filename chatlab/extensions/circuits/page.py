@@ -317,6 +317,9 @@ def build_page(context):
             for item in bench.background(session_id, bench.load_transcoders):
                 if item[0] == "progress":
                     yield _progress_text(*item[1:]), gr.skip()
+        except Cancelled:
+            yield "Stopped.", status_text(bench.status())
+            return
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         yield "", status_text(bench.status())

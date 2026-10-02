@@ -245,6 +245,9 @@ class Workbench:
     def _same_model(graph, session):
         if graph.get("model_id") != session.model_id:
             raise ValueError(f"This graph was traced on {graph.get('model_id')}; load that model to measure it.")
+        spec = transcoders.spec_for(session.model_id)
+        if spec is not None and graph.get("transcoders") != spec.key:
+            raise ValueError("This graph belongs to another transcoder set; trace it again on this load.")
         revision = graph.get("model_revision")
         if revision:
             if revision != session.model_revision:
@@ -352,6 +355,10 @@ def load_graph(path):
         if (not isinstance(token_ids, list) or len(token_ids) != len(tokens)
                 or not all(type(token) is int and 0 <= token < 2 ** 31 for token in token_ids)):
             raise ValueError
+        spec = next((s for s in transcoders.CATALOGUE if s.key == graph.get("transcoders")), None)
+        width = spec.width if spec is not None else graph.get("transcoder_width")
+        if type(width) is not int or not 1 <= width <= 1000000:
+            raise ValueError
         nodes, edges = graph["nodes"], graph["edges"]
         max_nodes = min(20000, 4096 + (layers + 1) * len(tokens) + attribution.MAX_CHOSEN_TARGETS)
         if (not isinstance(nodes, list) or not 1 <= len(nodes) <= max_nodes
@@ -379,7 +386,33 @@ def load_graph(path):
                 valid_layer = 0 <= layer < layers
             if not valid_layer:
                 raise ValueError
-            float(node["influence"]), float(node["effect"])
+            if not all(math.isfinite(float(node[field])) for field in ("influence", "effect")):
+                raise ValueError
+            kind = node["kind"]
+            if kind == "feature":
+                feature = node["feature"]
+                if type(feature) is not int or not 0 <= feature < width:
+                    raise ValueError
+                if not math.isfinite(float(node["activation"])) or float(node["activation"]) < 0:
+                    raise ValueError
+            elif kind == "embedding":
+                if node["token_id"] != token_ids[position]:
+                    raise ValueError
+            elif kind == "target":
+                if node["target_kind"] == "token":
+                    values = [node["token_id"]]
+                elif node["target_kind"] == "contrast":
+                    positive, negative = node["positive"], node["negative"]
+                    if (not isinstance(positive, list) or not isinstance(negative, list)
+                            or not positive or not negative or set(positive) & set(negative)):
+                        raise ValueError
+                    values = positive + negative
+                else:
+                    raise ValueError
+                if not all(type(value) is int and 0 <= value < 2 ** 31 for value in values):
+                    raise ValueError
+                if not isinstance(node["text"], str) or not 0 <= float(node["probability"]) <= 1:
+                    raise ValueError
         for edge in graph["edges"]:
             if edge["source"] not in ids or edge["target"] not in ids:
                 raise ValueError
