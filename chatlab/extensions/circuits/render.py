@@ -324,13 +324,13 @@ def top_tokens(record, limit=6):
     return sorted(counts.items(), key=lambda item: -item[1])[:limit]
 
 
-def feature_list(layer, start, width, rows, selected=None):
+def feature_list(layer, start, width, rows, selected=None, page_id=""):
     """One page of a layer's features, each with the tokens it fires on and the tokens it writes.
 
     ``rows`` holds ``(feature, record, error)`` for each feature on the page.
     """
     end = start + len(rows) - 1
-    out = [f'<div class="cg-root viz-root cf-list"><p class="cg-muted">Layer {layer} · features '
+    out = [f'<div class="cg-root viz-root cf-list" data-page="{_esc(page_id)}"><p class="cg-muted">Layer {layer} · features '
            f'{start:,}–{end:,} of {width:,}. Click one to read it and steer by it.</p>',
            '<table><thead><tr><th>feature</th><th>fires on</th><th>promotes</th><th>freq.</th></tr></thead><tbody>']
     for feature, record, error in rows:

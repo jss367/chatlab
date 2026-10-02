@@ -596,6 +596,35 @@ class BrowserTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_a_click_from_the_previous_page_is_refused(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda *args: None))
+        records = mock.Mock()
+        records.get.return_value = self.record
+        bench = SimpleNamespace(records=lambda spec: records)
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            pick = handlers_by_name(demo)["picked"]
+            old = show(browser.DEFAULT_SET, 3, 0, None)[2]
+            new = show(browser.DEFAULT_SET, 4, 0, None)[2]
+            records.get.reset_mock()
+            self.assertEqual(pick(new, json.dumps(dict(feature=2, page_id=old["stamp"]))), (gr.skip(), gr.skip()))
+            self.assertEqual(pick(new, json.dumps(dict(feature=99, page_id=new["stamp"]))), (gr.skip(), gr.skip()))
+            records.get.assert_not_called()
+            card, selected = pick(new, json.dumps(dict(feature=2, page_id=new["stamp"])))
+            self.assertEqual((selected["layer"], selected["feature"]), (4, 2))
+            self.assertIn("feature 2", card)
+            html = show(browser.DEFAULT_SET, 4, 0, None)[0]
+            self.assertIn('data-page="', html)
+        finally:
+            demo.close()
+
     def test_the_vector_is_the_decoder_row_at_the_peak_activation(self):
         spec = transcoders.spec_for("google/gemma-3-1b-it")
         with mock.patch.object(transcoders, "decoder_row", return_value=[0.5, -1.0]) as row:

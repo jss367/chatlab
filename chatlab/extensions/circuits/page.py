@@ -58,7 +58,7 @@ JS = r"""
     if (row) {
       row.closest('tbody').querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
       row.classList.add('sel');
-      write('#circuits-feature-pick', JSON.stringify({feature: Number(row.dataset.feature), nonce: Date.now()}));
+      write('#circuits-feature-pick', JSON.stringify({feature: Number(row.dataset.feature), page_id: row.closest(".cf-list").dataset.page, nonce: Date.now()}));
       return;
     }
     const group = event.target.closest('#circuits-groups .cg-group[data-group]');

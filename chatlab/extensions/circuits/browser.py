@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from uuid import uuid4
 
 import gradio as gr
 
@@ -115,11 +116,12 @@ def build_browser(context, bench):
             rows = fetch_page(records, int(layer_value), first_feature)
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
-        page = {"set": spec.key, "layer": int(layer_value)}
-        same_page = (selected and {k: selected[k] for k in page} == page
+        page = {"set": spec.key, "layer": int(layer_value), "start": first_feature, "count": len(rows),
+                "stamp": uuid4().hex}
+        same_page = (selected and selected["set"] == page["set"] and selected["layer"] == page["layer"]
                      and first_feature <= selected["feature"] < first_feature + len(rows))
         mark = selected["feature"] if same_page else None
-        return (render.feature_list(int(layer_value), first_feature, spec.width, rows, mark), first_feature, page,
+        return (render.feature_list(int(layer_value), first_feature, spec.width, rows, mark, page["stamp"]), first_feature, page,
                 gr.skip() if same_page else None, gr.skip() if same_page else render.feature_detail())
 
     for button, step in ((show, 0), (previous, -1), (following, 1)):
@@ -129,7 +131,11 @@ def build_browser(context, bench):
 
     def picked(page, raw):
         try:
-            feature = int(json.loads(raw)["feature"])
+            payload = json.loads(raw)
+            feature = payload["feature"]
+            if (not page or payload.get("page_id") != page["stamp"] or type(feature) is not int
+                    or not page["start"] <= feature < page["start"] + page["count"]):
+                return gr.skip(), gr.skip()
         except (TypeError, ValueError, KeyError):
             return gr.skip(), gr.skip()
         if not page:
