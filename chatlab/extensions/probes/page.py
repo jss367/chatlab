@@ -305,12 +305,13 @@ def build_page(context):
                                  f"{len(positive)} and {len(negative)}.")
             strength = float(strength)
             with context.models.open_session() as session:
-                model_id = session.model_id
+                model_id, revision = session.model_id, session.model_revision
                 wanted_rows = session.read_examples(positive, chat_template=template, pool=pooling)
                 unwanted_rows = session.read_examples(negative, chat_template=template, pool=pooling)
             # The model is released before fitting, which needs only the arrays.
             fitted, folds = probes.train(wanted_rows, unwanted_rows, l2=strength, paired=pairs)
             probe = probes.build(name=(probe_name or "").strip() or "Probe", model_id=model_id,
+                                 model_revision=revision,
                                  positive_label=looking_for, negative_label=against,
                                  positive_examples=positive, negative_examples=negative, pool=pooling,
                                  chat_template=template, l2=strength, layers=fitted, folds=folds, paired=pairs)
@@ -386,6 +387,11 @@ def build_page(context):
                 if session.model_id != probe["model_id"]:
                     raise ValueError(f"This probe was trained on {probe['model_id']}; load that model to "
                                      f"read with it. {session.model_id} is loaded.")
+                current = session.model_revision
+                if probe["model_revision"] and current and current != probe["model_revision"]:
+                    raise ValueError(f"This probe was trained on revision {probe['model_revision'][:12]} of "
+                                     f"{probe['model_id']}, and revision {current[:12]} is loaded. "
+                                     "Its directions belong to the other weights; train it again here.")
                 if chosen_mode == GENERATE:
                     messages = ([{"role": "system", "content": system_text}] if system_text.strip() else [])
                     messages.append({"role": "user", "content": message})

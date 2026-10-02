@@ -170,7 +170,7 @@ def _short(value):
     return float(f"{float(value):.9g}")
 
 
-def build(*, name, model_id, positive_label, negative_label, positive_examples, negative_examples,
+def build(*, name, model_id, model_revision=None, positive_label, negative_label, positive_examples, negative_examples,
           pool, chat_template, l2, layers, folds, paired=False):
     """A fitted probe as the JSON it is saved and exported as."""
     probe = {
@@ -178,6 +178,7 @@ def build(*, name, model_id, positive_label, negative_label, positive_examples, 
         "id": uuid4().hex,
         "name": name,
         "model_id": model_id,
+        "model_revision": model_revision,
         "positive_label": positive_label,
         "negative_label": negative_label,
         "pool": pool,
@@ -252,6 +253,9 @@ def normalize(value):
             **{key: number(item.get(key), key.replace("_", " "))
                for key in ("train_accuracy", "heldout_accuracy", "heldout_loss")},
         })
+    revision = value.get("model_revision")
+    if revision is not None and (not isinstance(revision, str) or not 0 < len(revision) <= 200):
+        raise ValueError("The probe's model revision must be text of at most 200 characters, or null.")
     created = number(value.get("created"), "creation time")
     # The saved list shows the date, so it has to be one a date can hold.
     if not 0 <= created <= LATEST_CREATED:
@@ -261,6 +265,7 @@ def normalize(value):
         raise ValueError("The probe's best layer is not one of its layers.")
     return {
         "format": FORMAT, "id": probe_id, "name": text("name"), "model_id": text("model_id", 300),
+        "model_revision": revision,
         "positive_label": positive_label, "negative_label": negative_label,
         "pool": value["pool"], "chat_template": value["chat_template"],
         "l2": number(value.get("l2"), "L2 strength"), "folds": int(number(value.get("folds"), "folds")),
@@ -277,9 +282,17 @@ def directions(probe):
 
 
 def probabilities(probe, projections):
-    """Each block's probability for each position, from the host's dot products."""
+    """Each block's probability for each position, from the host's dot products.
+
+    Weights that each fit in float32 can still overflow in their sum, so a
+    reading that is not finite is refused rather than shown as certainty.
+    """
+    projections = np.asarray(projections, dtype=np.float64)
+    if not np.isfinite(projections).all():
+        raise ValueError("This probe's weights are too large for this model's activations: "
+                         "the reading overflowed. Train the probe again.")
     biases = np.asarray([item["bias"] for item in probe["layers"]], dtype=np.float64)
-    return _sigmoid(np.asarray(projections, dtype=np.float64) + biases[:, None])
+    return _sigmoid(projections + biases[:, None])
 
 
 def dumps(probe):

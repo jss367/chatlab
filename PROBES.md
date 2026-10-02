@@ -33,7 +33,7 @@ The strip colors each token by the probe's probability at the layer on the slide
 
 The probe was trained on one position of each example, the last token or the mean. Mid-sentence tokens are a different distribution from that position, so read colors there with care. The position a probe was trained on is usually where its readings are cleanest: the final period of a sentence, or the generation prompt when the examples were read as user messages.
 
-Reading needs the model the probe was trained on. A probe for another model is refused before anything runs.
+Reading needs the model the probe was trained on. A probe for another model is refused before anything runs, and so is a probe trained on another revision of the same model ID when both revisions are known.
 
 ## Saved probes
 
@@ -46,6 +46,7 @@ A probe file holds:
 | `format` | `chatlab-probe-1` |
 | `id` | 32 hexadecimal characters |
 | `name`, `model_id` | the probe's name and the model it was trained on |
+| `model_revision` | the checkpoint revision it was trained on, or `null` when the load recorded none |
 | `positive_label`, `negative_label` | the **Looking for** and **Against** names |
 | `pool`, `chat_template`, `paired`, `l2`, `folds` | how the examples were read and fitted |
 | `examples` | `{"positive": [...], "negative": [...]}`, as written |

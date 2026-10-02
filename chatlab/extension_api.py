@@ -255,6 +255,17 @@ class GenerationSession:
         return self._manager.project_blocks(list(ids), directions, load_id=self.load_id)
 
     @property
+    def model_revision(self):
+        """The pinned checkpoint's revision, or ``None`` when the load does not record one.
+
+        The same model ID can name different weights after a newer download.
+        Something fitted to the weights, as a probe is, should be refused under
+        another revision when both revisions are known.
+        """
+        self._check()
+        return self._manager.model_revision()
+
+    @property
     def position_limit(self):
         """How many positions the pinned model can read in one pass, or ``None`` when its config does not say.
 

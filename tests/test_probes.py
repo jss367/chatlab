@@ -126,6 +126,10 @@ class FitTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "same layers"):
             probes.train(synthetic(3, 1, layers=2), synthetic(3, -1))
 
+    def test_an_overflowed_reading_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "overflowed"):
+            probes.probabilities(trained(), np.array([[np.inf], [0.0], [np.nan]]))
+
     def test_probabilities_are_the_logistic_of_the_projection(self):
         probe = trained()
         row = synthetic(1, 1)[0]
@@ -160,6 +164,8 @@ class FileTests(unittest.TestCase):
             (dict(id="../../etc"), "hexadecimal"),
             (dict(created=1e300), "between 1970 and 3000"),
             (dict(created=-1.0), "between 1970 and 3000"),
+            (dict(model_revision=""), "revision"),
+            (dict(model_revision=7), "revision"),
             (dict(layers=[dict(layers[0], weights=[1e300] * len(layers[0]["weights"])), layers[1]]), "32-bit"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
@@ -324,6 +330,17 @@ class PageTests(unittest.TestCase):
             with mock.patch("chatlab.model_inspection.model_position_limit", return_value=1):
                 with self.assertRaisesRegex(gr.Error, "above the 1 this model can read"):
                     self.read(probe, READ, WANTED[0])
+
+    def test_a_probe_for_another_revision_is_refused_when_both_are_known(self):
+        with mock.patch.object(self.manager, "model_revision", return_value="a" * 40):
+            probe = self.train()[0]
+            self.assertEqual(probe["model_revision"], "a" * 40)
+        with mock.patch.object(self.manager, "model_revision", return_value="b" * 40):
+            with self.assertRaisesRegex(gr.Error, "revision aaaaaaaaaaaa of test/tiny, and revision bbbbbbbbbbbb"):
+                self.read(probe, READ, "Hello")
+        # A load that records no revision cannot be told apart, so it is not refused.
+        with mock.patch.object(self.manager, "model_revision", return_value=None):
+            self.assertTrue(self.read(probe, READ, "Hello")[-1][0]["token_ids"])
 
     def test_a_probe_for_another_model_is_refused(self):
         probe = dict(self.train()[0], model_id="other/model")
