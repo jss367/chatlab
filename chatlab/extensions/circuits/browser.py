@@ -69,7 +69,9 @@ def feature_vector(spec, layer, feature, record, strength, loaded_id):
     Strength 1 adds what the feature writes at its strongest. The row is
     used as published, not normalized, so the record's activations apply to it.
     """
-    row = transcoders.decoder_row(spec, layer, feature)
+    revision = (record or {}).get("_transcoder_revision")
+    row = (transcoders.decoder_row(spec, layer, feature, revision=revision) if revision
+           else transcoders.decoder_row(spec, layer, feature))
     peak = (record or {}).get("act_max")
     peak = 1.0 if peak is None else peak
     return steering.vector_from(steering_model_id(spec, loaded_id), layer, [peak * value for value in row],

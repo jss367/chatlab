@@ -197,7 +197,7 @@ def download(spec, progress=None, cancelled=None, revision=None):
     return paths
 
 
-def decoder_row(spec, layer, feature):
+def decoder_row(spec, layer, feature, revision=None):
     """One feature's decoder row, read from its layer's file without loading the set.
 
     The row is what the feature writes into the residual stream per unit of
@@ -210,7 +210,9 @@ def decoder_row(spec, layer, feature):
         raise ValueError(f"{spec.title} has layers 0–{spec.layers - 1}.")
     if not 0 <= feature < spec.width:
         raise ValueError(f"Each layer has features 0–{spec.width - 1:,}.")
-    path = hf_hub_download(spec.repo, spec.path(f"layer_{layer}.safetensors"))
+    path = hf_hub_download(spec.repo, spec.path(f"layer_{layer}.safetensors"), revision=revision)
+    if revision is not None and snapshot_revision(path) != revision:
+        raise ValueError("The decoder row belongs to another transcoder snapshot.")
     with safe_open(path, framework="pt") as handle:
         weights = handle.get_slice("W_dec")
         if tuple(weights.get_shape()) != (spec.width, spec.d_model):
