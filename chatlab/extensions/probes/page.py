@@ -339,6 +339,7 @@ def build_page(context):
                      chat_template, paired, pool, l2]
 
     def train_probe(probe_name, looking_for, against, wanted, unwanted, template, pairs, pooling, strength, view):
+        turn = runs.turn(view)
         positive, negative = parse_examples(wanted), parse_examples(unwanted)
         looking_for, against = (looking_for or "").strip(), (against or "").strip()
         try:
@@ -370,7 +371,7 @@ def build_page(context):
         except OSError as exc:
             logger.warning("Could not save probe %s: %s", probe["id"], exc)
             gr.Warning(f"The probe was trained but not saved: {exc}.")
-        return shown_probe(probe, view)
+        return shown_probe(probe, view) if runs.live(view, turn) else (gr.skip(),) * len(probe_outputs)
 
     train.click(train_probe, [name, positive_label, negative_label, positive_text, negative_text,
                               chat_template, paired, pool, l2, owner], probe_outputs, concurrency_id="probes-model")

@@ -277,6 +277,20 @@ class PageTests(unittest.TestCase):
         self.assertIsNone(self.manager.claim_generation())
         self.manager.release_generation()
 
+    def test_training_completed_after_opening_another_probe_does_not_replace_it(self):
+        opened = self.train()[0]
+        fit = probes.train
+
+        def moved_on(*args, **kwargs):
+            self.fn["open_saved"](opened["id"], "owner")
+            return fit(*args, **kwargs)
+
+        with mock.patch.object(probes, "train", side_effect=moved_on):
+            frame = self.train(probe_name="New training")
+        self.assertEqual(frame, (gr.skip(),) * 21)
+        # The training artifact is retained even when its UI completion is stale.
+        self.assertEqual(len(list(self.data.glob("*.json"))), 2)
+
     def test_training_refusals_name_the_problem(self):
         with self.assertRaisesRegex(gr.Error, "2 to 64 examples of Greeting"):
             self.train(wanted="Hello")
