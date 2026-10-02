@@ -57,6 +57,7 @@ class Runs:
         self._active = {}
         self._shown = {}
         self._turns = {}
+        self._downloads = {}
 
     @staticmethod
     def new_owner():
@@ -115,11 +116,29 @@ class Runs:
         with self._lock:
             return reading is not None and self._shown.get(owner) == reading["id"]
 
+    def stage(self, owner, probe):
+        """One owned download directory per view, with one current named copy."""
+        name = re.sub(r"[^A-Za-z0-9_-]+", "-", probe["name"]).strip("-")[:60] or "probe"
+        with self._lock:
+            directory = self._downloads.get(owner)
+            if directory is None:
+                directory = self._downloads[owner] = tempfile.TemporaryDirectory(prefix="chatlab-probe-")
+            root = Path(directory.name)
+            path = root / f"{name}.json"
+            write_private_text(path, probes.dumps(probe))
+            for old in root.iterdir():
+                if old != path:
+                    old.unlink()
+            return str(path)
+
     def forget(self, owner):
         self.cancel(owner)
         with self._lock:
             self._shown.pop(owner, None)
             self._turns.pop(owner, None)
+            directory = self._downloads.pop(owner, None)
+        if directory is not None:
+            directory.cleanup()
 
 
 def quoted(value):
@@ -309,13 +328,6 @@ def build_page(context):
         path.parent.mkdir(parents=True, exist_ok=True)
         write_private_text(path, probes.dumps(probe))
 
-    def staged(probe):
-        """A copy named after the probe, where the interface is allowed to serve it."""
-        name = re.sub(r"[^A-Za-z0-9_-]+", "-", probe["name"]).strip("-")[:60] or "probe"
-        path = Path(tempfile.mkdtemp(prefix="chatlab-probe-")) / f"{name}.json"
-        write_private_text(path, probes.dumps(probe))
-        return str(path)
-
     def shown_probe(probe, view):
         """Everything that changes when a different probe is the current one.
 
@@ -330,7 +342,7 @@ def build_page(context):
         listed = any(value == probe["id"] for _label, value in choices)
         examples = probe["examples"]
         return (probe, probe_summary(probe), layer_rows(probe),
-                gr.update(choices=choices, value=probe["id"] if listed else None), staged(probe),
+                gr.update(choices=choices, value=probe["id"] if listed else None), runs.stage(view, probe),
                 gr.update(maximum=len(probe["layers"]) - 1, value=probe["best_layer"], visible=True),
                 probe["chat_template"], None, gr.update(value=[], visible=False), "", [], "",
                 probe["name"], probe["positive_label"], probe["negative_label"],

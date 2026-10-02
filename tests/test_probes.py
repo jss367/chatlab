@@ -277,6 +277,21 @@ class PageTests(unittest.TestCase):
         self.assertIsNone(self.manager.claim_generation())
         self.manager.release_generation()
 
+    def test_probe_downloads_reuse_and_clean_up_the_owned_view_directory(self):
+        runs = page_module.Runs()
+        probe = self.train()[0]
+        first = Path(runs.stage("view", probe))
+        second = Path(runs.stage("view", {**probe, "name": "Different"}))
+        self.assertEqual(first.parent, second.parent)
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
+        other = Path(runs.stage("other", probe))
+        runs.forget("view")
+        self.assertFalse(second.parent.exists())
+        self.assertTrue(other.exists())
+        runs.forget("other")
+        self.assertFalse(other.parent.exists())
+
     def test_training_completed_after_opening_another_probe_does_not_replace_it(self):
         opened = self.train()[0]
         fit = probes.train
