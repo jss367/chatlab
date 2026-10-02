@@ -39,11 +39,17 @@ CSS = """
 
 
 class Runs:
-    """One reading per view, and a way to stop its reply from another event."""
+    """One reading per view, a way to stop its reply from another event, and which reading is on screen.
+
+    The reading on screen is kept here rather than trusted from an event's
+    inputs: a slider release or a click queued before a new run carries the
+    old reading, and must not paint it back over the new one.
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._active = {}
+        self._shown = {}
 
     @staticmethod
     def new_owner():
@@ -74,6 +80,19 @@ class Runs:
                 active[0].set()
                 if active[1] is not None:
                     active[1].cancel()
+
+    def show(self, owner, reading_id):
+        with self._lock:
+            self._shown[owner] = reading_id
+
+    def current(self, owner, reading):
+        with self._lock:
+            return reading is not None and self._shown.get(owner) == reading["id"]
+
+    def forget(self, owner):
+        self.cancel(owner)
+        with self._lock:
+            self._shown.pop(owner, None)
 
 
 def quoted(value):
@@ -194,7 +213,7 @@ def build_page(context):
     display = context.tokens.display_text
 
     with gr.Column(elem_id="probes-page"):
-        owner = gr.State(value=runs.new_owner, delete_callback=runs.cancel)
+        owner = gr.State(value=runs.new_owner, delete_callback=runs.forget)
         probe_state = gr.State(None)
         reading_state = gr.State(None)
         gr.Markdown("# Linear probes\nGive examples of two kinds of text. A logistic regression is fitted to the "
@@ -436,36 +455,44 @@ def build_page(context):
                     # itself rather than cut short: a prefix is not what was asked for.
                     ids, first = session.example_ids(message, chat_template=user_turn), 0
                 projections = session.project_layers(ids, probes.directions(probe))
-                reading = dict(probe_id=probe["id"], model_id=session.model_id, load_id=session.load_id,
+                reading = dict(id=uuid4().hex, probe_id=probe["id"], model_id=session.model_id, load_id=session.load_id,
                                token_ids=ids, texts=[session.decode([token]) for token in ids], first=first,
                                probabilities=probes.probabilities(probe, projections).tolist())
         except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise gr.Error(str(exc)) from exc
         finally:
             runs.finish(view)
+        runs.show(view, reading["id"])
         yield (reading, *rendered(probe, reading, chosen), note, gr.skip())
 
-    def clear_reading():
+    def clear_reading(view):
         """Take the last reading off the page before the next run, so it never sits beside other text."""
+        runs.show(view, None)
         return None, gr.update(value=[], visible=False), "", "", "", []
 
-    run.click(clear_reading, None, [reading_state, strip, heat, reply, detail, token_table], queue=False)
+    run.click(clear_reading, owner, [reading_state, strip, heat, reply, detail, token_table], queue=False)
     run.click(read, [probe_state, mode, text, system, temperature, seed, max_tokens, include_prompt, as_user,
                      owner, layer], [reading_state, strip, heat, detail, reply],
               concurrency_id="probes-model", show_progress="hidden")
     stop.click(runs.cancel, owner, None, queue=False)
 
-    def change_layer(probe, reading, chosen):
-        if probe is None or reading is None or reading["probe_id"] != probe["id"]:
+    def on_screen(probe, reading, view):
+        return probe is not None and reading is not None and reading["probe_id"] == probe["id"] \
+            and runs.current(view, reading)
+
+    def change_layer(probe, reading, chosen, view):
+        if not on_screen(probe, reading, view):
             return gr.skip(), gr.skip()
-        return rendered(probe, reading, chosen)
+        painted = rendered(probe, reading, chosen)
+        # A run may have started while this was painting.
+        return painted if runs.current(view, reading) else (gr.skip(), gr.skip())
 
-    layer.release(change_layer, [probe_state, reading_state, layer], [strip, heat], show_progress="hidden")
+    layer.release(change_layer, [probe_state, reading_state, layer, owner], [strip, heat], show_progress="hidden")
 
-    def inspect_token(probe, reading, chosen, event: gr.SelectData):
+    def inspect_token(probe, reading, chosen, view, event: gr.SelectData):
         index = event.index[0] if isinstance(event.index, (list, tuple)) else event.index
-        if probe is None or reading is None or reading["probe_id"] != probe["id"]:
-            return "Read something first.", []
+        if not on_screen(probe, reading, view):
+            return gr.skip(), gr.skip()
         position = reading["first"] + index if isinstance(index, int) else -1
         if not reading["first"] <= position < len(reading["token_ids"]):
             return "Select a token in the current reading.", []
@@ -477,4 +504,4 @@ def build_page(context):
                 f"highest at layer {peak} ({values[peak]:.1%}).")
         return note, [[index_, f"{value:.1%}"] for index_, value in enumerate(values)]
 
-    strip.select(inspect_token, [probe_state, reading_state, layer], [detail, token_table], queue=False)
+    strip.select(inspect_token, [probe_state, reading_state, layer, owner], [detail, token_table], queue=False)

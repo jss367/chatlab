@@ -299,7 +299,7 @@ class PageTests(unittest.TestCase):
         strip = frames[-1][1]
         self.assertEqual(len(strip["value"]), len(ids))
         self.assertEqual(set(strip["color_map"]), {label for _, label in strip["value"]} | set(strip["color_map"]))
-        note, table = self.fn["inspect_token"](probe, reading, 1, SimpleNamespace(index=len(ids) - 1))
+        note, table = self.fn["inspect_token"](probe, reading, 1, "owner", SimpleNamespace(index=len(ids) - 1))
         self.assertIn("Greeting at layer 1", note)
         self.assertEqual(len(table), 2)
 
@@ -386,23 +386,32 @@ class PageTests(unittest.TestCase):
             self.fn["open_saved"]("0" * 32)
 
     def test_a_new_run_clears_the_last_reading_first(self):
-        reading, strip, heat, reply, detail, table = self.fn["clear_reading"]()
+        probe = self.train()[0]
+        shown = self.read(probe, READ, WANTED[0])[-1][0]
+        reading, strip, heat, reply, detail, table = self.fn["clear_reading"]("owner")
         self.assertIsNone(reading)
         self.assertEqual((strip["value"], strip["visible"]), ([], False))
         self.assertEqual((heat, reply, detail, table), ("", "", "", []))
+        # A slider release or click queued before the run still carries the old reading; it paints nothing.
+        self.assertEqual(self.fn["change_layer"](probe, shown, 0, "owner"), (gr.skip(), gr.skip()))
+        self.assertEqual(self.fn["inspect_token"](probe, shown, 0, "owner", SimpleNamespace(index=0)),
+                         (gr.skip(), gr.skip()))
+        # Nor does another view's reading.
+        fresh = self.read(probe, READ, WANTED[0])[-1][0]
+        self.assertEqual(self.fn["change_layer"](probe, fresh, 0, "another view"), (gr.skip(), gr.skip()))
 
     def test_changing_the_layer_repaints_without_the_model(self):
         probe = self.train()[0]
         reading = self.read(probe, READ, WANTED[0])[-1][0]
         self.manager.claim_generation()
         try:
-            strip, heat = self.fn["change_layer"](probe, reading, 0)
+            strip, heat = self.fn["change_layer"](probe, reading, 0, "owner")
         finally:
             self.manager.release_generation()
         self.assertEqual(len(strip["value"]), len(reading["token_ids"]))
         self.assertIn('class="probe-chosen"><th>layer 0', heat)
         other = dict(probe, id="f" * 32)
-        self.assertEqual(self.fn["change_layer"](other, reading, 0), (gr.skip(), gr.skip()))
+        self.assertEqual(self.fn["change_layer"](other, reading, 0, "owner"), (gr.skip(), gr.skip()))
 
 
 if __name__ == "__main__":
