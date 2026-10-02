@@ -155,8 +155,8 @@ class Workbench:
             ids = session.prompt_ids(messages)
             if prompt["prefix"]:
                 ids = ids + session.encode_replacement(ids, prompt["prefix"])
-        if len(ids) < 2:
-            raise ValueError("Write a prompt first.")
+        if not 2 <= len(ids) <= attribution.MAX_PREFIX:
+            raise ValueError(f"Attribution needs between 2 and {attribution.MAX_PREFIX} prompt tokens.")
         return ids
 
     def encoded_prompt(self, session, prompt):
@@ -200,7 +200,7 @@ class Workbench:
                                 "label": " / ".join(explain["tokens"][:3]) + " vs other"}
                 graph = attribution.attribute(blocks, held, ids, decode, settings=settings, token_ids=token_ids,
                                               contrast=contrast, progress=progress, cancelled=cancelled)
-                self._describe(graph, blocks, held, decode)
+                self._describe(graph, blocks, held, decode, cancelled)
                 graph.update(id=uuid4().hex, created=time.time(), model_id=session.model_id,
                              load_id=session.load_id, process_id=PROCESS_ID, model_revision=revision,
                              transcoders=spec.key, transcoder_revision=held.revision,
@@ -211,13 +211,15 @@ class Workbench:
                              labels={}, groups={}, effects=None)
                 return graph
 
-    def _describe(self, graph, blocks, held, decode):
+    def _describe(self, graph, blocks, held, decode, cancelled=None):
         """What each kept feature writes into the vocabulary, read off its decoder row."""
         import torch
 
         features = [n for n in graph["nodes"] if n["kind"] == "feature"]
         weight = blocks.unembed.weight
         for start in range(0, len(features), 64):
+            if cancelled and cancelled():
+                raise attribution.Cancelled()
             chunk = features[start:start + 64]
             rows = torch.stack([held.decoder_rows(n["layer"], torch.tensor([n["feature"]], device=weight.device))[0]
                                 for n in chunk])
@@ -227,6 +229,8 @@ class Workbench:
             for node, up, down in zip(chunk, top, bottom):
                 node["promotes"] = [decode(t) for t in up]
                 node["suppresses"] = [decode(t) for t in down]
+        if cancelled and cancelled():
+            raise attribution.Cancelled()
         for node in graph["nodes"]:
             if node["kind"] == "embedding":
                 node["text"] = graph["tokens"][node["position"]]
