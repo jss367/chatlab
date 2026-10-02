@@ -283,6 +283,27 @@ class PageTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in another.parent.iterdir()), [another.name])
         self.assertTrue((self.data / download.name).is_file())
 
+    def test_staged_download_is_removed_after_normal_process_exit(self):
+        import os
+        import subprocess
+        import sys
+        code = """
+import tempfile
+from pathlib import Path
+from unittest import mock
+import test_hangman
+case = test_hangman.PageTests()
+case.setUp()
+# Avoid writing any actual model state or touching user files.
+frames = list(case.fn['start_game'](test_hangman.SYSTEM, "Let's play.", 'owner', 1.0, 7, 64))
+print('STAGED:' + str(Path(frames[-1][8]).parent))
+"""
+        process = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env={**os.environ, "PYTHONPATH": str(Path(__file__).parent)}, check=True)
+        directory = next(line.removeprefix("STAGED:") for line in process.stdout.splitlines()
+                         if line.startswith("STAGED:"))
+        self.assertFalse(Path(directory).exists())
+
     def test_no_model_leaves_no_empty_turn_behind(self):
         self.manager.busy = True
         frames = []

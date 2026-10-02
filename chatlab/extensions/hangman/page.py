@@ -284,7 +284,7 @@ def build_page(context):
     outputs = [game_state, chat, check_panel, picker, note, token_state, strip, raw, download]
     inspector = [detail, alternatives]
 
-    staging = {"directory": None}
+    staging = {"directory": None, "owner": None}
 
     def save(game):
         """Save the game and return a copy of it where the interface may serve it.
@@ -304,7 +304,10 @@ def build_page(context):
         path.parent.mkdir(parents=True, exist_ok=True)
         write_private_text(path, text)
         if staging["directory"] is None or not staging["directory"].is_dir():
-            staging["directory"] = Path(tempfile.mkdtemp(prefix="chatlab-hangman-"))
+            # Keep the owner alive while the page can save. Its finalizer
+            # removes the last copy at page collection or normal process exit.
+            staging["owner"] = tempfile.TemporaryDirectory(prefix="chatlab-hangman-")
+            staging["directory"] = Path(staging["owner"].name)
         copy_path = staging["directory"] / path.name
         partial = staging["directory"] / f".{path.name}.{uuid4().hex}.tmp"
         try:
