@@ -219,15 +219,21 @@ class Workbench:
 
     # Feature details -------------------------------------------------------
 
+    def records(self, spec, revision=None):
+        """Feature records cached separately for each immutable transcoder revision."""
+        with self._lock:
+            key = (spec.key, revision)
+            records = self._records.get(key)
+            if records is None:
+                records = self._records[key] = transcoders.FeatureRecords(
+                    spec, self.data_dir / "features", revision=revision)
+        return records
+
     def record(self, graph, node):
         spec = next((s for s in transcoders.CATALOGUE if s.key == graph.get("transcoders")), None)
         if spec is None:
             raise OSError("This graph's transcoders are not in this build's catalogue.")
-        with self._lock:
-            records = self._records.get(spec.key)
-            if records is None:
-                records = self._records[spec.key] = transcoders.FeatureRecords(spec, self.data_dir / "features")
-        return records.get(node["layer"], node["feature"])
+        return self.records(spec, revision=graph.get("transcoder_revision")).get(node["layer"], node["feature"])
 
     def ablate(self, graph, node, progress, cancelled):
         """Ablate one feature at its own position and read each target's change."""
@@ -398,14 +404,17 @@ def load_graph(path):
                 valid_layer = 0 <= layer < layers
             if not valid_layer:
                 raise ValueError
-            if not all(math.isfinite(float(node[field])) for field in ("influence", "effect")):
-                raise ValueError
+            for field in ("influence", "effect"):
+                node[field] = float(node[field])
+                if not math.isfinite(node[field]):
+                    raise ValueError
             kind = node["kind"]
             if kind == "feature":
                 feature = node["feature"]
                 if type(feature) is not int or not 0 <= feature < width:
                     raise ValueError
-                if not math.isfinite(float(node["activation"])) or float(node["activation"]) < 0:
+                node["activation"] = float(node["activation"])
+                if not math.isfinite(node["activation"]) or node["activation"] < 0:
                     raise ValueError
             elif kind == "embedding":
                 if node["token_id"] != token_ids[position]:
@@ -423,12 +432,16 @@ def load_graph(path):
                     raise ValueError
                 if not all(type(value) is int and 0 <= value < 2 ** 31 for value in values):
                     raise ValueError
-                if not isinstance(node["text"], str) or not 0 <= float(node["probability"]) <= 1:
+                node["probability"] = float(node["probability"])
+                if not isinstance(node["text"], str) or not 0 <= node["probability"] <= 1:
                     raise ValueError
         for edge in graph["edges"]:
             if edge["source"] not in ids or edge["target"] not in ids:
                 raise ValueError
-            float(edge["weight"])
+            weight = float(edge["weight"])
+            if not math.isfinite(weight):
+                raise ValueError
+            edge["weight"] = weight
         graph["tokens"] = [str(t) for t in graph["tokens"]]
         int(graph["layers"])
         graph.setdefault("labels", {})
