@@ -41,6 +41,50 @@ TERMINAL = {"arrived", "abandoned", "budget", "stopped", "error"}
 # The pilot's window, kept as the default so runs written before it was
 # configurable are read under the window that scored them.
 RECOVERY_DEFAULTS = {"recovery_tokens": 1024, "recovery_attempts": 4}
+# The largest run file ChatLab reads back, for replay, a fork or the Reasoning
+# check. A file is read whole, and json.loads builds about three times its size
+# in objects beside the text, so this is what bounds the memory a load takes
+# next to the model. No cap fits every run the workbench can make: a hundred
+# agents may each sample 131,072 tokens, at about 1.5 KB a token with its eight
+# alternatives, which is gigabytes. 256 MB holds a run of one agent at the
+# usual limits many times over, and a hundred agents for several rounds of a
+# few hundred tokens. Saving writes a run past it whole, and says it is past
+# it, so the cap is met when the file is written rather than when it is opened.
+MAX_RUN_BYTES = 256 * 1024**2
+# The text a run's interruption may not carry, because it is forced into the
+# response verbatim, where tool syntax, a turn boundary or a reasoning
+# delimiter would be read as the model's own, and a code fence would hide the
+# call that follows it.
+FORBIDDEN_INTERRUPTION = ("<tool_call", "</tool_call", "<|im_", "<|endoftext|>", "<think>", "</think>", "```", "~~~")
+
+
+def megabytes(size):
+    return f"{size / 1024**2:.0f} MB"
+
+
+def past_load_limit(size):
+    """What to say of a run file of ``size`` bytes, or nothing if it loads back."""
+    if size <= MAX_RUN_BYTES:
+        return ""
+    return (f"The run file is past the {megabytes(MAX_RUN_BYTES)} that Load a saved run reads, so it is written "
+            "whole but cannot be loaded back to replay, fork or check.")
+
+
+def read_run_file(path):
+    """The saved run in ``path``, refused before it is read if it is past the cap."""
+    path = Path(path)
+    size = path.stat().st_size
+    if size > MAX_RUN_BYTES:
+        raise ValueError(f"This run file is {megabytes(size)}, and ChatLab reads back run files of up to "
+                         f"{megabytes(MAX_RUN_BYTES)}.")
+    return json.loads(path.read_text())
+
+
+def check_interruption_text(text):
+    """Refuse interruption text that would be read as something the model wrote."""
+    if any(mark in text for mark in FORBIDDEN_INTERRUPTION):
+        raise ValueError("Interruption text cannot supply tool syntax, conversation boundary tokens, reasoning "
+                         "delimiters or code fences.")
 
 
 def reachable_before_arriving(maze, origin):
@@ -119,6 +163,25 @@ def check_checkpoint(config, maze):
     if type(responses) is not int or not 0 <= responses <= 256:
         raise ValueError("Steered responses must be a whole number from 0 to 256; 0 steers to the end of the run.")
     config.update(steering=vector, steer_when=dict(when), steer_responses=responses)
+
+
+def check_supplied_steering(config, maze):
+    """Refuse a steering cell the supplied starting moves walk past.
+
+    A cell the supplied moves stand on and leave, the start included, is one
+    no response ever stands on, so the run would read as steered while nothing
+    steered it. Moves that end on it leave the first response standing there,
+    which steers it. Checked where a run is prepared, from the page or a trial
+    file, rather than in the episode, which reads back runs saved before
+    anyone checked.
+    """
+    cell = (config.get("steer_when") or {}).get("cell")
+    if cell is None:
+        return
+    walked = [list(c) for c in maze.route()[:config.get("supplied_moves", 0) + 1]]
+    if list(cell) in walked and list(cell) != walked[-1]:
+        raise ValueError("The supplied starting moves pass the steering cell, so steering there would never "
+                         "start. Supply fewer moves, or steer at another cell.")
 
 
 def steering_active(config):
@@ -519,6 +582,18 @@ class Episode:
             text = json.dumps(self.payload(), ensure_ascii=False, allow_nan=False)
         write_private_text(temp, text)
         temp.replace(path)
+        # A run past the cap is written whole all the same, since a file that
+        # cannot be loaded back still holds the run, and said where the run is
+        # watched. The note is added once to whatever the latest response left
+        # there, so it stays in view as the run goes on.
+        size = path.stat().st_size
+        note = past_load_limit(size)
+        if note:
+            with self.lock:
+                if note not in self.detail:
+                    logger.warning("Run %s is %s, past the %s that Load a saved run reads", self.run_id,
+                                   megabytes(size), megabytes(MAX_RUN_BYTES))
+                    self.detail += " " + note
         return path
 
     def export(self):
@@ -975,8 +1050,10 @@ def interrupted_prefix(episode, manager, index=0):
     if not agent["interrupt_next"] and episode.agent_moves(index) < episode.config["interrupt_after"]:
         return []
     text = episode.config["interruption_text"]
-    if any(mark in text for mark in ("<tool_call", "</tool_call", "<|im_", "<|endoftext|>", "<think>", "</think>", "```", "~~~")):
-        raise ValueError("Interruption text cannot supply tool syntax, conversation boundary tokens, reasoning delimiters or code fences.")
+    # Checked again where it lands, because a run read back from a file was
+    # never prepared here, and preparing one refuses this text before any
+    # response is generated.
+    check_interruption_text(text)
     # forced_ids inserts into the actual next response, including inside an
     # already-open reasoning block. Unlike answer_prefill it adds no </think>.
     ids = manager.encode(text)

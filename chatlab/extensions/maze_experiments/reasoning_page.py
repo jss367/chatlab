@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import html
-import json
 import logging
 import re
 import tempfile
@@ -14,6 +13,7 @@ from .reasoning_check import (BUSY, FOLLOW_WINDOW, FRACTIONS, RESPONSE_HEADERS, 
                               TRUNCATION_SUMMARY_HEADERS, TruncationControl, condition_of, csv_text, load_run,
                               read_responses, response_rows, run_label, summary_rows, truncation_rows,
                               truncation_summary, truncation_test)
+from .runner import read_run_file
 
 logger = logging.getLogger(__name__)
 
@@ -141,9 +141,7 @@ def build_reasoning_page(context):
         replaced = set()
         for path in paths or ():
             try:
-                if Path(path).stat().st_size > 50_000_000:
-                    raise ValueError("Run files must be smaller than 50 MB.")
-                ep = load_run(json.loads(Path(path).read_text()))
+                ep = load_run(read_run_file(path))
             except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
                 logger.warning("Reasoning check could not load %s: %s", path, exc)
                 gr.Warning(f"Could not load {Path(path).name}: {exc}")
