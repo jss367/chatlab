@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from pathlib import Path
@@ -272,6 +273,7 @@ class Workbench:
         return self.data_dir / "graphs"
 
     def save(self, graph):
+        validate_graph_id(graph.get("id"))
         text = json.dumps(graph)
         if len(text.encode("utf-8")) > MAX_GRAPH_BYTES:
             raise OSError("the graph is too large to save")
@@ -302,6 +304,12 @@ def describe(graph):
     return f"{when} · {graph.get('model_id', '?')} · {text[-40:]}"
 
 
+def validate_graph_id(value):
+    """A graph ID is a single safe filename component, including older short IDs."""
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+        raise ValueError("The graph id must be a safe filename component.")
+
+
 def load_graph(path):
     """Read a saved graph, refusing anything that is not one."""
     path = Path(path)
@@ -327,6 +335,7 @@ def load_graph(path):
         graph.setdefault("groups", {})
         graph.setdefault("effects", None)
         graph.setdefault("id", uuid4().hex)
+        validate_graph_id(graph["id"])
         if not isinstance(graph["labels"], dict) or not isinstance(graph["groups"], dict):
             raise ValueError
     except (KeyError, TypeError, ValueError) as exc:

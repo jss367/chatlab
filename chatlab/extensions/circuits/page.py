@@ -391,7 +391,7 @@ def build_page(context):
         groups = {g: [m for m in ms if m not in members] for g, ms in graph["groups"].items()}
         groups = {g: ms for g, ms in groups.items() if ms}
         groups[name] = members
-        graph = {**graph, "groups": groups}
+        graph = {**graph, "groups": groups, "effects": None}
         save(graph)
         gr.Info(f"Grouped {len(members)} feature{'s' * (len(members) != 1)} as {name}.")
         return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, name), ""
@@ -423,7 +423,7 @@ def build_page(context):
         if not graph or name not in graph["groups"]:
             raise gr.Error("Choose a group first.")
         groups = {g: m for g, m in graph["groups"].items() if g != name}
-        graph = {**graph, "groups": groups}
+        graph = {**graph, "groups": groups, "effects": None}
         save(graph)
         return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, None)
 
