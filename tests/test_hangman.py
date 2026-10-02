@@ -10,7 +10,7 @@ import gradio as gr
 
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.hangman.game import (
-    SYSTEM, answer_of, check, finish_turn, fitting_words, guess_of, load, messages_for, new_game,
+    GIVE_UP, SYSTEM, answer_of, check, finish_turn, fitting_words, guess_of, load, messages_for, new_game,
     read_board, read_word, reasoning_of, reopened, rewound, saved,
 )
 from chatlab.extensions.hangman.page import build_page, turn_note
@@ -111,6 +111,33 @@ class CheckTests(unittest.TestCase):
         self.assertIn((4, "The word revealed at response 2 was CAT; this one is DOG."), problems)
         self.assertEqual(check(game_of(("start", "Board: _ _ _"), ("reveal", "Word: cat"),
                                        ("c", "Board: C _ _"), ("t", "Board: C _ T"))), [])
+
+    def test_a_board_spelling_out_the_revealed_word_needs_no_guesses(self):
+        given_up = game_of(("start", "Board: _ _ _ _ _"), ("c", "Board: C _ _ _ _"),
+                           ("x", "Board: C _ _ _ _"), (GIVE_UP, "Board: c r a n e\nWord: crane"))
+        self.assertEqual(check(given_up), [])
+        lost = game_of(("start", "Board: _ _ _ _ _"), ("x", "Board: _ _ _ _ _\nWrong guesses left: 1"),
+                       ("y", "Board: C R A N E\nWrong guesses left: 0\nWord: crane"))
+        self.assertEqual(check(lost), [])
+        # The board is the reveal, not a claim the letters were guessed, so a
+        # later board may hide them again.
+        self.assertEqual(check(game_of(("start", "Board: _ _ _"), ("?", "Board: C A T\nWord: cat"),
+                                       ("c", "Board: C _ _"))), [])
+
+    def test_a_board_spelling_out_the_revealed_word_still_agrees_with_earlier_boards(self):
+        game = game_of(("start", "Board: _ _ _ _ _"), ("a", "Board: _ _ A _ _"), ("e", "Board: _ _ A _ E"),
+                       ("t", "Board: _ _ A _ E"), (GIVE_UP, "Board: C R A T E\nWord: crate"))
+        problems = check(game)
+        self.assertIn((5, "T was placed at no position and is now at 4."), problems)
+        self.assertIn((5, "The revealed word CRATE has T at 4; the board placed it at no position."), problems)
+        self.assertFalse(any("never guessed" in message for _, message in problems))
+        game = game_of(("start", "Board: _ _ _ _ _"), ("a", "Board: _ _ A _ _"),
+                       (GIVE_UP, "Board: S T O N E\nWord: stone"))
+        self.assertIn((3, "Position 3 showed A and now shows O."), check(game))
+        # A full board that is not the word the reply reveals is a board like any other.
+        game = game_of(("start", "Board: _ _ _ _ _"), ("c", "Board: C _ _ _ _"),
+                       (GIVE_UP, "Board: C R A N E\nWord: crate"))
+        self.assertIn((3, "R is on the board but was never guessed."), check(game))
 
     def test_a_word_guess_confirmed_by_its_word_line_counts_as_guessed(self):
         game = game_of(("start", "Board: _ _ _"), ("cat", "Yes!\nWord: cat"), ("again", "Board: C A T"))

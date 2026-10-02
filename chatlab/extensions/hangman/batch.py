@@ -164,14 +164,23 @@ def next_guess(game, guesser, asked):
 def ended(turn):
     """How the game stands after ``turn``: solved, lost, revealed, or None to play on.
 
-    Revealed is a word written before the board was full or the guesses ran
-    out, which the model was told to do only when asked.
+    Solved is the player's guess completing the word: a letter on a full
+    board, or the word itself, confirmed by the board or a Word: line. A right
+    guess costs no wrong guess, so a solve on the last one still leaves some.
+    A full board the guess did not earn is the model showing the word, which a
+    losing reply does too: lost when no wrong guesses are left, and otherwise
+    revealed, as is a word written before the game ended, which the model was
+    told to do only when asked.
     """
-    if turn.get("board") and HIDDEN not in turn["board"]:
+    board, word = turn.get("board"), turn.get("revealed_word")
+    full = board is not None and HIDDEN not in board
+    kind, value = guess_of(turn["guess"])
+    if (kind == "letter" and full and value in board
+            or kind == "word" and value in (full and "".join(board), word)):
         return "solved"
     if read_left(turn.get("answer", "")) == 0:
         return "lost"
-    return "revealed" if turn.get("revealed_word") else None
+    return "revealed" if full or word else None
 
 
 class BatchControl:

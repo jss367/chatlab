@@ -167,7 +167,9 @@ def check(game):
     is absent, and every later board and the revealed word have to agree. The
     first readable board sets the length; one of another length is reported
     as a change of size and checked only for letters nobody guessed. The
-    first revealed word is held to every board and word that follows it.
+    first revealed word is held to every board and word that follows it. A
+    board spelling out the word its reply reveals may show letters nobody
+    guessed: that is how the host reveals it.
     """
     problems, _ = _walk(game)
     # A word revealed again on every later turn contradicts the boards the
@@ -224,6 +226,11 @@ def _walk(game):
                     if letter not in placed:
                         placed[letter] = {i for i, character in enumerate(value) if character == letter}
                         pending.discard(letter)
+        # A board spelling out the word its own reply reveals is the reveal,
+        # drawn when the game ends or the player asks, not a claim that its
+        # letters were guessed. It is still held to every board before it,
+        # and later boards may hide what only it showed.
+        spelled = board is not None and "".join(board) == turn.get("revealed_word")
         if board is not None:
             drawn = cells.setdefault(len(board), {})
             for position, cell in enumerate(board):
@@ -235,7 +242,8 @@ def _walk(game):
                 # moves letters nor places the pending ones; what it shows
                 # still has to have been guessed.
                 problems.extend((number, f"{cell.upper()} is on the board but was never guessed.")
-                                for cell in dict.fromkeys(board) if cell != HIDDEN and cell not in guessed)
+                                for cell in dict.fromkeys(board)
+                                if cell != HIDDEN and cell not in guessed and not spelled)
             else:
                 length = len(board)
                 for position, cell in enumerate(board):
@@ -246,7 +254,7 @@ def _walk(game):
                     if cell == HIDDEN:
                         # Reported once; the placement check keeps the letter to its place.
                         shown.pop(position, None)
-                    else:
+                    elif cell in guessed or not spelled:
                         shown[position] = cell
                         if cell != before and cell not in guessed:
                             problems.append((number, f"{cell.upper()} is on the board but was never guessed."))

@@ -34,14 +34,17 @@ class Host:
     ``word`` is the word it holds, and every board it draws is that word's.
     Without one it holds nothing: each board is five blanks with whatever it
     likes revealed, and asked for the word it names whichever ``names`` gives.
+    With ``shows`` it draws the whole word on the board whenever it reveals
+    it: asked for it, or out of wrong guesses.
     """
     loaded = True
     model_id = "test/model"
     load_id = "first"
     tokenizer = SimpleNamespace(decode=lambda ids, **kw: "".join(map(chr, ids)))
 
-    def __init__(self, word=None, names=(), boards=(), left=6):
+    def __init__(self, word=None, names=(), boards=(), left=6, shows=False):
         self.word, self.names, self.boards, self.left = word, list(names), list(boards), left
+        self.shows = shows
         self.busy = False
         self.calls = []
         self.during = None
@@ -67,12 +70,16 @@ class Host:
             return " " + (self.word or self.names.pop(0))
         question = messages[-1]["content"]
         if question == GIVE_UP:
+            if self.shows and self.word:
+                return f"Board: {' '.join(self.word.upper())}\nWord: {self.word}"
             return f"Word: {self.word or self.names.pop(0)}"
         if self.word is None:
             return f"Board: {self.boards.pop(0)}"
         guessed = {m["content"] for m in messages if m["role"] == "user" and len(m["content"]) == 1}
         board = [c.upper() if c in guessed else "_" for c in self.word]
         wrong = len(guessed - set(self.word))
+        if self.shows and wrong >= self.left:
+            board = list(self.word.upper())
         text = f"Board: {' '.join(board)}\nGuessed: {' '.join(sorted(guessed)).upper()}\n" \
                f"Wrong guesses left: {self.left - wrong}"
         return text + (f"\nWord: {self.word}" if "_" not in board else "")
@@ -256,6 +263,37 @@ class BatchTests(Fixture):
         self.assertEqual((rows[0]["outcome"], rows[0]["responses"], rows[0]["revealed_word"]), ("lost", 4, "crane"))
         self.assertEqual(host.calls[-1]["messages"][-1]["content"], GIVE_UP)
         self.assertEqual(rows[0]["guesses"], "x y")
+
+    def test_a_host_that_shows_the_word_on_the_board_is_not_charged_for_it(self):
+        host = Host("crane", shows=True)
+        row = self.run_batch(host, [dict(id="gave-up", seed=1)], guesser=["c", "x"])[2][0]
+        self.assertEqual((row["outcome"], row["responses"], row["revealed_word"]), ("unfinished", 4, "crane"))
+        self.assertEqual((row["contradictions"], row["first_contradiction"], row["reveal_fits"]), (0, "", True))
+        host = Host("crane", left=2, shows=True)
+        done, total, rows, directory, _ = self.run_batch(host, [dict(id="lost", seed=1)], guesser=["x", "y", "z"])
+        # The losing reply shows the whole word, and the game is still lost.
+        self.assertEqual((rows[0]["outcome"], rows[0]["responses"], rows[0]["guesses"]), ("lost", 3, "x y"))
+        self.assertEqual((rows[0]["contradictions"], rows[0]["reveal_fits"]), (0, True))
+        summary, _, manifest = self.files(directory)
+        self.assertEqual((summary[0]["outcome"], manifest["results"][0]["outcome"]), ("lost", "lost"))
+
+    def test_a_solve_on_the_last_wrong_guess_left_is_solved(self):
+        host = Host("crane", left=2, shows=True)
+        row = self.run_batch(host, [dict(id="close", seed=1)], guesser=["x", "c", "r", "a", "n", "e"])[2][0]
+        self.assertEqual((row["outcome"], row["responses"], row["contradictions"]), ("solved", 7, 0))
+
+    def test_how_a_game_ended_follows_what_the_guess_did(self):
+        def ended(guess, reply):
+            return batch.ended(finish_turn(dict(guess=guess, text=reply)))
+        self.assertEqual(ended("z", "Board: C R A N E\nWrong guesses left: 0\nWord: crane"), "lost")
+        self.assertEqual(ended("e", "Board: C R A N E\nWrong guesses left: 1\nWord: crane"), "solved")
+        # A host that miscounts a right guess still saw it solve the word.
+        self.assertEqual(ended("e", "Board: C R A N E\nWrong guesses left: 0"), "solved")
+        self.assertEqual(ended("crane", "Right!\nWord: crane"), "solved")
+        self.assertEqual(ended("crate", "No.\nBoard: C R A N E\nWrong guesses left: 0\nWord: crane"), "lost")
+        self.assertEqual(ended("z", "Board: C R A N E\nWrong guesses left: 3"), "revealed")
+        self.assertEqual(ended("z", "Board: C _ _ _ _\nWrong guesses left: 3\nWord: crane"), "revealed")
+        self.assertIsNone(ended("z", "Board: C _ _ _ _\nWrong guesses left: 3"))
 
     def test_a_failed_game_is_recorded_and_the_batch_moves_on(self):
         host = Host("crane")
