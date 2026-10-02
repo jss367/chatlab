@@ -103,7 +103,11 @@ def status_text(status):
     where = ("in memory" if status["in_memory"] else
              "downloaded, read into memory on the first trace" if status["downloaded"]
              else f"not downloaded yet: {spec.weights_gb:.1f} GB, fetched on the first trace")
-    return f"**`{model_id}`** · {spec.title} from `{spec.repo}` · {where}."
+    compatibility = (f"Training checkpoint: `{spec.training_model_revision}`. Other checkpoints are refused."
+                     if spec.training_model_revision else
+                     "The publisher does not report a training checkpoint; checkpoint compatibility is unverified. "
+                     "Feature examples describe the publisher’s training data.")
+    return f"**`{model_id}`** · {spec.title} from `{spec.repo}` · {where}.\n\n{compatibility}"
 
 
 def _progress_text(stage, done, total):
@@ -371,7 +375,8 @@ def build_page(context):
             yield (gr.skip(), gr.skip(), *skip)
             return
         stats = graph["stats"]
-        frame = (f"Traced {stats['traced_features']} of {stats['active_features']:,} active features.",
+        frame = (f"Traced {stats['traced_features']} of {stats['active_features']:,} active features. "
+                 f"Checkpoint compatibility: {graph.get('checkpoint_compatibility', 'unverified')}.",
                  status_text(bench.status()), *show_graph(graph, path, shown, errors))
         yield frame if version(session_id) == stamp else (gr.skip(), gr.skip(), *skip)
 
