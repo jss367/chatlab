@@ -158,6 +158,8 @@ class FileTests(unittest.TestCase):
             (dict(layers=[dict(layers[0], bias=float("nan"))]), "finite"),
             (dict(layers=[dict(layers[1])]), "in order"),
             (dict(id="../../etc"), "hexadecimal"),
+            (dict(created=1e300), "between 1970 and 3000"),
+            (dict(created=-1.0), "between 1970 and 3000"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 probes.normalize(probe | change)
@@ -301,6 +303,18 @@ class PageTests(unittest.TestCase):
         self.assertEqual(whole["first"], 0)
         self.assertEqual(len(self.read(probe, GENERATE, "Hello", layer=0)[-1][1]["value"]),
                          len(reading["token_ids"]) - prompt)
+
+    def test_a_reply_at_the_window_leaves_out_the_token_the_model_never_read(self):
+        probe = self.train()[0]
+        with ModelService(lambda: self.manager).open_session() as session:
+            self.assertEqual(session.position_limit, 64)
+        full = self.read(probe, GENERATE, "Hello", show_prompt=True)[-1][0]
+        window = len(full["token_ids"]) - 1
+        # Generation is left alone; only the window the reading is trimmed to moves.
+        with mock.patch("chatlab.tokenization.model_position_limit", return_value=window):
+            trimmed = self.read(probe, GENERATE, "Hello", show_prompt=True)[-1][0]
+        self.assertEqual(trimmed["token_ids"], full["token_ids"][:window])
+        self.assertEqual(len(trimmed["probabilities"][0]), window)
 
     def test_a_probe_for_another_model_is_refused(self):
         probe = dict(self.train()[0], model_id="other/model")

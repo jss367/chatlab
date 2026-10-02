@@ -254,6 +254,18 @@ class GenerationSession:
         self._check()
         return self._manager.project_blocks(list(ids), directions, load_id=self.load_id)
 
+    @property
+    def position_limit(self):
+        """How many positions the pinned model can read in one pass, or ``None`` when its config does not say.
+
+        A response that runs into the window ends on one sampled token the
+        model never read, so a full reading of prompt and response can be one
+        longer than this. Trim to it before :meth:`project_layers`.
+        """
+        self._check()
+        from chatlab.tokenization import model_position_limit
+        return model_position_limit(self._manager.model)
+
     def check_steering(self, steering):
         """Raise ``ValueError`` if the pinned model cannot take this vector.
 

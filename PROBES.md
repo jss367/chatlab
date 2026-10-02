@@ -25,7 +25,7 @@ The best layer is the one with the highest held-out accuracy. With a few dozen e
 
 ## Reading with a probe
 
-Choose **Generate a reply** to send a message to the loaded model and read its reply, or **Read text** to read a passage as written. The reply streams into **Reply**. When it finishes, the whole sequence is run through the model once more, and every block's output at every position is read along that block's probe. A stopped reply is still read, up to where it stopped.
+Choose **Generate a reply** to send a message to the loaded model and read its reply, or **Read text** to read a passage as written. The reply streams into **Reply**. When it finishes, the whole sequence is run through the model once more, and every block's output at every position is read along that block's probe. A stopped reply is still read, up to where it stopped. A reply that ran into the model's window ends on a token the model sampled but never read, so that token is left out of the reading.
 
 The strip colors each token by the probe's probability at the layer on the slider. The slider starts at the best layer. Five buckets run from blue (under 10%, the **Against** side) through neutral (30–70%) to red (over 90%, the **Looking for** side). Moving the slider repaints the strip without running the model again. Click a token to see its probability at every layer. **Every layer** shows a grid of every layer against every token. Hover a cell to see its token.
 
@@ -51,6 +51,6 @@ A probe file holds:
 | `examples` | `{"positive": [...], "negative": [...]}`, as written |
 | `layers` | one entry per decoder block: `layer`, `weights`, `bias`, `train_accuracy`, `heldout_accuracy`, `heldout_loss` |
 | `best_layer` | the layer the slider starts at |
-| `created` | a Unix time |
+| `created` | a Unix time between 1970 and 3000 |
 
 The weights are in the raw activation basis, with the standardization folded in, so the probability at block *n* is `sigmoid(weights · x + bias)` for that block's output `x`. A probe for a 7B model is about 2.5 MB.

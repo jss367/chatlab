@@ -409,6 +409,11 @@ def build_page(context):
                     first = 0 if show_prompt else len(prompt_ids)
                 else:
                     ids, first = session.example_ids(message, chat_template=user_turn), 0
+                window = session.position_limit
+                if window is not None and len(ids) > window:
+                    # A reply that ran into the window ends on a token the model
+                    # sampled but never read, so there is no reading of it.
+                    ids = ids[:window]
                 projections = session.project_layers(ids, probes.directions(probe))
                 reading = dict(probe_id=probe["id"], model_id=session.model_id, load_id=session.load_id,
                                token_ids=ids, texts=[session.decode([token]) for token in ids], first=first,

@@ -27,6 +27,8 @@ FOLDS = 5
 DEFAULT_L2 = 1.0
 POOLS = ("last", "mean")
 NEWTON_STEPS = 100
+# The first second of the year 3000, comfortably inside what a date can show.
+LATEST_CREATED = 32503680000.0
 
 
 def _sigmoid(values):
@@ -242,6 +244,10 @@ def normalize(value):
             **{key: number(item.get(key), key.replace("_", " "))
                for key in ("train_accuracy", "heldout_accuracy", "heldout_loss")},
         })
+    created = number(value.get("created"), "creation time")
+    # The saved list shows the date, so it has to be one a date can hold.
+    if not 0 <= created <= LATEST_CREATED:
+        raise ValueError("The probe's creation time is not a date between 1970 and 3000.")
     best = value.get("best_layer")
     if type(best) is not int or not 0 <= best < len(clean):
         raise ValueError("The probe's best layer is not one of its layers.")
@@ -251,7 +257,7 @@ def normalize(value):
         "pool": value["pool"], "chat_template": value["chat_template"],
         "l2": number(value.get("l2"), "L2 strength"), "folds": int(number(value.get("folds"), "folds")),
         "paired": value.get("paired", False),
-        "created": number(value.get("created"), "creation time"),
+        "created": created,
         "examples": {side: list(examples[side]) for side in ("positive", "negative")},
         "layers": clean, "best_layer": best,
     }
