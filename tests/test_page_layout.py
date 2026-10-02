@@ -1096,18 +1096,21 @@ class PageLayoutTests(unittest.TestCase):
         ]
 
         # One stops a reply, one a batch of prompts, one a comparison slot
-        # being filled, one an activation experiment, one a picture being drawn.
+        # being filled, one an activation experiment, one a picture being drawn,
+        # one a reasoning check.
         # No more than one can be in the page: they contend for the same
         # generation slot and the losers refuse.
         self.assertEqual(
             {stop.elem_id for stop in stops},
-            {"stop-button", "stop-batch-button", "stop-compare", "stop-patching", "stop-drawing"},
+            {"stop-button", "stop-batch-button", "stop-compare", "stop-patching", "stop-drawing",
+             "stop-reasoning-check"},
         )
         self.assertIn("#stop-button", app.SHORTCUT_JS)
         self.assertIn("#stop-batch-button", app.SHORTCUT_JS)
         self.assertIn("#stop-compare", app.SHORTCUT_JS)
         self.assertIn("#stop-patching", app.SHORTCUT_JS)
         self.assertIn("#stop-drawing", app.SHORTCUT_JS)
+        self.assertIn("#stop-reasoning-check", app.SHORTCUT_JS)
         # Whether the button is in the document is the whole test. Gradio
         # leaves a component whose visible is false out of the page, so its
         # presence is the generation state itself. Testing whether it can be

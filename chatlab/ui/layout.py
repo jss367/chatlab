@@ -27,7 +27,7 @@ from chatlab.conversation import MAIN_BRANCH, branch_choices, new_forks
 from chatlab.device_memory import warm_device
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.registry import load_enabled
-from chatlab.ui import runtime
+from chatlab.ui import reasoning_check, runtime
 from chatlab.ui.background import ConversationEvents, ConversationJob
 from chatlab.ui.chat_layout import (
     ChatPage,
@@ -316,6 +316,10 @@ def build_app() -> gr.Blocks:
             settings_page.assistant_prefill, settings_page.thinking_mode,
         )
         wire_prompt_file(chat_page.prompts, states)
+        reasoning_check.wire(
+            chat_page.reasoning, states.conversation, settings_page.system_prompt,
+            settings_page.keep_reasoning, chat_page.sampling.max_new_tokens,
+        )
         wire_inspector(chat_page, states)
     return demo
 
