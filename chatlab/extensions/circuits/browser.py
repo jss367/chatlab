@@ -147,9 +147,10 @@ def build_browser(context, bench):
             if state is None or state["stamp"] != stamp:
                 return (gr.skip(),) * 6
             state["ready"] = True
-        return (render.feature_list(int(layer_value), first_feature, spec.width, rows, mark, page["stamp"]),
-                first_feature, page, {**page, "feature": mark} if same_page else None,
-                gr.skip() if same_page else render.feature_detail(), gr.update(interactive=True))
+        frame = (render.feature_list(int(layer_value), first_feature, spec.width, rows, mark, page["stamp"]),
+                 first_feature, page, {**page, "feature": mark} if same_page else None,
+                 gr.skip() if same_page else render.feature_detail(), gr.update(interactive=True))
+        return frame if current(view, stamp, ready=True) else (gr.skip(),) * 6
 
     for button, step in ((show, 0), (previous, -1), (following, 1)):
         event = button.click(begin_page, owner, [request, chosen, detail, steer], queue=False)
@@ -173,7 +174,8 @@ def build_browser(context, bench):
             record, error = bench.records(spec_named(page["set"])).get(page["layer"], feature), None
         except OSError as exc:
             record, error = None, str(exc)
-        return render.feature_detail(page["layer"], feature, record, error), {**page, "feature": feature}
+        frame = render.feature_detail(page["layer"], feature, record, error), {**page, "feature": feature}
+        return frame if current(view, page["stamp"], ready=True) else (gr.skip(), gr.skip())
 
     pick.input(picked, [shown, pick, owner], [detail, chosen],
                concurrency_id="circuits-browse", trigger_mode="always_last", show_progress="hidden")
