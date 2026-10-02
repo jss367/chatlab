@@ -451,6 +451,13 @@ def load_graph(path):
         validate_graph_id(graph["id"])
         if not isinstance(graph["labels"], dict) or not isinstance(graph["groups"], dict):
             raise ValueError
+        feature_ids = {node["id"] for node in nodes if node["kind"] == "feature"}
+        if len(graph["groups"]) > 4096:
+            raise ValueError
+        for name, members in graph["groups"].items():
+            if (not isinstance(name, str) or not isinstance(members, list) or len(members) > 4096
+                    or not all(isinstance(member, str) and member in feature_ids for member in members)):
+                raise ValueError
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("That file is not a valid attribution graph.") from exc
     return graph
