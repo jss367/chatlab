@@ -183,6 +183,52 @@ class AttributionTests(unittest.TestCase):
         grad, = torch.autograd.grad(odds, hidden)
         torch.testing.assert_close(direction, grad, rtol=1e-4, atol=1e-5)
 
+    def test_gemma2_saturated_contrast_matches_the_softcapped_log_odds_gradient(self):
+        blocks, held, recording = self.frozen("gemma2")
+        with torch.no_grad():
+            blocks.unembed.weight.mul_(100)
+        recording = attribution.record(blocks, held, IDS)
+        targets = attribution.choose_targets(recording, self.decode, contrast={"positive": [3, 4], "negative": [5]})
+        direction = attribution.logit_directions(blocks, recording, targets)[0]
+        hidden = recording.final[-1].clone().requires_grad_(True)
+        raw = blocks.unembed(hidden.to(blocks.dtype)).float()
+        self.assertGreater(float(raw.detach().abs().max()), blocks.final_softcap)
+        logits = torch.tanh(raw / blocks.final_softcap) * blocks.final_softcap
+        odds = torch.logsumexp(logits[[3, 4]], 0) - logits[5]
+        grad, = torch.autograd.grad(odds, hidden)
+        torch.testing.assert_close(direction, grad, rtol=1e-4, atol=1e-5)
+
+    def test_memory_limit_counts_both_resident_edge_matrices(self):
+        model = tiny_model("gemma3")
+        blocks = architecture.blocks(model)
+        held = tiny_transcoders(blocks)
+        recording = attribution.record(blocks, held, IDS)
+        targets = attribution.choose_targets(recording, self.decode)
+        graph = attribution.FrozenGraph(blocks, held, recording, 8)
+        single_matrix = (16 + len(targets)) * graph.columns * 4
+        graph.close()
+        # One matrix fits this limit, but the signed and normalized pair does not.
+        with mock.patch.object(attribution, "MAX_ROW_BYTES", single_matrix + 1):
+            with self.assertRaisesRegex(ValueError, "would need"):
+                attribution.attribute(blocks, held, IDS, self.decode,
+                                      settings=attribution.Settings(max_feature_nodes=16, batch_size=8))
+
+    def test_memory_limit_reserves_pruning_before_tracing(self):
+        model = tiny_model("gemma3")
+        blocks = architecture.blocks(model)
+        held = tiny_transcoders(blocks)
+        recording = attribution.record(blocks, held, IDS)
+        targets = attribution.choose_targets(recording, self.decode)
+        graph = attribution.FrozenGraph(blocks, held, recording, 8)
+        edge_pair = 2 * (16 + len(targets)) * graph.columns * 4
+        graph.close()
+        with mock.patch.object(attribution, "MAX_ROW_BYTES", edge_pair + 1), \
+                mock.patch.object(attribution.FrozenGraph, "rows") as rows:
+            with self.assertRaisesRegex(ValueError, "would need"):
+                attribution.attribute(blocks, held, IDS, self.decode,
+                                      settings=attribution.Settings(max_feature_nodes=16, batch_size=8))
+            rows.assert_not_called()
+
     def test_contrast_needs_two_distinct_sides(self):
         _, _, recording = self.frozen("qwen3")
         with self.assertRaisesRegex(ValueError, "both sides"):
@@ -359,6 +405,16 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(workbench.parse_tokens(" Wait\nOkay\n\n\\n\\n\r\n"), [" Wait", "Okay", "\n\n"])
         self.assertEqual(workbench.parse_prefixes("one\n---\ntwo\nlines\n --- \n\n"), ["one", "two\nlines"])
 
+    def test_plain_text_intervention_prefixes_are_appended_before_encoding(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        session = SimpleNamespace(encode=lambda text: [ord(c) for c in text])
+        model = SimpleNamespace(config=SimpleNamespace(bos_token_id=1))
+        prompt = dict(raw=True, user="prompt", prefix=" first reply", system="")
+        ids = bench.prompt_ids(session, model, prompt)
+        self.assertEqual(ids, [1] + [ord(c) for c in "prompt first reply"])
+        other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
+        self.assertNotEqual(other, ids)
+
     def test_saved_graphs_round_trip_and_bad_files_are_refused(self):
         graph = small_graph()
         with tempfile.TemporaryDirectory() as directory:
@@ -374,6 +430,44 @@ class WorkbenchTests(unittest.TestCase):
             bad.write_text(json.dumps(broken))
             with self.assertRaisesRegex(ValueError, "not a valid"):
                 workbench.load_graph(bad)
+
+    def test_uploaded_graph_ids_cannot_escape_the_graphs_directory(self):
+        graph = small_graph()
+        with tempfile.TemporaryDirectory() as directory:
+            bench = workbench.Workbench(SimpleNamespace(), directory)
+            path = Path(directory) / "upload.json"
+            for unsafe in ("../../other/file", "/tmp/overwrite", "../", "", None, ["abc"]):
+                bad = dict(graph, id=unsafe)
+                with self.subTest(id=unsafe):
+                    path.write_text(json.dumps(bad))
+                    with self.assertRaisesRegex(ValueError, "not a valid"):
+                        workbench.load_graph(path)
+                    with self.assertRaisesRegex(ValueError, "safe filename"):
+                        bench.save(bad)
+            self.assertFalse(bench.graphs_dir().exists())
+
+    def test_regrouping_clears_measured_effects(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                fn = handlers_by_name(demo)["group_selected"]
+                graph = small_graph()
+                members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
+                graph.update(groups={"old": members}, effects={"groups": {"old": {"stale": True}}})
+                changed = fn(graph, members[:1], "new", 40, False)[0]
+                self.assertIsNone(changed["effects"])
+                self.assertEqual(changed["groups"]["new"], members[:1])
+                saved = workbench.load_graph(Path(directory) / "graphs" / f"{graph['id']}.json")
+                self.assertIsNone(saved["effects"])
+            finally:
+                demo.close()
 
     def test_background_work_reports_progress_and_errors(self):
         bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
