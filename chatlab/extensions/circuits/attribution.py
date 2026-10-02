@@ -484,6 +484,7 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
 
     report("Pruning", 0, 1)
     result = _prune(recording, targets, rows[:used], weights[:used], chosen, settings, decode)
+    result["transcoder_width"] = transcoders.spec.width
     result["targets_check"] = {
         "values": values.tolist(),
         "edge_sums": rows[:len(targets)].sum(1).tolist(),
