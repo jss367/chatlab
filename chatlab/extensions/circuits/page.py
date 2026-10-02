@@ -487,6 +487,9 @@ def build_page(context):
             for item in bench.background(session_id, lambda p, c: bench.ablate(graph, node, p, c)):
                 if item[0] == "done":
                     result = item[1]
+        except Cancelled:
+            gr.Info("Stopped.")
+            return gr.skip()
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         card = describe_card(graph, focused, result)
@@ -528,11 +531,13 @@ def build_page(context):
             if not stale:
                 graph = {**graph, "effects": effects}
                 path = save(graph, session_id)
+                stamp = version(session_id)
         if stale:
             yield (gr.skip(),) * 6
             return
-        yield (f"Measured {len(graph['groups'])} group{'s' * (len(graph['groups']) != 1)} on "
+        frame = (f"Measured {len(graph['groups'])} group{'s' * (len(graph['groups']) != 1)} on "
                f"{effects['prefixes']} prefix{'es' * (effects['prefixes'] != 1)}.", graph, *draw_groups(graph, name), path)
+        yield frame if version(session_id) == stamp else (gr.skip(),) * 6
 
     run.click(run_interventions, [owner, graph_state, pivot, alternatives, prefixes, include_prompt, boost,
                                   every_position, group_pick],
