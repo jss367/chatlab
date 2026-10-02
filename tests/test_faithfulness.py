@@ -317,6 +317,18 @@ class TabTests(unittest.TestCase):
             self.assertEqual(detail.splitlines().count(fence), 2)
             self.assertEqual(detail.count(content), 2)
 
+    def test_clear_restores_idle_controls_when_canceling_a_check(self):
+        steps = reasoning_check.run_check(check.CUT, self.turns, 1, self.picked, "", 20, "", False, [])
+        running = next(steps)
+        self.assertTrue(running[-1]["visible"])
+        cleared = reasoning_check.clear_results()
+        steps.close()
+        self.assertEqual(cleared[0], [])
+        self.assertEqual(cleared[4], "")
+        self.assertTrue(all(button["interactive"] for button in cleared[5:9]))
+        self.assertFalse(cleared[-1]["visible"])
+        self.assertIsNone(self.manager.occupant)
+
     def test_stopping_closes_the_stream_and_gives_the_slot_back(self):
         steps = reasoning_check.run_check(check.CUT, self.turns, 1, self.picked, "", 20, "", False, [])
         next(steps)

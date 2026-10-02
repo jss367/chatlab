@@ -237,6 +237,11 @@ def paraphrase_reply(turns, position, picked, max_new_tokens, system_prompt, kee
         runtime.MANAGER.release_generation()
 
 
+def clear_results():
+    """Cancel the running UI state as well as clearing its results."""
+    return ([], gr.update(value=[]), "", gr.update(value=None, visible=False), "", *_buttons(False))
+
+
 def show_detail(results, event: gr.SelectData):
     row = event.index[0] if isinstance(event.index, (list, tuple)) else event.index
     if not isinstance(row, int) or not 0 <= row < len(results or ()):
@@ -270,6 +275,7 @@ def wire(view, conversation, system_prompt, keep_reasoning, max_new_tokens):
         show_progress="hidden"))
     view.stop.click(lambda: (STOPPED, *_buttons(False)), None,
                     [view.status, view.cut, view.plant, view.write, view.answer, view.stop], cancels=events)
-    view.clear.click(lambda: ([], gr.update(value=[]), "", gr.update(value=None, visible=False)), None,
-                     [view.results, view.table, view.detail, view.download], cancels=events)
+    view.clear.click(clear_results, None,
+                     [view.results, view.table, view.detail, view.download, view.status,
+                      view.cut, view.plant, view.write, view.answer, view.stop], cancels=events, queue=False)
     view.table.select(show_detail, view.results, view.detail, show_progress="hidden")
