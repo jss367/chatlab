@@ -95,7 +95,8 @@ def build():
 
 
 def inspector_visibility(event: gr.SelectData):
-    visible = event.value != "Experiments"
+    # Neither tab reads the token the inspector describes, and both want the width.
+    visible = event.value not in ("Experiments", "Reasoning check")
     return gr.update(visible=visible), gr.update(visible=visible)
 
 
