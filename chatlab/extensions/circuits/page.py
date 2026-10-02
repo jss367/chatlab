@@ -123,9 +123,16 @@ def _progress_text(stage, done, total):
 def build_page(context):
     bench = Workbench(context.models, context.data_dir)
     staging, staging_lock = {}, threading.Lock()
+    versions, version_lock = {}, threading.RLock()
+
+    def version(session_id):
+        with version_lock:
+            return versions.get(session_id)
 
     def forget(session_id):
         bench.cancel(session_id)
+        with version_lock:
+            versions.pop(session_id, None)
         with staging_lock:
             directory = staging.pop(session_id, None)
         if directory is not None:
@@ -289,7 +296,9 @@ def build_page(context):
     def save(graph, session_id):
         """Save the graph, and refresh the current view's download copy."""
         try:
-            return staged(bench.save(graph), graph, session_id)
+            with version_lock:
+                versions[session_id] = uuid4().hex
+                return staged(bench.save(graph), graph, session_id)
         except OSError as exc:
             logger.warning("Could not save graph %s: %s", graph.get("id"), exc)
             gr.Warning(f"The graph was not saved: {exc}.")
@@ -484,6 +493,7 @@ def build_page(context):
             raise gr.Error("Trace a graph first.")
         if not graph["groups"]:
             raise gr.Error("Group some features in the graph first.")
+        stamp = version(session_id)
         skip = (gr.skip(),) * 5
         effects = None
         try:
@@ -506,8 +516,14 @@ def build_page(context):
             return
         except (TypeError, ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
-        graph = {**graph, "effects": effects}
-        path = save(graph, session_id)
+        with version_lock:
+            stale = version(session_id) != stamp
+            if not stale:
+                graph = {**graph, "effects": effects}
+                path = save(graph, session_id)
+        if stale:
+            yield (gr.skip(),) * 6
+            return
         yield (f"Measured {len(graph['groups'])} group{'s' * (len(graph['groups']) != 1)} on "
                f"{effects['prefixes']} prefix{'es' * (effects['prefixes'] != 1)}.", graph, *draw_groups(graph, name), path)
 
@@ -526,7 +542,9 @@ def build_page(context):
         except (OSError, ValueError) as exc:
             raise gr.Error(str(exc)) from exc
         try:
-            offered = staged(path, graph, session_id)
+            with version_lock:
+                versions[session_id] = uuid4().hex
+                offered = staged(path, graph, session_id)
         except OSError:
             offered = None
         return show_graph(graph, offered, shown, errors)
