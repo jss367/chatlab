@@ -779,6 +779,8 @@ class BrowserTests(unittest.TestCase):
             self.assertEqual(vector["vector"], [20.0, -40.0])
             self.assertEqual((vector["layer"], vector["strength"], vector["enabled"]), (7, 3.0, True))
             self.assertEqual(vector["model_id"], "Google/Gemma-3-1B-IT")
+            inactive = browser.feature_vector(spec, 7, 11, {"act_max": 0}, 3.0, "Google/Gemma-3-1B-IT")
+            self.assertEqual(inactive["vector"], [0.0, 0.0])
             # No record: the row as published. Another model loaded: the set's own.
             vector = browser.feature_vector(spec, 7, 11, None, 1.0, "Qwen/Qwen3-0.6B")
             self.assertEqual(vector["vector"], [0.5, -1.0])
