@@ -257,12 +257,26 @@ class Workbench:
                 blocks, held, _ = self._held(model, progress, cancelled, revision=graph.get("transcoder_revision"),
                                             model_revision=session.model_revision)
                 self._same_transcoders(graph, held)
+                self._measurement_ids(graph, blocks)
                 ids = graph["ids"]
                 offset = len(ids) - 1 - node["position"]
                 targets = [n for n in graph["nodes"] if n["kind"] == "target"]
                 before = interventions.run(blocks, held, ids)["log_probs"]
                 after = interventions.run(blocks, held, ids, [(node["layer"], node["feature"], 0.0, [offset])])["log_probs"]
                 return {"deltas": [_target_log_odds(t, after) - _target_log_odds(t, before) for t in targets]}
+
+    @staticmethod
+    def _measurement_ids(graph, blocks):
+        vocabulary = min(blocks.embed.weight.shape[0], blocks.unembed.weight.shape[0])
+        values = list(graph["ids"])
+        for node in graph["nodes"]:
+            if node["kind"] == "target":
+                values.extend([node["token_id"]] if node["target_kind"] == "token"
+                              else node["positive"] + node["negative"])
+        if any(type(token) is not int or not 0 <= token < vocabulary for token in values):
+            raise ValueError("This graph contains token IDs outside the loaded model vocabulary.")
+        if graph["layers"] != len(blocks.layers):
+            raise ValueError("This graph has a different layer count from the loaded model.")
 
     @staticmethod
     def _same_transcoders(graph, held):
@@ -299,6 +313,7 @@ class Workbench:
                 blocks, held, _ = self._held(model, progress, cancelled, revision=graph.get("transcoder_revision"),
                                             model_revision=session.model_revision)
                 self._same_transcoders(graph, held)
+                self._measurement_ids(graph, blocks)
                 pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
                 alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
                 if not alternatives:
@@ -378,6 +393,27 @@ def load_graph(path):
             time.localtime(created)
         except (OverflowError, OSError) as exc:
             raise ValueError from exc
+        for key in ("prompt", "explain", "stats"):
+            graph.setdefault(key, {})
+            if not isinstance(graph[key], dict):
+                raise ValueError
+        for key in ("system", "user", "prefix"):
+            if key in graph["prompt"] and not isinstance(graph["prompt"][key], str):
+                raise ValueError
+        if "raw" in graph["prompt"] and not isinstance(graph["prompt"]["raw"], bool):
+            raise ValueError
+        for key in ("tokens", "alternatives"):
+            values = graph["explain"].get(key, [])
+            if not isinstance(values, list) or len(values) > 4096 or any(not isinstance(v, str) for v in values):
+                raise ValueError
+        for key in ("kept_features", "traced_features", "active_features"):
+            value = graph["stats"].get(key, 0)
+            if type(value) is not int or value < 0:
+                raise ValueError
+        value = float(graph["stats"].get("error_share", 0))
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError
+        graph["stats"]["error_share"] = value
         layers, tokens = graph["layers"], graph["tokens"]
         if type(layers) is not int or not 1 <= layers <= 256:
             raise ValueError
@@ -423,6 +459,12 @@ def load_graph(path):
             for field in ("influence", "effect"):
                 node[field] = float(node[field])
                 if not math.isfinite(node[field]):
+                    raise ValueError
+            if "text" in node and not isinstance(node["text"], str):
+                raise ValueError
+            for field in ("promotes", "suppresses"):
+                values = node.get(field, [])
+                if not isinstance(values, list) or len(values) > 4096 or any(not isinstance(v, str) or len(v) > 4096 for v in values):
                     raise ValueError
             kind = node["kind"]
             if kind == "feature":

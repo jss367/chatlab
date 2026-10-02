@@ -576,6 +576,26 @@ class WorkbenchTests(unittest.TestCase):
         with mock.patch.object(bench, "_model", side_effect=AssertionError("model lock taken")):
             self.assertEqual(bench.encoded_prompt(session, dict(raw=False, user="hello", system="", prefix=" world")), [1, 2, 3])
 
+    def test_imported_metadata_and_measurement_token_bounds(self):
+        graph = small_graph()
+        feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for change in ({"stats": "bad"}, {"stats": {"active_features": "bad"}},
+                           {"explain": "bad"}, {"explain": {"tokens": [1]}}, {"prompt": "bad"},
+                           {"nodes": [{**feature, "promotes": [1]}]}, {"nodes": [{**feature, "suppresses": "bad"}]}):
+                path.write_text(json.dumps(graph | change))
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+        blocks = SimpleNamespace(embed=SimpleNamespace(weight=torch.empty(64, 2)),
+                                 unembed=SimpleNamespace(weight=torch.empty(64, 2)),
+                                 layers=[None] * graph["layers"])
+        workbench.Workbench._measurement_ids(graph, blocks)
+        for changed in ({**graph, "ids": [64] * len(graph["ids"])},
+                        {**graph, "nodes": [{"kind": "target", "target_kind": "token", "token_id": 64}]}):
+            with self.assertRaisesRegex(ValueError, "vocabulary"):
+                workbench.Workbench._measurement_ids(changed, blocks)
+
     def test_malformed_saved_labels_and_effects_are_rejected(self):
         graph = small_graph()
         feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
