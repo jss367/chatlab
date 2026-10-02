@@ -151,16 +151,16 @@ def logit_directions(blocks, recording, targets):
 
     weight = blocks.unembed.weight
     probabilities = torch.softmax(recording.logits, dim=-1)
-    mean = weight.float().mean(0)
-    # Contrast targets measure softcapped log odds; chain through the final cap.
+    # Both centered token logits and contrasts chain through the final cap.
     derivative = torch.ones_like(recording.logits)
     if blocks.final_softcap:
         raw = blocks.unembed(recording.final[-1].to(weight.dtype)).float()
         derivative = 1 - torch.tanh(raw / blocks.final_softcap).square()
+    mean = (derivative[:, None] * weight.float()).mean(0)
     directions = []
     for target in targets:
         if target["kind"] == "token":
-            directions.append(weight[target["token_id"]].float() - mean)
+            directions.append(derivative[target["token_id"]] * weight[target["token_id"]].float() - mean)
             continue
         vector = torch.zeros_like(mean)
         for side, sign in (("positive", 1.0), ("negative", -1.0)):
@@ -203,6 +203,21 @@ def choose_targets(recording, decode, token_ids=None, contrast=None):
                     "text": contrast.get("label") or "contrast",
                     "probability": mass(positive), "negative_probability": mass(negative)}]
     return targets
+
+
+def frozen_allocation_bytes(blocks, recording, batch_size):
+    """Conservative forward/backward workspace, including eager attention scores."""
+    config = getattr(blocks.model.config, "text_config", None) or blocks.model.config
+    n, width = recording.embeddings.shape
+    layers = len(blocks.layers)
+    heads = int(config.num_attention_heads)
+    dtype_bytes = recording.embeddings.element_size()
+    # Leaves, retained layer inputs/outputs, norm intermediates and their gradients.
+    activations = 8 * batch_size * (layers + 1) * n * width * max(dtype_bytes, 4)
+    # Frozen per-layer patterns plus float32 score/softmax workspace and backward products.
+    attention = 4 * batch_size * layers * heads * n * n * max(dtype_bytes, 4)
+    decoders = len(recording.activation) * width * 4
+    return activations + attention + decoders
 
 
 class FrozenGraph:
@@ -406,11 +421,12 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
     # Reserve CPU tracing/pruning/sorting space before the batched frozen
     # model allocates any cloned activations or attention patterns.
     total_nodes = budget + (len(recording.errors) + 1) * len(ids) + len(targets)
-    allocation_bytes = 4 * (budget + len(targets)) * columns * 4 + 64 * total_nodes ** 2
+    allocation_bytes = (4 * (budget + len(targets)) * columns * 4 + 64 * total_nodes ** 2
+                        + frozen_allocation_bytes(blocks, recording, settings.batch_size))
     if allocation_bytes > MAX_ROW_BYTES:
         raise ValueError(
             f"This prompt has {features:,} active features; a graph of {budget} of them would need "
-            f"{allocation_bytes / 1024 ** 3:.1f} GB. Use a shorter prompt or fewer nodes.")
+            f"{allocation_bytes / 1024 ** 3:.1f} GB. Use a shorter prompt, fewer nodes, or a smaller batch.")
     graph = FrozenGraph(blocks, transcoders, recording, settings.batch_size)
     try:
         rows = torch.zeros(len(targets) + budget, columns, dtype=torch.float32)

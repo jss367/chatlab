@@ -198,6 +198,33 @@ class AttributionTests(unittest.TestCase):
         grad, = torch.autograd.grad(odds, hidden)
         torch.testing.assert_close(direction, grad, rtol=1e-4, atol=1e-5)
 
+    def test_saturated_token_direction_matches_centered_softcapped_logits(self):
+        blocks, held, _ = self.frozen("gemma2")
+        with torch.no_grad():
+            blocks.unembed.weight.mul_(100)
+        recording = attribution.record(blocks, held, IDS)
+        targets = attribution.choose_targets(recording, self.decode, token_ids=[3])
+        hidden = recording.final[-1].clone().requires_grad_(True)
+        raw = blocks.unembed(hidden.to(blocks.dtype)).float()
+        capped = torch.tanh(raw / blocks.final_softcap) * blocks.final_softcap
+        grad, = torch.autograd.grad(capped[3] - capped.mean(), hidden)
+        direction = attribution.logit_directions(blocks, recording, targets)[0]
+        torch.testing.assert_close(direction, grad, rtol=1e-4, atol=1e-5)
+
+    def test_large_batches_are_refused_before_device_construction(self):
+        blocks = architecture.blocks(tiny_model("gemma3"))
+        held = tiny_transcoders(blocks)
+        recording = attribution.record(blocks, held, IDS)
+        small = attribution.frozen_allocation_bytes(blocks, recording, 1)
+        large = attribution.frozen_allocation_bytes(blocks, recording, 256)
+        self.assertGreater(large, small * 100)
+        with mock.patch.object(attribution, "MAX_ROW_BYTES", large - 1), \
+                mock.patch.object(attribution, "FrozenGraph") as frozen:
+            with self.assertRaisesRegex(ValueError, "smaller batch"):
+                attribution.attribute(blocks, held, IDS, self.decode,
+                                      settings=attribution.Settings(batch_size=256))
+            frozen.assert_not_called()
+
     def test_memory_limit_counts_both_resident_edge_matrices(self):
         model = tiny_model("gemma3")
         blocks = architecture.blocks(model)
