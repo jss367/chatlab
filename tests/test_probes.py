@@ -160,6 +160,7 @@ class FileTests(unittest.TestCase):
             (dict(id="../../etc"), "hexadecimal"),
             (dict(created=1e300), "between 1970 and 3000"),
             (dict(created=-1.0), "between 1970 and 3000"),
+            (dict(layers=[dict(layers[0], weights=[1e300] * len(layers[0]["weights"])), layers[1]]), "32-bit"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 probes.normalize(probe | change)
@@ -315,6 +316,14 @@ class PageTests(unittest.TestCase):
             trimmed = self.read(probe, GENERATE, "Hello", show_prompt=True)[-1][0]
         self.assertEqual(trimmed["token_ids"], full["token_ids"][:window])
         self.assertEqual(len(trimmed["probabilities"][0]), window)
+
+    def test_a_passage_longer_than_the_window_is_refused_not_cut_short(self):
+        probe = self.train()[0]
+        with mock.patch("chatlab.tokenization.model_position_limit", return_value=1):
+            # The reply is trimmed to the window; the passage is the reader's own and is not.
+            with mock.patch("chatlab.model_inspection.model_position_limit", return_value=1):
+                with self.assertRaisesRegex(gr.Error, "above the 1 this model can read"):
+                    self.read(probe, READ, WANTED[0])
 
     def test_a_probe_for_another_model_is_refused(self):
         probe = dict(self.train()[0], model_id="other/model")

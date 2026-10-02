@@ -29,6 +29,7 @@ POOLS = ("last", "mean")
 NEWTON_STEPS = 100
 # The first second of the year 3000, comfortably inside what a date can show.
 LATEST_CREATED = 32503680000.0
+FLOAT32_MAX = float(np.finfo(np.float32).max)
 
 
 def _sigmoid(values):
@@ -206,6 +207,13 @@ def normalize(value):
             raise ValueError(f"The probe's {what} must be a finite number.")
         return float(item)
 
+    def weight(item):
+        # Passages are read along the weights in float32, so they must fit it.
+        item = number(item, "weights")
+        if abs(item) > FLOAT32_MAX:
+            raise ValueError("The probe's weights must fit in 32-bit floats.")
+        return item
+
     if not isinstance(value, dict) or value.get("format") != FORMAT:
         raise ValueError(f"Expected a {FORMAT} JSON object.")
     probe_id = value.get("id")
@@ -239,7 +247,7 @@ def normalize(value):
             raise ValueError("Every layer's weights must be the same width.")
         clean.append({
             "layer": index,
-            "weights": [number(w, "weights") for w in weights],
+            "weights": [weight(w) for w in weights],
             "bias": number(item.get("bias"), "bias"),
             **{key: number(item.get(key), key.replace("_", " "))
                for key in ("train_accuracy", "heldout_accuracy", "heldout_loss")},
