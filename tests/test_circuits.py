@@ -563,6 +563,32 @@ class WorkbenchTests(unittest.TestCase):
         other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
         self.assertNotEqual(other, ids)
 
+    def test_reply_prefix_uses_the_retained_prompt_context(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        session = SimpleNamespace(prompt_ids=mock.Mock(return_value=[1, 2]),
+                                  encode_replacement=mock.Mock(return_value=[3]),
+                                  encode=mock.Mock(side_effect=AssertionError("standalone encoding")))
+        self.assertEqual(bench.prompt_ids(session, None, dict(raw=False, user="hello", system="", prefix=" world")), [1, 2, 3])
+        session.encode_replacement.assert_called_once_with([1, 2], " world")
+
+    def test_malformed_saved_labels_and_effects_are_rejected(self):
+        graph = small_graph()
+        feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            effects = dict(prefixes=1, boost=2.0, every_position=False, pivot=[1], alternatives=[2],
+                           baseline=dict(tokens={"1": "0.2", "2": 0.1}, pivot="0.2"), groups={},
+                           token_text={"1": "hello", "2": "world"})
+            path.write_text(json.dumps(graph | {"effects": effects}))
+            loaded = workbench.load_graph(path)
+            self.assertEqual(loaded["effects"]["baseline"]["pivot"], 0.2)
+            render.group_view(loaded, {}, loaded["effects"])
+            for change in ({"labels": {feature["id"]: 1}}, {"labels": {"missing": "name"}},
+                           {"effects": "bad"}, {"effects": {"groups": [], "baseline": "bad"}}):
+                path.write_text(json.dumps(graph | change))
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+
     def test_interventions_require_the_traced_weight_snapshot(self):
         session = SimpleNamespace(model_id="test/tiny", model_revision="a" * 40, load_id="test/tiny#2")
         graph = dict(model_id=session.model_id, model_revision="a" * 40)
