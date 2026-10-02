@@ -562,6 +562,49 @@ class WorkbenchTests(unittest.TestCase):
         other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
         self.assertNotEqual(other, ids)
 
+    def test_automatic_alternatives_search_beyond_excluded_top_twenty(self):
+        self.assertEqual(workbench.automatic_alternatives(-torch.arange(64).float(), list(range(20))), list(range(20, 28)))
+
+    def test_duplicate_imported_group_memberships_are_rejected(self):
+        graph = small_graph()
+        member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for groups in ({"one": [member, member]}, {"one": [member], "two": [member]}):
+                path.write_text(json.dumps(graph | {"groups": groups}))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+
+    def test_pruning_and_its_iterative_passes_honor_cancellation(self):
+        with self.assertRaises(attribution.Cancelled):
+            attribution._prune(None, None, None, None, None, None, None, lambda: True)
+        matrix = torch.eye(3)
+        weights, rows = torch.ones(3), torch.arange(3)
+        for function, args in ((attribution._influence, (matrix, weights, rows)),
+                               (attribution._influence_square, (matrix, weights, rows)),
+                               (attribution._effect, (matrix, weights, rows, weights))):
+            with self.subTest(function=function.__name__), self.assertRaises(attribution.Cancelled):
+                function(*args, cancelled=lambda: True)
+
+    def test_range_download_rejects_full_files_before_consuming_and_bounds_stream(self):
+        response = mock.MagicMock(status_code=200)
+        stream = mock.MagicMock()
+        stream.__enter__.return_value = response
+        client = mock.Mock(stream=mock.Mock(return_value=stream))
+        with mock.patch("huggingface_hub.get_session", return_value=client):
+            with self.assertRaisesRegex(OSError, "range response"):
+                transcoders._fetch_range("https://example.test/features", 10, 14)
+            response.iter_bytes.assert_not_called()
+            response.status_code = 206
+            response.iter_bytes.return_value = iter([b"ab", b"cd"])
+            self.assertEqual(transcoders._fetch_range("https://example.test/features", 10, 14), b"abcd")
+            response.iter_bytes.return_value = iter([b"abcde"])
+            with self.assertRaisesRegex(OSError, "exceeded"):
+                transcoders._fetch_range("https://example.test/features", 10, 14)
+            response.iter_bytes.return_value = iter([b"a"])
+            with self.assertRaisesRegex(OSError, "cut short"):
+                transcoders._fetch_range("https://example.test/features", 10, 14)
+
     def test_long_prompts_are_rejected_before_transcoder_loading(self):
         bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
         session = SimpleNamespace(prompt_ids=lambda messages: [1] * (attribution.MAX_PREFIX + 1))
