@@ -476,6 +476,7 @@ def build_page(context):
         node = node_of(graph, focused)
         if node is None or node["kind"] != "feature":
             raise gr.Error("Click a feature in the graph first.")
+        stamp = version(session_id)
         result = None
         try:
             for item in bench.background(session_id, lambda p, c: bench.ablate(graph, node, p, c)):
@@ -483,7 +484,8 @@ def build_page(context):
                     result = item[1]
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
-        return describe_card(graph, focused, result)
+        card = describe_card(graph, focused, result)
+        return card if version(session_id) == stamp else gr.skip()
 
     ablate.click(ablate_focused, [owner, graph_state, focus], card, concurrency_id="circuits")
 

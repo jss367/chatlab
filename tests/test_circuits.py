@@ -291,6 +291,13 @@ class AttributionTests(unittest.TestCase):
         torch.testing.assert_close(attribution.logit_directions(blocks, recording, repeated),
                                    attribution.logit_directions(blocks, recording, unique))
 
+    def test_excess_chosen_targets_are_refused_before_recording(self):
+        blocks = architecture.blocks(tiny_model("gemma3"))
+        with mock.patch.object(attribution, "record") as record:
+            with self.assertRaisesRegex(ValueError, "4,096"):
+                attribution.attribute(blocks, None, IDS, self.decode, token_ids=list(range(4097)))
+            record.assert_not_called()
+
     def test_contrast_needs_two_distinct_sides(self):
         _, _, recording = self.frozen("qwen3")
         with self.assertRaisesRegex(ValueError, "both sides"):
@@ -531,7 +538,8 @@ class WorkbenchTests(unittest.TestCase):
         graph = small_graph()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "upload.json"
-            for change in (dict(layers=10 ** 12), dict(layers=0), dict(layers="3"),
+            for change in (dict(created=1e300), dict(created=float("nan")), dict(created="yesterday"),
+                           dict(layers=10 ** 12), dict(layers=0), dict(layers="3"),
                            dict(tokens=["x"] * 513), dict(ids=[1]),
                            dict(nodes=[{**graph["nodes"][0], "position": 999}]),
                            dict(nodes=[{**graph["nodes"][0], "layer": 999}]),
@@ -626,6 +634,9 @@ class WorkbenchTests(unittest.TestCase):
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     frames = list(handlers["run_interventions"]("view", old, "", "", "", True, 2, False, "group"))
                 self.assertEqual(frames[-1], (gr.skip(),) * 6)
+                feature = next(n["id"] for n in old["nodes"] if n["kind"] == "feature")
+                with mock.patch.object(workbench.Workbench, "background", completed):
+                    self.assertEqual(handlers["ablate_focused"]("view", old, feature), gr.skip())
             finally:
                 demo.close()
 
