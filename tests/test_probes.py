@@ -14,6 +14,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from chatlab import steering
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.probes import probe as probes
+from chatlab.extensions.probes import page as page_module
 from chatlab.extensions.probes.page import GENERATE, READ, build_page
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
@@ -255,7 +256,7 @@ class PageTests(unittest.TestCase):
     def train(self, **changes):
         fields = dict(probe_name="Greeting", looking_for="Greeting", against="Question",
                       wanted="\n".join(WANTED), unwanted="\n\n".join(UNWANTED), template=False,
-                      pairs=False, pooling="last", strength=1.0)
+                      pairs=False, pooling="last", strength=1.0, view="owner")
         return self.fn["train_probe"](*(fields | changes).values())
 
     def read(self, probe, mode, text, layer=1, show_prompt=False):
@@ -371,7 +372,7 @@ class PageTests(unittest.TestCase):
 
     def test_saved_and_imported_probes_open(self):
         probe = self.train()[0]
-        opened = self.fn["open_saved"](probe["id"])
+        opened = self.fn["open_saved"](probe["id"], "owner")
         self.assertEqual(opened[0], probe)
         # The form is refilled from the probe, so it can be changed and trained again.
         self.assertEqual(opened[12:], ("Greeting", "Greeting", "Question", "\n".join(WANTED), "\n".join(UNWANTED),
@@ -379,11 +380,11 @@ class PageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "shared.json"
             path.write_text(probes.dumps(dict(probe, name="Shared")))
-            imported = self.fn["import_probe"](str(path))
+            imported = self.fn["import_probe"](str(path), "owner")
         self.assertEqual(imported[0]["name"], "Shared")
         self.assertEqual(probes.read(self.data / f"{probe['id']}.json")["name"], "Shared")
         with self.assertRaises(gr.Error):
-            self.fn["open_saved"]("0" * 32)
+            self.fn["open_saved"]("0" * 32, "owner")
 
     def test_a_new_run_clears_the_last_reading_first(self):
         probe = self.train()[0]
@@ -399,6 +400,34 @@ class PageTests(unittest.TestCase):
         # Nor does another view's reading.
         fresh = self.read(probe, READ, WANTED[0])[-1][0]
         self.assertEqual(self.fn["change_layer"](probe, fresh, 0, "another view"), (gr.skip(), gr.skip()))
+
+    def test_a_run_the_page_moved_on_from_publishes_nothing(self):
+        probe = self.train()[0]
+        directions = probes.directions
+        for moved_on in (lambda: self.fn["clear_reading"]("owner"),
+                         lambda: self.fn["open_saved"](probe["id"], "owner")):
+            with self.subTest(moved_on=moved_on):
+                def mid_run(value):
+                    # Another Read click, or another probe opened, while this run is reading.
+                    moved_on()
+                    return directions(value)
+                with mock.patch.object(probes, "directions", side_effect=mid_run):
+                    frames = self.read(probe, READ, WANTED[0])
+                self.assertEqual(frames[-1], (gr.skip(),) * 5)
+        # Left alone, the same run publishes.
+        self.assertIsNotNone(self.read(probe, READ, WANTED[0])[-1][0])
+
+    def test_a_token_inspection_overtaken_by_a_run_publishes_nothing(self):
+        probe = self.train()[0]
+        reading = self.read(probe, READ, WANTED[0])[-1][0]
+        real_quoted = page_module.quoted
+
+        def cleared_meanwhile(value):
+            self.fn["clear_reading"]("owner")
+            return real_quoted(value)
+        with mock.patch.object(page_module, "quoted", side_effect=cleared_meanwhile):
+            self.assertEqual(self.fn["inspect_token"](probe, reading, 1, "owner", SimpleNamespace(index=0)),
+                             (gr.skip(), gr.skip()))
 
     def test_changing_the_layer_repaints_without_the_model(self):
         probe = self.train()[0]

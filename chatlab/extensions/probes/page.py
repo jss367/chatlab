@@ -44,12 +44,19 @@ class Runs:
     The reading on screen is kept here rather than trusted from an event's
     inputs: a slider release or a click queued before a new run carries the
     old reading, and must not paint it back over the new one.
+
+    Each view also has a turn, which moves whenever what it shows is
+    replaced: a run starting, the page being cleared for a run, another
+    probe being opened. A run paints only while the turn it took at its
+    start is still the view's, so one that finishes after the page moved on
+    publishes nothing.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._active = {}
         self._shown = {}
+        self._turns = {}
 
     @staticmethod
     def new_owner():
@@ -81,9 +88,24 @@ class Runs:
                 if active[1] is not None:
                     active[1].cancel()
 
-    def show(self, owner, reading_id):
+    def turn(self, owner):
+        """Move the view on: take the reading off screen and start a new turn, returned."""
         with self._lock:
+            self._turns[owner] = self._turns.get(owner, 0) + 1
+            self._shown[owner] = None
+            return self._turns[owner]
+
+    def live(self, owner, turn):
+        with self._lock:
+            return self._turns.get(owner, 0) == turn
+
+    def publish(self, owner, turn, reading_id):
+        """Put a reading on screen if its turn is still the view's; say whether it was."""
+        with self._lock:
+            if self._turns.get(owner, 0) != turn:
+                return False
             self._shown[owner] = reading_id
+            return True
 
     def current(self, owner, reading):
         with self._lock:
@@ -93,6 +115,7 @@ class Runs:
         self.cancel(owner)
         with self._lock:
             self._shown.pop(owner, None)
+            self._turns.pop(owner, None)
 
 
 def quoted(value):
@@ -289,13 +312,16 @@ def build_page(context):
         write_private_text(path, probes.dumps(probe))
         return str(path)
 
-    def shown_probe(probe):
+    def shown_probe(probe, view):
         """Everything that changes when a different probe is the current one.
 
         The form is filled with what the probe was trained from, so it can be
         changed and trained again, and text is read the way its examples were
         until the reader says otherwise.
         """
+        # A run for the probe being replaced would finish beside this one's controls.
+        runs.cancel(view)
+        runs.turn(view)
         choices = saved_choices(context.data_dir)
         listed = any(value == probe["id"] for _label, value in choices)
         examples = probe["examples"]
@@ -312,7 +338,7 @@ def build_page(context):
                      name, positive_label, negative_label, positive_text, negative_text,
                      chat_template, paired, pool, l2]
 
-    def train_probe(probe_name, looking_for, against, wanted, unwanted, template, pairs, pooling, strength):
+    def train_probe(probe_name, looking_for, against, wanted, unwanted, template, pairs, pooling, strength, view):
         positive, negative = parse_examples(wanted), parse_examples(unwanted)
         looking_for, against = (looking_for or "").strip(), (against or "").strip()
         try:
@@ -344,23 +370,23 @@ def build_page(context):
         except OSError as exc:
             logger.warning("Could not save probe %s: %s", probe["id"], exc)
             gr.Warning(f"The probe was trained but not saved: {exc}.")
-        return shown_probe(probe)
+        return shown_probe(probe, view)
 
     train.click(train_probe, [name, positive_label, negative_label, positive_text, negative_text,
-                              chat_template, paired, pool, l2], probe_outputs, concurrency_id="probes-model")
+                              chat_template, paired, pool, l2, owner], probe_outputs, concurrency_id="probes-model")
 
-    def open_saved(probe_id):
+    def open_saved(probe_id, view):
         if not probe_id:
             return (gr.skip(),) * len(probe_outputs)
         try:
             probe = probes.read(context.data_dir / f"{probe_id}.json")
         except (OSError, ValueError) as exc:
             raise gr.Error(f"That probe could not be opened: {exc}") from exc
-        return shown_probe(probe)
+        return shown_probe(probe, view)
 
-    picker.input(open_saved, picker, probe_outputs, show_progress="hidden")
+    picker.input(open_saved, [picker, owner], probe_outputs, show_progress="hidden")
 
-    def import_probe(path):
+    def import_probe(path, view):
         if not path:
             return (gr.skip(),) * len(probe_outputs)
         try:
@@ -368,9 +394,9 @@ def build_page(context):
             save(probe)
         except (OSError, ValueError) as exc:
             raise gr.Error(str(exc)) from exc
-        return shown_probe(probe)
+        return shown_probe(probe, view)
 
-    upload.upload(import_probe, upload, probe_outputs, show_progress="hidden")
+    upload.upload(import_probe, [upload, owner], probe_outputs, show_progress="hidden")
 
     def switch_mode(chosen):
         generating = chosen == GENERATE
@@ -402,6 +428,7 @@ def build_page(context):
             cancel = runs.start(view)
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
+        turn = runs.turn(view)
         reading, note = None, ""
         try:
             with context.models.open_session() as session:
@@ -440,7 +467,7 @@ def build_page(context):
                                               max_new_tokens=limit, seed=seed_value)
                     try:
                         for last in stream:
-                            yield (gr.skip(),) * 4 + (last.text,)
+                            yield (gr.skip(),) * 4 + ((last.text if runs.live(view, turn) else gr.skip()),)
                     finally:
                         stream.close()
                     if last is None or not last.metrics:
@@ -462,12 +489,20 @@ def build_page(context):
             raise gr.Error(str(exc)) from exc
         finally:
             runs.finish(view)
-        runs.show(view, reading["id"])
+        if not runs.publish(view, turn, reading["id"]):
+            # The page moved on while this ran: another run, or another probe.
+            yield (gr.skip(),) * 5
+            return
         yield (reading, *rendered(probe, reading, chosen), note, gr.skip())
 
     def clear_reading(view):
-        """Take the last reading off the page before the next run, so it never sits beside other text."""
-        runs.show(view, None)
+        """Take the last reading off the page before the next run, so it never sits beside other text.
+
+        This answers the click at once, outside the queue, and moves the
+        view's turn, so a run still finishing from before the click publishes
+        nothing after it.
+        """
+        runs.turn(view)
         return None, gr.update(value=[], visible=False), "", "", "", []
 
     run.click(clear_reading, owner, [reading_state, strip, heat, reply, detail, token_table], queue=False)
@@ -502,6 +537,8 @@ def build_page(context):
         note = (f"Token {position + 1}, `{text_shown}` (ID {reading['token_ids'][position]}): "
                 f"{values[int(chosen)]:.1%} {quoted(probe['positive_label'])} at layer {int(chosen)}, "
                 f"highest at layer {peak} ({values[peak]:.1%}).")
-        return note, [[index_, f"{value:.1%}"] for index_, value in enumerate(values)]
+        table = [[index_, f"{value:.1%}"] for index_, value in enumerate(values)]
+        # A run may have cleared the page while this was being written.
+        return (note, table) if runs.current(view, reading) else (gr.skip(), gr.skip())
 
     strip.select(inspect_token, [probe_state, reading_state, layer, owner], [detail, token_table], queue=False)
