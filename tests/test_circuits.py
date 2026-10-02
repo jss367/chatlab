@@ -856,6 +856,10 @@ class BrowserTests(unittest.TestCase):
             stale = show(browser.DEFAULT_SET, 3, 0, None, "view", stamp)
             self.assertEqual(stale, (gr.skip(),) * 6)
             self.assertNotEqual(stamp, next_stamp)
+            # Changing controls while the old set is still fetching invalidates its request.
+            switched = handlers_by_name(demo)["choose_set"]("gemma-2-2b", "view")
+            self.assertFalse(switched[-1]["interactive"])
+            self.assertEqual(show(browser.DEFAULT_SET, 3, 0, None, "view", next_stamp), (gr.skip(),) * 6)
         finally:
             demo.close()
 

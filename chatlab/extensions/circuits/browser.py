@@ -118,17 +118,20 @@ def build_browser(context, bench):
     shown = gr.State(None)
     pick = gr.Textbox(elem_id="circuits-feature-pick", elem_classes=[MENU_BRIDGE_CLASS])
 
-    def choose_set(key):
+    def choose_set(key, view):
         spec = spec_named(key)
-        return gr.update(maximum=spec.layers - 1, value=min(spec.layers // 2, spec.layers - 1)), 0
+        return gr.update(maximum=spec.layers - 1, value=min(spec.layers // 2, spec.layers - 1)), 0, *begin_page(view)
 
-    set_choice.input(choose_set, set_choice, [layer, start], queue=False)
+    set_choice.input(choose_set, [set_choice, owner], [layer, start, request, chosen, detail, steer], queue=False)
 
     def begin_page(view):
         stamp = uuid4().hex
         with page_lock:
             pages[view] = {"stamp": stamp, "ready": False}
         return stamp, None, render.feature_detail(), gr.update(interactive=False)
+
+    layer.input(begin_page, owner, [request, chosen, detail, steer], queue=False)
+    start.input(begin_page, owner, [request, chosen, detail, steer], queue=False)
 
     def list_page(key, layer_value, start_value, selected, view, stamp, step=0):
         try:
