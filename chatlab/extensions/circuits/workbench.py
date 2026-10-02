@@ -159,6 +159,14 @@ class Workbench:
             raise ValueError("Write a prompt first.")
         return ids
 
+    def encoded_prompt(self, session, prompt):
+        # encode_replacement takes the host lock itself. Raw encoding only
+        # needs the locked model to read its BOS configuration.
+        if prompt["raw"]:
+            with self._model(session) as model:
+                return self.prompt_ids(session, model, prompt)
+        return self.prompt_ids(session, None, prompt)
+
     def single_tokens(self, session, texts, what):
         ids = []
         for text in texts:
@@ -173,9 +181,9 @@ class Workbench:
         """A finished graph for the prompt, labelled and ready to save."""
         with self.models.open_session() as session:
             revision = session.model_revision
+            ids = self.encoded_prompt(session, prompt)
             with self._model(session) as model:
                 blocks, held, spec = self._held(model, progress, cancelled, model_revision=session.model_revision)
-                ids = self.prompt_ids(session, model, prompt)
 
                 def decode(token):
                     return session.decode([int(token)])
@@ -283,16 +291,16 @@ class Workbench:
                       every_position, progress, cancelled):
         with self.models.open_session() as session:
             self._same_model(graph, session)
+            prefixes = [graph["ids"]] if include_prompt else []
+            prompt = graph.get("prompt") or {}
+            for text in prefix_texts:
+                prefixes.append(self.encoded_prompt(session, {**prompt, "prefix": text}))
             with self._model(session) as model:
                 blocks, held, _ = self._held(model, progress, cancelled, revision=graph.get("transcoder_revision"),
                                             model_revision=session.model_revision)
                 self._same_transcoders(graph, held)
                 pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
                 alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
-                prefixes = [graph["ids"]] if include_prompt else []
-                prompt = graph.get("prompt") or {}
-                for text in prefix_texts:
-                    prefixes.append(self.prompt_ids(session, model, {**prompt, "prefix": text}))
                 if not alternatives:
                     logits = interventions.run(blocks, held, graph["ids"])["log_probs"]
                     ranked = [int(t) for t in logits.argsort(descending=True)[:20].tolist()]
