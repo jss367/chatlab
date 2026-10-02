@@ -585,8 +585,12 @@ class BrowserTests(unittest.TestCase):
             fn = next(listener.fn for listener in demo.fns.values()
                       if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
             selected = {"set": browser.DEFAULT_SET, "layer": 3, "feature": 2}
+            begin = next(listener.fn for listener in demo.fns.values()
+                         if getattr(listener.fn, "__name__", None) == "begin_page")
+            raw_fn = fn
+            fn = lambda key, layer, start, selected: raw_fn(key, layer, start, selected, "view", begin("view")[0])
             same = fn(browser.DEFAULT_SET, 3, 0, selected)
-            self.assertEqual(same[3], gr.skip())
+            self.assertEqual(same[3]["feature"], 2)
             for key, layer, start in ((browser.DEFAULT_SET, 4, 0),
                                       (browser.DEFAULT_SET, 3, browser.PAGE_SIZE),
                                       ("gemma-2-2b", 3, 0)):
@@ -610,7 +614,11 @@ class BrowserTests(unittest.TestCase):
         try:
             show = next(listener.fn for listener in demo.fns.values()
                         if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
-            pick = handlers_by_name(demo)["picked"]
+            begin = handlers_by_name(demo)["begin_page"]
+            raw_show = show
+            show = lambda key, layer, start, selected: raw_show(key, layer, start, selected, "view", begin("view")[0])
+            raw_pick = handlers_by_name(demo)["picked"]
+            pick = lambda page, raw: raw_pick(page, raw, "view")
             old = show(browser.DEFAULT_SET, 3, 0, None)[2]
             new = show(browser.DEFAULT_SET, 4, 0, None)[2]
             records.get.reset_mock()
@@ -622,6 +630,36 @@ class BrowserTests(unittest.TestCase):
             self.assertIn("feature 2", card)
             html = show(browser.DEFAULT_SET, 4, 0, None)[0]
             self.assertIn('data-page="', html)
+        finally:
+            demo.close()
+
+    def test_steering_is_refused_as_soon_as_page_loading_begins(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        vectors = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs: vectors.append(fn)))
+        bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            begin = handlers_by_name(demo)["begin_page"]
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            stamp = begin("view")[0]
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", stamp)[2]
+            selected = {**page, "feature": 2}
+            next_stamp, cleared, card, disabled = begin("view")
+            self.assertIsNone(cleared)
+            self.assertFalse(disabled["interactive"])
+            with mock.patch.object(browser, "feature_vector") as build:
+                with self.assertRaisesRegex(ValueError, "Wait for the feature page"):
+                    vectors[0](selected, 3, "view")
+                build.assert_not_called()
+            stale = show(browser.DEFAULT_SET, 3, 0, None, "view", stamp)
+            self.assertEqual(stale, (gr.skip(),) * 6)
+            self.assertNotEqual(stamp, next_stamp)
         finally:
             demo.close()
 
