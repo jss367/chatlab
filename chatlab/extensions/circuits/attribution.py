@@ -83,10 +83,13 @@ class Recording:
     logits: object          # (vocab,) float32 at the last position
 
 
-def record(blocks, transcoders, ids):
+def record(blocks, transcoders, ids, cancelled=None):
     """Run the prompt once and fix the active features and errors."""
     import torch
 
+    stop = cancelled or (lambda: False)
+    if stop():
+        raise Cancelled()
     n = len(ids)
     layers = len(blocks.layers)
     if transcoders.layers != layers:
@@ -95,6 +98,8 @@ def record(blocks, transcoders, ids):
 
     def keep(store, layer):
         def hook(_module, _args, output):
+            if stop():
+                raise Cancelled()
             store[layer] = (output[0] if isinstance(output, tuple) else output).detach()
         return hook
 
@@ -116,12 +121,16 @@ def record(blocks, transcoders, ids):
     errors, layer_index, positions, features, values, slices = [], [], [], [], [], []
     start = 0
     for layer in range(layers):
+        if stop():
+            raise Cancelled()
         acts = transcoders.encode(layer, inputs[layer][0])
         # The first position is the beginning-of-sequence token, whose huge
         # activations say nothing about this prompt. Its features are left
         # out and what they wrote is counted as error, as circuit-tracer does.
         acts[0] = 0
         position, feature = torch.nonzero(acts, as_tuple=True)
+        if stop():
+            raise Cancelled()
         reconstruction = transcoders.decode(layer, acts)
         errors.append(outputs[layer][0].float() - reconstruction)
         layer_index.append(torch.full_like(position, layer))
@@ -190,7 +199,8 @@ def choose_targets(recording, decode, token_ids=None, contrast=None):
     targets = [{"kind": "token", "token_id": t, "text": decode(t), "probability": float(probabilities[t])}
                for t in ids]
     if contrast:
-        positive, negative = contrast["positive"], contrast["negative"]
+        positive = list(dict.fromkeys(contrast["positive"]))
+        negative = list(dict.fromkeys(contrast["negative"]))
         if not positive or not negative:
             raise ValueError("A contrast needs tokens on both sides.")
         if set(positive) & set(negative):
@@ -412,7 +422,7 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
     stop = cancelled or (lambda: False)
 
     report("Reading the prompt", 0, 1)
-    recording = record(blocks, transcoders, ids)
+    recording = record(blocks, transcoders, ids, cancelled=stop)
     targets = choose_targets(recording, decode, token_ids, contrast)
     directions = logit_directions(blocks, recording, targets)
     features = len(recording.activation)

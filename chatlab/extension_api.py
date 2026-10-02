@@ -145,6 +145,8 @@ class GenerationSession:
     def __init__(self, manager):
         self._manager = manager
         self.model_id, self.load_id = manager.model_id, manager.load_id
+        revision = getattr(manager, "model_revision", None)
+        self._model_revision = revision() if callable(revision) else None
         self._closed = False
         self._generating = False
         self._cancelled = threading.Event()
@@ -236,7 +238,7 @@ class GenerationSession:
         another revision when both revisions are known.
         """
         self._check()
-        return self._manager.model_revision()
+        return self._model_revision
 
     @contextlib.contextmanager
     def transformers_model(self):

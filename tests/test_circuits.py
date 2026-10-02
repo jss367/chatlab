@@ -264,6 +264,32 @@ class AttributionTests(unittest.TestCase):
                 attribution.attribute(blocks, held, IDS, self.decode)
             frozen.assert_not_called()
 
+    def test_recording_cancels_between_transcoder_layers(self):
+        blocks = architecture.blocks(tiny_model("gemma3"))
+        held = tiny_transcoders(blocks)
+        stopped = False
+        encode = held.encode
+
+        def first(*args):
+            nonlocal stopped
+            value = encode(*args)
+            stopped = True
+            return value
+
+        with mock.patch.object(held, "encode", side_effect=first) as called:
+            with self.assertRaises(attribution.Cancelled):
+                attribution.record(blocks, held, IDS, cancelled=lambda: stopped)
+            self.assertEqual(called.call_count, 1)
+
+    def test_contrast_sides_are_token_sets(self):
+        blocks, _, recording = self.frozen("qwen3")
+        unique = attribution.choose_targets(recording, self.decode, contrast={"positive": [3, 4], "negative": [5]})
+        repeated = attribution.choose_targets(recording, self.decode,
+                                              contrast={"positive": [3, 3, 4], "negative": [5, 5]})
+        self.assertEqual(repeated, unique)
+        torch.testing.assert_close(attribution.logit_directions(blocks, recording, repeated),
+                                   attribution.logit_directions(blocks, recording, unique))
+
     def test_contrast_needs_two_distinct_sides(self):
         _, _, recording = self.frozen("qwen3")
         with self.assertRaisesRegex(ValueError, "both sides"):
@@ -507,7 +533,10 @@ class WorkbenchTests(unittest.TestCase):
             for change in (dict(layers=10 ** 12), dict(layers=0), dict(layers="3"),
                            dict(tokens=["x"] * 513), dict(ids=[1]),
                            dict(nodes=[{**graph["nodes"][0], "position": 999}]),
-                           dict(nodes=[{**graph["nodes"][0], "layer": 999}])):
+                           dict(nodes=[{**graph["nodes"][0], "layer": 999}]),
+                           dict(nodes=graph["nodes"] * 2),
+                           dict(nodes=[{**graph["nodes"][-1], "id": f"target:{i}"} for i in range(11)]),
+                           dict(edges=[graph["edges"][0]] * (len(graph["nodes"]) ** 2 + 1))):
                 with self.subTest(change=change):
                     path.write_text(json.dumps(graph | change))
                     with self.assertRaisesRegex(ValueError, "not a valid"):
@@ -564,6 +593,34 @@ class WorkbenchTests(unittest.TestCase):
                 self.assertEqual(changed["groups"]["new"], members[:1])
                 saved = workbench.load_graph(Path(directory) / "graphs" / f"{graph['id']}.json")
                 self.assertIsNone(saved["effects"])
+            finally:
+                demo.close()
+
+    def test_interventions_completed_after_opening_another_graph_are_discarded(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                old = small_graph()
+                old["groups"] = {"group": [next(n["id"] for n in old["nodes"] if n["kind"] == "feature")]}
+                new = dict(old, id="new-graph", groups={})
+                path = Path(directory) / "new.json"
+                path.write_text(json.dumps(new))
+
+                def completed(self, session_id, work):
+                    handlers["open_path"](path, 40, False, session_id)
+                    yield "result", {"groups": {}, "prefixes": 1}
+
+                with mock.patch.object(workbench.Workbench, "background", completed):
+                    frames = list(handlers["run_interventions"]("view", old, "", "", "", True, 2, False, "group"))
+                self.assertEqual(frames[-1], (gr.skip(),) * 6)
             finally:
                 demo.close()
 
@@ -699,6 +756,15 @@ class ModelAccessTests(unittest.TestCase):
             self.assertEqual(graph["model_revision"], "a" * 40)
             feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
             self.assertIn("deltas", bench.ablate(graph, feature, lambda *args: None, lambda: False))
+
+    def test_revision_can_be_read_while_the_model_lock_is_held(self):
+        from chatlab.extension_api import ModelService
+        manager = self.manager()
+        with mock.patch.object(manager, "model_revision", return_value="snapshot", create=True) as revision:
+            with ModelService(lambda: manager).open_session() as session:
+                with session.transformers_model():
+                    self.assertEqual(session.model_revision, "snapshot")
+            revision.assert_called_once()
 
     def test_mlx_and_quantized_loads_are_refused(self):
         for manager, message in ((self.manager(backend="mlx"), "MLX"), (self.manager(precision="4-bit"), "full")):

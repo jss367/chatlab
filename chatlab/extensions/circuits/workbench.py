@@ -344,7 +344,19 @@ def load_graph(path):
         if (not isinstance(token_ids, list) or len(token_ids) != len(tokens)
                 or not all(type(token) is int and 0 <= token < 2 ** 31 for token in token_ids)):
             raise ValueError
-        ids = {n["id"] for n in graph["nodes"]}
+        nodes, edges = graph["nodes"], graph["edges"]
+        max_nodes = min(20000, 4096 + (layers + 1) * len(tokens) + attribution.MAX_TARGETS)
+        if (not isinstance(nodes, list) or not 1 <= len(nodes) <= max_nodes
+                or not isinstance(edges, list) or len(edges) > min(200000, len(nodes) ** 2)):
+            raise ValueError
+        ids = {n["id"] for n in nodes}
+        if len(ids) != len(nodes) or not all(isinstance(value, str) for value in ids):
+            raise ValueError
+        limits = {"feature": 4096, "error": layers * len(tokens),
+                  "embedding": len(tokens), "target": attribution.MAX_TARGETS}
+        for kind, limit in limits.items():
+            if sum(n["kind"] == kind for n in nodes) > limit:
+                raise ValueError
         for node in graph["nodes"]:
             if node["kind"] not in ("feature", "error", "embedding", "target"):
                 raise ValueError
