@@ -535,7 +535,7 @@ class WorkbenchTests(unittest.TestCase):
                            dict(nodes=[{**graph["nodes"][0], "position": 999}]),
                            dict(nodes=[{**graph["nodes"][0], "layer": 999}]),
                            dict(nodes=graph["nodes"] * 2),
-                           dict(nodes=[{**graph["nodes"][-1], "id": f"target:{i}"} for i in range(11)]),
+                           dict(nodes=[{**graph["nodes"][-1], "id": f"target:{i}"} for i in range(4097)]),
                            dict(edges=[graph["edges"][0]] * (len(graph["nodes"]) ** 2 + 1))):
                 with self.subTest(change=change):
                     path.write_text(json.dumps(graph | change))
@@ -549,6 +549,10 @@ class WorkbenchTests(unittest.TestCase):
             path = bench.save(graph)
             self.assertEqual(workbench.load_graph(path)["nodes"], graph["nodes"])
             self.assertEqual(len(bench.saved()), 1)
+            # Chosen-token traces can legitimately contain more than the ten default targets.
+            chosen = dict(graph, nodes=[{**graph["nodes"][-1], "id": f"target:{i}"} for i in range(20)], edges=[])
+            path.write_text(json.dumps(chosen))
+            self.assertEqual(len(workbench.load_graph(path)["nodes"]), 20)
             bad = Path(directory) / "bad.json"
             bad.write_text(json.dumps({"format": "something else"}))
             with self.assertRaisesRegex(ValueError, "not a saved"):
