@@ -377,6 +377,55 @@ class LensTests(unittest.TestCase):
         self.assertIs(model.model.layers, layers_before)
         self.assertIs(llama.scaled_dot_product_attention, kernel_before)
 
+    def test_a_wrapped_sliding_window_row_is_in_the_order_the_keys_came(self):
+        # A Gemma 3 sliding layer keeps a ring of its last 8 keys. Past 8
+        # tokens the ring wraps, and the kernel is handed it as it lies;
+        # the row must still end on the newest key, as the cache view does.
+        from mlx_lm.models import cache as mlx_cache
+        from mlx_lm.models import gemma3_text
+
+        window = 8
+        mx.random.seed(5)
+        model = gemma3_text.Model(gemma3_text.ModelArgs.from_dict({
+            "model_type": "gemma3_text", "hidden_size": 32, "num_hidden_layers": LAYERS,
+            "intermediate_size": 64, "num_attention_heads": 2, "head_dim": 16,
+            "num_key_value_heads": 1, "vocab_size": VOCAB, "sliding_window": window,
+            "sliding_window_pattern": 2, "query_pre_attn_scalar": 16,
+            "max_position_embeddings": 512,
+        }))
+        mx.eval(model.parameters())
+        ids = [(7 * position) % VOCAB for position in range(15)]
+        _, reading = self.inspect(model, ids)
+        ring = reading.cache[0]
+        self.assertIsInstance(ring, mlx_cache.RotatingKVCache)
+        self.assertTrue(0 < ring._idx < window)
+
+        # The same step with the kernel handed the keys in temporal order to
+        # begin with, so there is nothing to put back.
+        rotating = mlx_cache.RotatingKVCache._update_in_place
+
+        def in_order(cache, keys, values):
+            keys, values = rotating(cache, keys, values)
+            if keys.shape[2] == cache.keys.shape[2]:
+                return cache._temporal_order(keys), cache._temporal_order(values)
+            return keys, values
+
+        with (
+            mock.patch.object(mlx_cache.RotatingKVCache, "_update_in_place", in_order),
+            mock.patch.object(mlx_runtime, "_in_temporal_order", lambda w, k, c: w),
+        ):
+            _, expected = self.inspect(model, ids)
+
+        self.assertEqual(len(reading.attention[0]), window)
+        np.testing.assert_allclose(
+            reading.attention[0], expected.attention[0], rtol=1e-3, atol=1e-5
+        )
+        np.testing.assert_allclose(
+            reading.final_logits, expected.final_logits, rtol=1e-3, atol=1e-4
+        )
+        # The global layer saw every key and needed no reordering.
+        self.assertEqual(len(reading.attention[1]), len(ids))
+
 
 def tiny_gpt2(seed: int = 0):
     """A two-layer GPT-2 with random weights: the family that keeps its stack under ``h``."""
