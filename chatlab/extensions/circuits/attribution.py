@@ -448,11 +448,21 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
         normalized = torch.zeros_like(rows)
         vectors = [("vector", d) for d in directions]
         batches = [vectors[i:i + settings.batch_size] for i in range(0, len(vectors), settings.batch_size)]
-        target_rows = torch.cat([graph.rows(batch) for batch in batches])
+        target_parts = []
+        for batch in batches:
+            if stop():
+                raise Cancelled()
+            target_parts.append(graph.rows(batch))
+        target_rows = torch.cat(target_parts)
         rows[:len(targets)] = target_rows
         normalized[:len(targets)] = _normalized(target_rows)
         values = (directions.to(recording.final.dtype) @ recording.final[-1]).cpu()
-        biases = torch.cat([graph.bias_terms(batch) for batch in batches])
+        bias_parts = []
+        for batch in batches:
+            if stop():
+                raise Cancelled()
+            bias_parts.append(graph.bias_terms(batch))
+        biases = torch.cat(bias_parts)
         weights = torch.zeros(rows.shape[0])
         probabilities = torch.tensor([t["probability"] for t in targets])
         weights[:len(targets)] = probabilities / probabilities.sum().clamp(min=1e-30)

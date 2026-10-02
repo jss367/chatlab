@@ -332,6 +332,24 @@ class AttributionTests(unittest.TestCase):
                                   cancelled=lambda: True)
         self.assertNotIn("forward", vars(blocks.mlp_output(0)), "the frozen model is undone on the way out")
 
+    def test_stop_interrupts_target_batches_before_another_backward_pass(self):
+        blocks = architecture.blocks(tiny_model("qwen3"))
+        held = tiny_transcoders(blocks)
+        stopped = False
+        rows = attribution.FrozenGraph.rows
+
+        def first(graph, targets):
+            nonlocal stopped
+            value = rows(graph, targets)
+            stopped = True
+            return value
+
+        with mock.patch.object(attribution.FrozenGraph, "rows", first):
+            with self.assertRaises(attribution.Cancelled):
+                attribution.attribute(blocks, held, IDS, self.decode, token_ids=[3, 4],
+                                      settings=attribution.Settings(batch_size=1), cancelled=lambda: stopped)
+        self.assertNotIn("forward", vars(blocks.mlp_output(0)))
+
     def test_effect_passes_through_features_per_unit_of_activation(self):
         # source -> feature (activation 2, edge 4) -> target (edge 6), and source -> target (edge 1).
         adjacency = torch.zeros(3, 3)
@@ -387,6 +405,15 @@ class InterventionTests(unittest.TestCase):
             handle.remove()
         torch.testing.assert_close(boosted["log_probs"], expected, rtol=1e-4, atol=1e-4)
         self.assertEqual(boosted["active"], 1)
+
+    def test_every_position_group_members_are_changed_once(self):
+        member = (int(self.recording.feature_layer[0]), int(self.recording.feature_index[0]), 0)
+        unique = interventions.group_effects(self.blocks, self.held, [IDS], {"g": [member]},
+                                             pivot=[3], alternatives=[5], every_position=True)
+        repeated = interventions.group_effects(self.blocks, self.held, [IDS],
+                                               {"g": [member, (*member[:2], 1)]},
+                                               pivot=[3], alternatives=[5], every_position=True)
+        self.assertEqual(unique, repeated)
 
     def test_group_effects_average_over_prefixes(self):
         k = 0
@@ -484,13 +511,28 @@ class TranscoderLifecycleTests(unittest.TestCase):
     def test_cancellation_stops_download_before_the_next_layer(self):
         spec = transcoders.spec_for("google/gemma-3-1b-it")
         cancelled = threading.Event()
-        def fetch(*args):
+        def fetch(*args, **kwargs):
             cancelled.set()
             return "layer_0.safetensors"
         with mock.patch("huggingface_hub.hf_hub_download", side_effect=fetch) as download:
             with self.assertRaises(attribution.Cancelled):
                 transcoders.download(spec, cancelled=cancelled.is_set)
             download.assert_called_once()
+
+    def test_all_layers_download_from_one_immutable_snapshot(self):
+        spec = transcoders.TranscoderSpec("tiny", "Tiny", ("test/tiny",), "test/tiny", "", 2, 3, 2, 0.0)
+        sha = "a" * 40
+        with mock.patch("huggingface_hub.hf_hub_download", side_effect=lambda repo, name, **kw:
+                        f"/tmp/models/snapshots/{sha}/{name}") as fetch:
+            paths = transcoders.download(spec)
+        self.assertEqual(fetch.call_args_list[0].kwargs["revision"], None)
+        self.assertEqual(fetch.call_args_list[1].kwargs["revision"], sha)
+        self.assertEqual(transcoders.snapshot_revision(paths[-1]), sha)
+        held = tiny_transcoders(architecture.blocks(tiny_model("qwen3")))
+        held.revision = sha
+        workbench.Workbench._same_transcoders({"transcoder_revision": sha}, held)
+        with self.assertRaisesRegex(ValueError, "another transcoder revision"):
+            workbench.Workbench._same_transcoders({"transcoder_revision": "b" * 40}, held)
 
     def test_cancellation_stops_device_loading_before_another_layer(self):
         spec = transcoders.TranscoderSpec("tiny", "Tiny", ("test/tiny",), "test/tiny", "", 2, 3, 2, 0.0)
