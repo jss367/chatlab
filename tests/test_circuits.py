@@ -580,7 +580,9 @@ class WorkbenchTests(unittest.TestCase):
         graph = small_graph()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "upload.json"
-            for change in (dict(created=1e300), dict(created=float("nan")), dict(created="yesterday"),
+            for change in (dict(groups={"bad": 1}), dict(groups={"bad": ["missing"]}),
+                           dict(groups={"bad": [graph["nodes"][-1]["id"]]}),
+                           dict(created=1e300), dict(created=float("nan")), dict(created="yesterday"),
                            dict(layers=10 ** 12), dict(layers=0), dict(layers="3"),
                            dict(tokens=["x"] * 513), dict(ids=[1]),
                            dict(nodes=[{**graph["nodes"][0], "position": 999}]),
@@ -611,7 +613,8 @@ class WorkbenchTests(unittest.TestCase):
             path = bench.save(graph)
             self.assertEqual(workbench.load_graph(path)["nodes"], graph["nodes"])
             self.assertEqual(len(bench.saved()), 1)
-            strings = dict(graph, edges=[{**edge, "weight": str(edge["weight"])} for edge in graph["edges"]])
+            strings = dict(graph, nodes=[{**node, "influence": str(node["influence"]), "effect": str(node["effect"])}
+                                         for node in graph["nodes"]], edges=[{**edge, "weight": str(edge["weight"])} for edge in graph["edges"]])
             path.write_text(json.dumps(strings))
             loaded = workbench.load_graph(path)
             self.assertTrue(all(isinstance(edge["weight"], float) for edge in loaded["edges"]))
