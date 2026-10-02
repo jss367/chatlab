@@ -291,10 +291,11 @@ def build_page(context):
 
         Gradio only serves returned files from its temporary directories and
         the working directory, and the extension's data directory is neither
-        when the app is started from a checkout. Every copy goes in one
-        directory, named after its game and replaced whole, so a long game
-        keeps one copy rather than one per response; Gradio caches what it
-        serves, so replacing the copy never touches a download in progress.
+        when the app is started from a checkout. Gradio copies a returned
+        file into its own cache before serving it, so the staged copy is only
+        needed until then: the directory keeps the latest copy alone, and each
+        save replaces it whole and retires the ones before it, whichever game
+        or view they came from.
         """
         text = saved(game)
         if len(text.encode("utf-8")) > MAX_FILE_BYTES:
@@ -311,6 +312,9 @@ def build_page(context):
             partial.replace(copy_path)
         finally:
             partial.unlink(missing_ok=True)
+        for earlier in staging["directory"].glob("*.json"):
+            if earlier != copy_path:
+                earlier.unlink(missing_ok=True)
         return str(copy_path)
 
     def respond(game, session_id, text, temp, random_seed, token_limit, edit=None):

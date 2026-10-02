@@ -276,6 +276,12 @@ class PageTests(unittest.TestCase):
         self.assertEqual(Path(later[8]).resolve(), download)
         self.assertEqual(sorted(p.name for p in download.parent.iterdir()), [download.name])
         self.assertEqual(download.read_text(), (self.data / download.name).read_text())
+        # A new game's copy retires the last game's, so the directory never grows with games.
+        self.manager.replies.append("Board: _ _ _")
+        another = Path(list(self.fn["start_game"](SYSTEM, "Again.", "owner", 1.0, 7, 64))[-1][8]).resolve()
+        self.assertNotEqual(another.name, download.name)
+        self.assertEqual(sorted(p.name for p in another.parent.iterdir()), [another.name])
+        self.assertTrue((self.data / download.name).is_file())
 
     def test_no_model_leaves_no_empty_turn_behind(self):
         self.manager.busy = True
