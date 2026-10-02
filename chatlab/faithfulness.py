@@ -343,6 +343,8 @@ def answer_key(text, pattern=""):
             return None
         found = matches[-1]
         text = found.group(1) if found.re.groups else found.group(0)
+        if text is None:
+            return None
     return " ".join((text or "").split()).casefold()
 
 
