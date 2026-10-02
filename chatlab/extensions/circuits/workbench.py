@@ -152,7 +152,9 @@ class Workbench:
             if prompt["system"].strip():
                 messages.append({"role": "system", "content": prompt["system"]})
             messages.append({"role": "user", "content": prompt["user"]})
-            ids = session.prompt_ids(messages) + (session.encode(prompt["prefix"]) if prompt["prefix"] else [])
+            ids = session.prompt_ids(messages)
+            if prompt["prefix"]:
+                ids = ids + session.encode_replacement(ids, prompt["prefix"])
         if len(ids) < 2:
             raise ValueError("Write a prompt first.")
         return ids
@@ -458,15 +460,60 @@ def load_graph(path):
         if not isinstance(graph["labels"], dict) or not isinstance(graph["groups"], dict):
             raise ValueError
         feature_ids = {node["id"] for node in nodes if node["kind"] == "feature"}
+        if len(graph["labels"]) > 4096 or any(
+                key not in feature_ids or not isinstance(value, str) or len(value) > 4096
+                for key, value in graph["labels"].items()):
+            raise ValueError
+        if graph["effects"] is not None:
+            _validate_effects(graph["effects"], graph["groups"])
         if len(graph["groups"]) > 4096:
             raise ValueError
         for name, members in graph["groups"].items():
             if (not isinstance(name, str) or not isinstance(members, list) or len(members) > 4096
                     or not all(isinstance(member, str) and member in feature_ids for member in members)):
                 raise ValueError
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("That file is not a valid attribution graph.") from exc
     return graph
+
+
+def _validate_effects(effects, groups):
+    """Normalize the complete saved intervention schema before any renderer uses it."""
+    if not isinstance(effects, dict) or type(effects["prefixes"]) is not int or not 1 <= effects["prefixes"] <= 4096:
+        raise ValueError
+    effects["boost"] = float(effects["boost"])
+    if not math.isfinite(effects["boost"]) or not isinstance(effects["every_position"], bool):
+        raise ValueError
+    tokens = []
+    for key in ("pivot", "alternatives"):
+        values = effects[key]
+        if not isinstance(values, list) or len(values) > 4096 or any(type(t) is not int or not 0 <= t < 2 ** 31 for t in values):
+            raise ValueError
+        tokens.extend(values)
+    def summary(value):
+        if not isinstance(value, dict) or not isinstance(value["tokens"], dict) or len(value["tokens"]) > 8192:
+            raise ValueError
+        for key, number in value["tokens"].items():
+            if str(key) not in {str(t) for t in tokens}:
+                raise ValueError
+            number = float(number)
+            if not math.isfinite(number) or not 0 <= number <= 1:
+                raise ValueError
+            value["tokens"][key] = number
+        value["pivot"] = float(value["pivot"])
+        if not math.isfinite(value["pivot"]) or not 0 <= value["pivot"] <= 1:
+            raise ValueError
+    summary(effects["baseline"])
+    if not isinstance(effects["groups"], dict) or any(name not in groups for name in effects["groups"]):
+        raise ValueError
+    for effect in effects["groups"].values():
+        if not isinstance(effect, dict) or type(effect["active_prefixes"]) is not int or not 0 <= effect["active_prefixes"] <= effects["prefixes"]:
+            raise ValueError
+        summary(effect["ablate"])
+        summary(effect["boost"])
+    texts = effects.get("token_text", {})
+    if not isinstance(texts, dict) or len(texts) > 8192 or any(not isinstance(v, str) or len(v) > 4096 for v in texts.values()):
+        raise ValueError
 
 
 def _target_log_odds(target, log_probs):
