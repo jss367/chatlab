@@ -56,6 +56,7 @@ from chatlab.ui.panel import (
     event_index,
     transcript_pick,
 )
+from chatlab.ui.pictures import strip_html as picture_strip
 
 
 # Which conversation the reader was on, and when they moved. A bug in branch
@@ -394,9 +395,15 @@ def fork_conversation(
             f"Copied the conversation into {name}. Edit or undo a message, or "
             "send a new one, to take it somewhere else."
         )
+    # A user message handed back brings its pictures with it, as Undo does,
+    # so the fork can send the same question reworded.
+    composer = {}
+    if box_text is not None:
+        images = list(turns[found[0]].get("images") or [])
+        composer = {"prompt": box_text, "attachments": images, "attachment_strip": picture_strip(images)}
     return Frame(
         FORK_OUTPUT_NAMES,
-        prompt=gr.skip() if box_text is None else box_text,
+        **composer,
         chatbot=messages,
         turns=forked,
         forks=forks,

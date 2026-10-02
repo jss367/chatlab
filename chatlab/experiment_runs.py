@@ -75,15 +75,20 @@ def search(query: str = "") -> list[dict]:
     found = []
     query = (query or "").casefold()
     for path in directory().glob("*.json"):
+        # One malformed file is skipped rather than costing the whole list:
+        # the listing and its order need a title, a creation time and
+        # bookmarks keyed by token.
         try:
             item = read(path.stem)
-        except (OSError, ValueError, TypeError, AttributeError):
+            run = item["run"]
+            if not isinstance(item.get("title"), str) or not isinstance(item.get("created_at"), str):
+                raise ValueError("This experiment has no title or creation time.")
+            searchable = " ".join(str(value) for value in (
+                item["title"], run.get("model_id", ""), run.get("prompt", ""),
+                run.get("text", ""), *item.get("bookmarks", {}).values(),
+            ))
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
             continue
-        run = item["run"]
-        searchable = " ".join(str(value) for value in (
-            item["title"], run.get("model_id", ""), run.get("prompt", ""),
-            run.get("text", ""), *item.get("bookmarks", {}).values(),
-        ))
         if query in searchable.casefold():
             found.append(item)
     return sorted(found, key=lambda item: (item["created_at"], item["id"]), reverse=True)

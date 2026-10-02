@@ -13,6 +13,7 @@ import tempfile
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import gradio as gr
 
@@ -116,6 +117,23 @@ def pick_reply(turns, position):
     return check.reply_identity(turn), (turn.get("reasoning") or "").strip(), "", ""
 
 
+# Where the results CSV is staged for download. Gradio copies a returned file
+# into its own cache before it serves it, and before it asks a running check
+# for its next frame, so a staged CSV is only needed until then. A check holds
+# the generation slot, so one writes at a time: the directory keeps the latest
+# CSV alone, replaced whole on each write, and its owner removes it at normal
+# process exit.
+_staging = {"owner": None}
+
+
+def _staging_directory():
+    owner = _staging["owner"]
+    if owner is None or not Path(owner.name).is_dir():
+        owner = tempfile.TemporaryDirectory(prefix="chatlab-reasoning-check-", ignore_cleanup_errors=True)
+        _staging["owner"] = owner
+    return Path(owner.name)
+
+
 def write_csv(results):
     if not results:
         return gr.update(value=None, visible=False)
@@ -126,8 +144,14 @@ def write_csv(results):
     for result, row in zip(results, check.result_rows(results)):
         writer.writerow([result.reply, result.kind, result.label, result.reasoning,
                          result.answer if result.answer is not None else result.note, row[4], row[5]])
-    path = Path(tempfile.mkdtemp(prefix="chatlab-reasoning-check-")) / "reasoning-check.csv"
-    path.write_text(buffer.getvalue(), encoding="utf-8")
+    directory = _staging_directory()
+    path = directory / "reasoning-check.csv"
+    partial = directory / f".reasoning-check.{uuid4().hex}.tmp"
+    try:
+        partial.write_text(buffer.getvalue(), encoding="utf-8")
+        partial.replace(path)
+    finally:
+        partial.unlink(missing_ok=True)
     return gr.update(value=str(path), visible=True)
 
 

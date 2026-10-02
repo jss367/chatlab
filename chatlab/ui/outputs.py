@@ -206,9 +206,12 @@ CLEAR_OUTPUT_NAMES = (
 )
 
 # Fork, switch and delete. New conversation also empties the branch text,
-# whose replacement belonged to the conversation being left.
+# whose replacement belonged to the conversation being left. Forking at a
+# user message hands its text and pictures back to the message box.
 FORK_OUTPUT_NAMES = (
     "prompt",
+    "attachments",
+    "attachment_strip",
     "chatbot",
     "turns",
     "forks",

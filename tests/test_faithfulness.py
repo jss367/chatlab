@@ -1,6 +1,10 @@
 """The Reasoning check: cutting, breaking and paraphrasing a chat reply's reasoning, then answering again."""
 
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -162,6 +166,26 @@ class ReplyTests(unittest.TestCase):
         self.assertIsNone(result.perplexity)
         self.assertEqual(check.result_rows([result])[0][-1], "—")
 
+    def test_a_reply_that_reasons_but_never_answers_can_still_be_cut(self):
+        class NoAnswer(ReasoningModel):
+            def next_piece(self, text):
+                reasoning, closed, answer = text.partition("</think>")
+                if closed and not answer and "four" in reasoning:
+                    return "<eos>"
+                return super().next_piece(text)
+
+        self.manager.model = NoAnswer()
+        turns = written(self.manager)
+        self.assertEqual((turns[1]["reasoning"], turns[1]["content"]), ("Two plus two is four.", ""))
+        reply = check.read_reply(turns, 1, self.manager)
+        self.reply = reply
+        self.encode = lambda kept, text: self.manager.encode_replacement(kept, text, load_id=reply.load_id)
+        results = [self.run_plan(check.cut_plan(reply, f, self.encode)) for f in check.FRACTIONS]
+        # The original answer is empty, so there is no perplexity to read for
+        # it, but each cut still answers.
+        self.assertEqual([r.answer for r in results[:-1]], ["Dunno."] * 4)
+        self.assertTrue(all(r.perplexity is None for r in results))
+
     def test_a_planted_mistake_is_fed_and_the_model_reasons_on_from_it(self):
         plan = check.mistake_plan(self.reply, "Two plus two is five.", self.encode)
         self.assertTrue(plan.continues)
@@ -291,6 +315,35 @@ class TabTests(unittest.TestCase):
         self.assertEqual([row[4] for row in table["value"]], ["No"] * 4 + ["Yes"])
         self.assertIn("Finished", status)
         self.assertIsNone(self.manager.occupant)
+
+    def test_the_results_csv_is_staged_once_however_often_it_is_written(self):
+        downloads = [frame[3]["value"] for run in (self.run_tab(check.CUT), self.run_tab(check.CUT))
+                     for frame in run if isinstance(frame[3], dict) and frame[3].get("value")]
+        self.assertGreater(len(downloads), len(check.FRACTIONS))
+        staged = Path(downloads[-1])
+        self.assertEqual({Path(path).parent for path in downloads}, {staged.parent})
+        self.assertEqual([path.name for path in staged.parent.iterdir()], [staged.name])
+        # The copy left is the latest one written: the second run's five rows.
+        self.assertEqual(len(staged.read_text(encoding="utf-8").splitlines()), 1 + len(check.FRACTIONS))
+
+    def test_the_staged_csv_is_removed_after_normal_process_exit(self):
+        code = """
+import settings_sandbox
+settings_sandbox.start()
+from chatlab import faithfulness as check
+from chatlab.ui import reasoning_check
+from pathlib import Path
+result = check.Result(reply="Reply 1", kind=check.CUT, label="0%", reasoning="", answer="Four.", same=True,
+                      perplexity=1.0, note="")
+print("STAGED:" + str(Path(reasoning_check.write_csv([result])["value"]).parent))
+"""
+        process = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                                 env={**os.environ, "PYTHONPATH": os.pathsep.join(
+                                     [str(Path(__file__).parent), str(Path(__file__).parent.parent)])})
+        directory = next(line.removeprefix("STAGED:") for line in process.stdout.splitlines()
+                         if line.startswith("STAGED:"))
+        self.assertTrue(directory)
+        self.assertFalse(Path(directory).exists())
 
     def test_a_planted_mistake_row_says_the_answer_changed(self):
         results = self.run_tab(check.MISTAKE, "Two plus two is five.")[-1][0]

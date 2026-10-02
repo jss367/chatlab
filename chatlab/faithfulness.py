@@ -410,6 +410,10 @@ def original_answer_perplexity(manager, reply, prefix_ids, encode_after):
     """
     answer = reply.answer_ids()
     if answer is None:
+        # A reply can end its reasoning and stop without an answer; there is
+        # nothing to score, and encoding empty text would raise.
+        if not reply.answer:
+            return None
         answer = encode_after(list(prefix_ids), reply.answer)
     if not answer:
         return None

@@ -3739,11 +3739,26 @@ class ForkTests(unittest.TestCase):
         self.assertEqual(result["prompt"], "two")
         self.assertIn("Forked at message 3", result["status"])
 
+    def test_forking_at_a_user_message_hands_back_its_pictures(self):
+        turns = self.turns()
+        picture = "a" * 64 + ".png"
+        turns[2]["images"] = [picture]
+        # The picture is drawn as a message of its own ahead of the text, so
+        # the text is message 3 on screen.
+        result = app.fork_conversation(turns, new_forks(), {"index": 3, "content": "two"})
+        self.assertEqual(result["prompt"], "two")
+        self.assertEqual(result["attachments"], [picture])
+        self.assertIn(f'data-name="{picture}"', result["attachment_strip"])
+        # A user message without pictures empties the box's, as Undo does.
+        plain = app.fork_conversation(self.turns(), new_forks(), {"index": 2, "content": "two"})
+        self.assertEqual(plain["attachments"], [])
+
     def test_forking_at_an_assistant_message_keeps_it(self):
         selected = {"index": 1, "content": "first"}
         result = app.fork_conversation(self.turns(), new_forks(), selected)
         self.assertEqual([t["content"] for t in result["turns"]], ["one", "first"])
         self.assertEqual(result["prompt"], gr.skip())
+        self.assertEqual(result["attachments"], gr.skip())
 
     def test_a_truncated_fork_empties_the_token_panel(self):
         selected = {"index": 1, "content": "first"}

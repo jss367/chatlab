@@ -489,6 +489,25 @@ class RestartButtonTests(unittest.TestCase):
         # The same saved choice, already on screen, asks for nothing.
         self.assertFalse(restore_extensions(['maze_experiments'])[2]['visible'])
 
+    def test_an_extension_that_failed_to_load_is_reported_not_left_pending(self):
+        desktop.offer_restart(lambda: None)
+        save_extensions(['maze_experiments'], [])
+        settings.load()
+        with mock.patch('chatlab.extensions.registry.import_module', side_effect=ImportError('unavailable')):
+            demo = app.build_app()
+        try:
+            restore = listener_named(demo, 'restore_extensions')
+            selected, note, button, _confirm = restore.fn(*(block.value for block in restore.inputs))
+            self.assertEqual(selected, ['maze_experiments'])
+            # A restart would only fail it again, so none is asked for; the
+            # card says what went wrong instead.
+            self.assertIn('No restart needed', note)
+            self.assertFalse(button['visible'])
+            self.assertTrue(any('Could not load these extensions' in str(getattr(block, 'value', ''))
+                                and 'unavailable' in str(block.value) for block in demo.blocks.values()))
+        finally:
+            demo.close()
+
     def test_asking_first_and_then_restarting(self):
         restarts = []
         desktop.offer_restart(lambda: restarts.append('restarted'))
