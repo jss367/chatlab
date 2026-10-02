@@ -5,12 +5,14 @@ ModelManager internals, shared UI helpers, or the application's singleton.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from chatlab.device_memory import reraise_out_of_memory
 from chatlab.model_runtime import LOADING
 from chatlab.steering import SteeringError, normalize as normalize_steering, read_vector as read_steering_vector
 from chatlab.trace_export import write_private_text
@@ -297,6 +299,37 @@ class GenerationSession:
         """
         self._check()
         self._manager.check_steering(steering)
+
+    @contextlib.contextmanager
+    def transformers_model(self):
+        """Hold the pinned Transformers model itself, for reading it by hand.
+
+        For measurements generation does not make, such as gradients or
+        forward hooks. The model lock is held for the whole block, as
+        ChatLab's own inspections hold it, so nothing else runs the weights
+        meanwhile. Hooks and patches must be removed before the block ends.
+        Raises ``ValueError`` for an MLX load or 8-bit and 4-bit weights,
+        which have no Transformers modules to read or no gradients to take.
+        An out-of-memory failure inside the block is re-raised as ChatLab's
+        own, and unused device memory is returned when it ends.
+        """
+        self._check()
+        if self._generating:
+            raise ValueError("Close the generation iterator before reading the model.")
+        manager = self._manager
+        with manager._lock:
+            if manager.load_id != self.load_id:
+                raise ValueError("The loaded model changed. Start a new episode.")
+            if manager._engine().backend != "torch":
+                raise ValueError("This needs a Transformers model; the loaded model runs on MLX.")
+            if getattr(manager, "precision", "full") not in (None, "full"):
+                raise ValueError("This needs full-precision weights. Reload the model at full precision.")
+            try:
+                yield manager.model
+            except (RuntimeError, MemoryError) as error:
+                reraise_out_of_memory(error)
+            finally:
+                manager._release_device_cache()
 
     def generate(self, messages, *, temperature, top_p, top_k, max_new_tokens, seed,
                  skip_top_below=0.0, tools=None, forced_ids=(),
