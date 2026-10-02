@@ -38,7 +38,7 @@ FORMAT = "chatlab-attribution-graph-1"
 MAX_PREFIX = 512
 MAX_TARGETS = 10
 TARGET_MASS = 0.95
-# What the edge matrix may hold on the CPU before the run is refused.
+# Budget for CPU edge, pruning, and sorting allocations before the run is refused.
 MAX_ROW_BYTES = 6 * 1024 ** 3
 # What one batch's feature-gradient product may hold on the device.
 CHUNK_BYTES = 256 * 1024 ** 2
@@ -405,12 +405,15 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
     try:
         columns = graph.columns
         budget = min(settings.max_feature_nodes, features)
-        # Both the signed rows and normalized rows remain resident together.
-        row_bytes = 2 * (budget + len(targets)) * columns * 4
-        if row_bytes > MAX_ROW_BYTES:
+        # Include dense pruning matrices and worst-case nonzero-edge sorting,
+        # which stay alive alongside the tracing rows. The factor of four on
+        # tracing rows also reserves normalization and batch temporaries.
+        total_nodes = budget + (len(recording.errors) + 1) * len(ids) + len(targets)
+        allocation_bytes = 4 * (budget + len(targets)) * columns * 4 + 64 * total_nodes ** 2
+        if allocation_bytes > MAX_ROW_BYTES:
             raise ValueError(
                 f"This prompt has {features:,} active features; a graph of {budget} of them would need "
-                f"{row_bytes / 1024 ** 3:.1f} GB. Use a shorter prompt or fewer nodes.")
+                f"{allocation_bytes / 1024 ** 3:.1f} GB. Use a shorter prompt or fewer nodes.")
         rows = torch.zeros(len(targets) + budget, columns, dtype=torch.float32)
         normalized = torch.zeros_like(rows)
         vectors = [("vector", d) for d in directions]

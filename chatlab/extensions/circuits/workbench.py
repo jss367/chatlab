@@ -142,7 +142,7 @@ class Workbench:
             bos = getattr(model.config, "bos_token_id", None)
             if bos is None and getattr(model.config, "text_config", None) is not None:
                 bos = model.config.text_config.bos_token_id
-            ids = ([int(bos)] if bos is not None else []) + session.encode(prompt["user"])
+            ids = ([int(bos)] if bos is not None else []) + session.encode(prompt["user"] + prompt["prefix"])
         else:
             messages = []
             if prompt["system"].strip():

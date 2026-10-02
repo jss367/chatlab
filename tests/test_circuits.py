@@ -212,6 +212,22 @@ class AttributionTests(unittest.TestCase):
                 attribution.attribute(blocks, held, IDS, self.decode,
                                       settings=attribution.Settings(max_feature_nodes=16, batch_size=8))
 
+    def test_memory_limit_reserves_pruning_before_tracing(self):
+        model = tiny_model("gemma3")
+        blocks = architecture.blocks(model)
+        held = tiny_transcoders(blocks)
+        recording = attribution.record(blocks, held, IDS)
+        targets = attribution.choose_targets(recording, self.decode)
+        graph = attribution.FrozenGraph(blocks, held, recording, 8)
+        edge_pair = 2 * (16 + len(targets)) * graph.columns * 4
+        graph.close()
+        with mock.patch.object(attribution, "MAX_ROW_BYTES", edge_pair + 1), \
+                mock.patch.object(attribution.FrozenGraph, "rows") as rows:
+            with self.assertRaisesRegex(ValueError, "would need"):
+                attribution.attribute(blocks, held, IDS, self.decode,
+                                      settings=attribution.Settings(max_feature_nodes=16, batch_size=8))
+            rows.assert_not_called()
+
     def test_contrast_needs_two_distinct_sides(self):
         _, _, recording = self.frozen("qwen3")
         with self.assertRaisesRegex(ValueError, "both sides"):
@@ -387,6 +403,16 @@ class WorkbenchTests(unittest.TestCase):
     def test_token_lists_keep_leading_spaces_and_read_escapes(self):
         self.assertEqual(workbench.parse_tokens(" Wait\nOkay\n\n\\n\\n\r\n"), [" Wait", "Okay", "\n\n"])
         self.assertEqual(workbench.parse_prefixes("one\n---\ntwo\nlines\n --- \n\n"), ["one", "two\nlines"])
+
+    def test_plain_text_intervention_prefixes_are_appended_before_encoding(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        session = SimpleNamespace(encode=lambda text: [ord(c) for c in text])
+        model = SimpleNamespace(config=SimpleNamespace(bos_token_id=1))
+        prompt = dict(raw=True, user="prompt", prefix=" first reply", system="")
+        ids = bench.prompt_ids(session, model, prompt)
+        self.assertEqual(ids, [1] + [ord(c) for c in "prompt first reply"])
+        other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
+        self.assertNotEqual(other, ids)
 
     def test_saved_graphs_round_trip_and_bad_files_are_refused(self):
         graph = small_graph()
