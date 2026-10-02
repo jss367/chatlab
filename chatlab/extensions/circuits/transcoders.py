@@ -14,6 +14,7 @@ time by byte range rather than downloaded whole.
 
 from __future__ import annotations
 
+import gc
 import gzip
 import json
 import logging
@@ -158,15 +159,23 @@ def downloaded(spec):
     return True
 
 
-def download(spec, progress=None):
+def _check_cancelled(cancelled):
+    if cancelled is not None and cancelled():
+        from .attribution import Cancelled
+        raise Cancelled()
+
+
+def download(spec, progress=None, cancelled=None):
     """Fetch every layer's weights into the Hub cache, one file at a time."""
     from huggingface_hub import hf_hub_download
 
     paths = []
     for layer in range(spec.layers):
+        _check_cancelled(cancelled)
         if progress is not None:
             progress(layer, spec.layers)
         paths.append(hf_hub_download(spec.repo, spec.path(f"layer_{layer}.safetensors")))
+        _check_cancelled(cancelled)
     if progress is not None:
         progress(spec.layers, spec.layers)
     return paths
@@ -179,7 +188,7 @@ def loaded(spec, device):
     return held if held is not None and str(held.device) == str(device) else None
 
 
-def load(spec, device, progress=None):
+def load(spec, device, progress=None, cancelled=None):
     """Read the whole set onto ``device``, replacing any other set in memory.
 
     Only one set is held at a time: the sets are gigabytes each, and the one
@@ -188,39 +197,55 @@ def load(spec, device, progress=None):
     import torch
     from safetensors.torch import load_file
 
+    _check_cancelled(cancelled)
     held = loaded(spec, device)
     if held is not None:
         return held
     unload()
-    paths = download(spec, progress)
+    paths = download(spec, progress, cancelled)
     parts = {"w_enc": [], "b_enc": [], "w_dec": [], "b_dec": [], "threshold": []}
-    for path in paths:
-        tensors = load_file(path)
-        missing = {"W_enc", "b_enc", "W_dec", "b_dec"} - tensors.keys()
-        if missing:
-            raise ValueError(f"{Path(path).name} has no {', '.join(sorted(missing))}.")
-        if "W_skip" in tensors:
-            raise ValueError("Transcoders with a skip connection are not supported.")
+    tensors, w_enc, w_dec, threshold = {}, None, None, None
+    try:
+        for path in paths:
+            _check_cancelled(cancelled)
+            tensors = load_file(path)
+            _check_cancelled(cancelled)
+            missing = {"W_enc", "b_enc", "W_dec", "b_dec"} - tensors.keys()
+            if missing:
+                raise ValueError(f"{Path(path).name} has no {', '.join(sorted(missing))}.")
+            if "W_skip" in tensors:
+                raise ValueError("Transcoders with a skip connection are not supported.")
 
-        def place(tensor):
-            dtype = torch.float32 if tensor.dtype in (torch.float32, torch.float64) else tensor.dtype
-            return tensor.to(device=device, dtype=dtype)
+            def place(tensor):
+                _check_cancelled(cancelled)
+                dtype = torch.float32 if tensor.dtype in (torch.float32, torch.float64) else tensor.dtype
+                return tensor.to(device=device, dtype=dtype)
 
-        w_enc, w_dec = tensors["W_enc"], tensors["W_dec"]
-        if w_enc.shape != (spec.width, spec.d_model) or w_dec.shape != (spec.width, spec.d_model):
-            raise ValueError(f"{Path(path).name} does not have the shape {spec.title} was published with.")
-        parts["w_enc"].append(place(w_enc))
-        parts["b_enc"].append(place(tensors["b_enc"]))
-        parts["w_dec"].append(place(w_dec))
-        parts["b_dec"].append(place(tensors["b_dec"]))
-        threshold = tensors.get("activation_function.threshold")
-        parts["threshold"].append(None if threshold is None else place(threshold))
-        del tensors
-    held = Transcoders(spec, device=device, **parts)
-    with _LOAD_LOCK:
-        _LOADED[spec.key] = held
-    logger.info("Loaded transcoders %s onto %s", spec.key, device)
-    return held
+            w_enc, w_dec = tensors["W_enc"], tensors["W_dec"]
+            if w_enc.shape != (spec.width, spec.d_model) or w_dec.shape != (spec.width, spec.d_model):
+                raise ValueError(f"{Path(path).name} does not have the shape {spec.title} was published with.")
+            parts["w_enc"].append(place(w_enc))
+            parts["b_enc"].append(place(tensors["b_enc"]))
+            parts["w_dec"].append(place(w_dec))
+            parts["b_dec"].append(place(tensors["b_dec"]))
+            threshold = tensors.get("activation_function.threshold")
+            parts["threshold"].append(None if threshold is None else place(threshold))
+            tensors = {}
+        _check_cancelled(cancelled)
+        held = Transcoders(spec, device=device, **parts)
+        with _LOAD_LOCK:
+            _LOADED[spec.key] = held
+        logger.info("Loaded transcoders %s onto %s", spec.key, device)
+        return held
+    except BaseException:
+        # A canceled or failed partial load must not keep its device blocks.
+        parts.clear()
+        tensors.clear()
+        w_enc = w_dec = threshold = None
+        gc.collect()
+        from chatlab.model_loading import LoadingMixin
+        LoadingMixin._release_device_cache()
+        raise
 
 
 def in_memory(spec):
@@ -230,9 +255,13 @@ def in_memory(spec):
 
 def unload():
     with _LOAD_LOCK:
-        held = list(_LOADED.values())
+        had_loaded = bool(_LOADED)
         _LOADED.clear()
-    return bool(held)
+    # Drop all cache-owned references before returning allocator blocks.
+    gc.collect()
+    from chatlab.model_loading import LoadingMixin
+    LoadingMixin._release_device_cache()
+    return had_loaded
 
 
 class FeatureRecords:

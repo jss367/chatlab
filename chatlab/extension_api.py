@@ -227,6 +227,17 @@ class GenerationSession:
         self._check()
         self._manager.check_steering(steering)
 
+    @property
+    def model_revision(self):
+        """The pinned checkpoint's revision, or ``None`` when the load does not record one.
+
+        The same model ID can name different weights after a newer download.
+        Something fitted to the weights, as a probe is, should be refused under
+        another revision when both revisions are known.
+        """
+        self._check()
+        return self._manager.model_revision()
+
     @contextlib.contextmanager
     def transformers_model(self):
         """Hold the pinned Transformers model itself, for reading it by hand.
