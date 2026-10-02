@@ -37,6 +37,9 @@ CATALOGUE = (
     ExtensionSpec("hangman", "Hangman",
                   "Play hangman with the model as host, check each board against the last and branch replies at any token.",
                   "Hangman", "chatlab.extensions.hangman", icon="spell-check"),
+    ExtensionSpec("circuits", "Circuit tracing",
+                  "Trace which transcoder features carried the model to a token, then ablate or boost groups of them.",
+                  "Circuits", "chatlab.extensions.circuits", icon="network"),
 )
 
 
@@ -45,6 +48,8 @@ class LoadedExtension:
     spec: ExtensionSpec
     build_page: object
     css: str
+    # Optional script run once when the page loads, as the host's own are.
+    js: str = ""
 
 
 def load_enabled(enabled_ids, catalogue=CATALOGUE):
@@ -58,7 +63,10 @@ def load_enabled(enabled_ids, catalogue=CATALOGUE):
             module = import_module(spec.module)
             if not callable(module.build_page) or not isinstance(module.CSS, str):
                 raise ValueError("must export a page builder and CSS string")
-            loaded.append(LoadedExtension(spec, module.build_page, module.CSS))
+            js = getattr(module, "JS", "")
+            if not isinstance(js, str):
+                raise ValueError("must export its script, if any, as a string")
+            loaded.append(LoadedExtension(spec, module.build_page, module.CSS, js))
         except Exception as exc:
             logger.exception("Could not load extension %s", spec.id)
             errors.append(f"{spec.title}: {exc}")

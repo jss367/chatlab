@@ -1,6 +1,6 @@
 # Optional extensions for ChatLab
 
-Extensions add specialized pages while sharing ChatLab's model runtime and token inspection. Bundled extensions include **Maze experiments**, **OS-Harm results**, **Computer-use safety benchmark** and **Hangman**. Fresh installations start with all extensions disabled.
+Extensions add specialized pages while sharing ChatLab's model runtime and token inspection. Bundled extensions include **Maze experiments**, **OS-Harm results**, **Computer-use safety benchmark**, **Hangman** and **Circuit tracing**. Fresh installations start with all extensions disabled.
 
 ## Enable or disable an extension
 
@@ -8,7 +8,7 @@ Open **Settings → Extensions**, check or uncheck an extension, and restart Cha
 
 In the macOS app, **Restart ChatLab** appears beside that note while the saved choice differs from the pages on screen. It asks first, because restarting unloads the model and stops anything running; answering **Restart now** closes the window and opens a fresh copy. A ChatLab served to a browser by `python -m chatlab` has no window to reopen, so it shows the note without the button and the server is restarted by hand.
 
-When enabled, **Maze**, **OS-Harm**, **Safety** or **Hangman** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
+When enabled, **Maze**, **OS-Harm**, **Safety**, **Hangman** or **Circuits** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
 
 This version provides **bundled, optional modules**. It does not yet install external packages. The explicit catalogue and versioned service boundary give us a place to add external distribution later. Extensions are trusted Python code running in ChatLab's process, not sandboxed programs.
 
@@ -18,6 +18,8 @@ and replaying screenshots in **OS-Harm**, see the [results viewer guide](OS_HARM
 The **Computer-use safety benchmark** extension adds **Safety** to the sidebar. It implements case imports, text-only local action evaluation by label probability or free-text judgment, the blocking threshold curve, token inspection, external prediction scoring and execution-result review for OSGuard. Its interchange format and limitations are documented in [the computer-use safety guide](COMPUTER_USE_SAFETY.md). Its code lives in `chatlab/extensions/osguard/` and uses the same host services as Maze.
 
 The **Hangman** extension has the loaded model host a game of hangman. You guess, and each reply is shown token by token and checked against the replies before it. Any token can be branched from. A trial file plays many games with nobody guessing and can ask for the word after every response. See [the hangman guide](HANGMAN.md). Its code lives in `chatlab/extensions/hangman/`.
+
+The **Circuit tracing** extension builds attribution graphs over per-layer transcoders for the models that have them published, and tests groups of features by ablating and boosting them in the real model. See [the circuit tracing guide](CIRCUITS.md). Its code lives in `chatlab/extensions/circuits/`.
 
 ## Ownership
 
@@ -39,12 +41,15 @@ A catalogue entry declares an identifier, title, description, sidebar label, ico
 
 ```python
 CSS = "..."  # Scope selectors to this extension's page.
+JS = "() => { ... }"  # Optional: run once when the page loads.
 
 def build_page(context):
     # Build Gradio components and register their callbacks here.
     # Called once during app construction, only when enabled.
     ...
 ```
+
+`JS` is optional. The host runs it once when the page loads, as it runs its own scripts, so it should install its listeners once and guard against a second run. A page script talks to Python the way the host's do: it writes JSON into a hidden textbox and dispatches an `input` event, which a callback on that textbox answers.
 
 The host passes `extension_api.ExtensionContext`:
 
@@ -90,6 +95,8 @@ with context.models.open_session() as session:
 `open_session()` fails clearly if no model is loaded or another page owns generation. The session pins the model/load identifiers and retains ownership across multiple responses until closed. Token encoding/decoding, `prompt_ids(messages, tools)` and `prompt_text(messages, tools)` for the templated prompt generation would feed, and `stop_token_ids` are exposed on the session; extensions do not access the model manager or tokenizer directly. Each streamed update owns its token-metric lists.
 
 To show what a model was given rather than to generate, `context.models.decode(ids)` and `context.models.prompt_text(messages, tools)` read the loaded model without reserving it, so a view of a prompt never queues behind the response it is describing or holds up a load. `prompt_text` renders through the same template path generation uses, tool schemas and generation prompt included. Both return the text with the load identifier that spelled it, or `(None, None)` when no model is loaded or a load landed while they were reading, which is how a caller tells a reading made under the recording load from one made under a later one. `context.models.loaded_model_id()` answers what is in memory as it is asked, and frames no text: use it to say what a reader would unload beside text no load produced, never to explain text a load did produce, because the load that answered an earlier reading may already be gone. It is `None` while a load is under way, as a nameless load is no answer, and `None` for an image pipeline, which is published under its own ID like any load and has no tokenizer to spell anything with.
+
+To measure the model in ways generation does not, such as gradients or forward hooks, use `with session.transformers_model() as model:`. It hands over the pinned Transformers model and holds the model lock for the whole block, as ChatLab's own inspections do. Remove every hook and patch before the block ends. It raises `ValueError` for an MLX load and for 8-bit or 4-bit weights, re-raises out-of-memory failures as ChatLab's own, and returns unused device memory when the block ends. Close any generation stream first.
 
 To start a response with fixed text, pass `session.generate(..., answer_prefill=text)`, as Chat's assistant prefill does. When the template opens a reasoning block, the runtime closes it before the text, so the text begins the visible answer. It cannot be combined with `forced_ids`.
 

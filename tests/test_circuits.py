@@ -1,0 +1,478 @@
+"""Circuit tracing: the frozen replacement model, attribution, interventions and the page's pieces."""
+import contextlib
+import gzip
+import json
+import struct
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import torch
+
+from chatlab.extension_api import ModelService
+from chatlab.extensions.circuits import architecture, attribution, interventions, render, transcoders, workbench
+from chatlab.extensions.registry import load_enabled
+from fakes import FakeManager
+
+WIDTH = 48
+
+
+def tiny_model(kind):
+    torch.manual_seed(0)
+    common = dict(vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=3,
+                  num_attention_heads=4, num_key_value_heads=2, head_dim=8, max_position_embeddings=64)
+    if kind == "gemma3":
+        from transformers import Gemma3ForCausalLM, Gemma3TextConfig
+        model = Gemma3ForCausalLM(Gemma3TextConfig(**common, sliding_window=4,
+                                                   layer_types=["sliding_attention", "full_attention",
+                                                                "sliding_attention"]))
+    elif kind == "gemma2":
+        from transformers import Gemma2Config, Gemma2ForCausalLM
+        model = Gemma2ForCausalLM(Gemma2Config(**common, sliding_window=4, attn_logit_softcapping=20.0,
+                                               final_logit_softcapping=15.0))
+    else:
+        from transformers import Qwen3Config, Qwen3ForCausalLM
+        model = Qwen3ForCausalLM(Qwen3Config(**common))
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if "norm" in name:
+                # Gemma stores its scale as an offset from one; a random one
+                # makes a wrong convention in the frozen norm show.
+                parameter.copy_(torch.randn_like(parameter) * 0.3 + (0.0 if kind != "qwen3" else 1.0))
+    return model.eval()
+
+
+def tiny_transcoders(blocks, *, bias=True, threshold=0.05):
+    generator = torch.Generator().manual_seed(1)
+    d = blocks.embed.weight.shape[1]
+    layers = len(blocks.layers)
+
+    def rand(*shape, scale):
+        return torch.randn(*shape, generator=generator) * scale
+
+    spec = transcoders.TranscoderSpec("tiny", "tiny", ("test/tiny",), "test/tiny", "", layers, WIDTH, d, 0.0)
+    return transcoders.Transcoders(
+        spec,
+        w_enc=[rand(WIDTH, d, scale=0.4) for _ in range(layers)],
+        b_enc=[rand(WIDTH, scale=0.05) for _ in range(layers)],
+        w_dec=[rand(WIDTH, d, scale=0.2) for _ in range(layers)],
+        b_dec=[rand(d, scale=0.1 if bias else 0.0) for _ in range(layers)],
+        threshold=[torch.full((WIDTH,), threshold) if threshold is not None else None for _ in range(layers)],
+        device=torch.device("cpu"),
+    )
+
+
+IDS = [2, 17, 5, 33, 9, 41, 12]
+
+
+class FrozenModelTests(unittest.TestCase):
+    def test_freezing_changes_no_values_and_is_undone(self):
+        for kind in ("gemma3", "gemma2", "qwen3"):
+            with self.subTest(kind=kind):
+                model = tiny_model(kind)
+                ids = torch.tensor([IDS])
+                with torch.no_grad():
+                    plain = model(ids).logits
+                    implementation = model.config._attn_implementation
+                    with architecture.frozen(model):
+                        frozen = model(ids).logits
+                    after = model(ids).logits
+                torch.testing.assert_close(frozen, plain, rtol=1e-4, atol=1e-5)
+                torch.testing.assert_close(after, plain)
+                self.assertEqual(model.config._attn_implementation, implementation)
+                norms = [m for m in model.modules() if type(m).__name__.endswith("RMSNorm")]
+                self.assertTrue(norms)
+                self.assertFalse(any("forward" in vars(m) for m in norms))
+
+    def test_frozen_model_is_linear_in_its_input(self):
+        # With the MLPs written out, what is left is attention and norms.
+        # Frozen, that is linear without a bias, so the gradient dotted with
+        # the input gives back the output; unfrozen, it does not.
+        model = tiny_model("qwen3")
+        blocks = architecture.blocks(model)
+        embeddings = blocks.embed(torch.tensor([IDS])).detach().requires_grad_(True)
+        with contextlib.ExitStack() as stack:
+            for layer in range(len(blocks.layers)):
+                stack.enter_context(architecture.replaced_output(blocks.mlp_output(layer),
+                                                                 lambda x, *_a, **_k: torch.zeros_like(x)))
+            plain = blocks.inner(inputs_embeds=embeddings).last_hidden_state[0, -1].sum()
+            grad, = torch.autograd.grad(plain, embeddings)
+            self.assertGreater(abs(float((grad * embeddings.detach()).sum() - plain.detach())), 0.1)
+            with architecture.frozen(model):
+                output = blocks.inner(inputs_embeds=embeddings).last_hidden_state[0, -1].sum()
+                grad, = torch.autograd.grad(output, embeddings)
+        torch.testing.assert_close((grad * embeddings).sum(), output, rtol=1e-4, atol=1e-4)
+
+    def test_unsupported_models_are_refused(self):
+        model = SimpleNamespace(config=SimpleNamespace(model_type="gpt2"))
+        with self.assertRaisesRegex(ValueError, "does not support gpt2"):
+            architecture.blocks(model)
+
+
+class AttributionTests(unittest.TestCase):
+    def setUp(self):
+        self.decode = lambda token: f"<{token}>"
+
+    def frozen(self, kind, **options):
+        model = tiny_model(kind)
+        blocks = architecture.blocks(model)
+        held = tiny_transcoders(blocks, **options)
+        recording = attribution.record(blocks, held, IDS)
+        return blocks, held, recording
+
+    def test_recording_splits_each_mlp_into_features_and_error(self):
+        blocks, held, recording = self.frozen("gemma3")
+        self.assertGreater(len(recording.activation), 0)
+        self.assertFalse(bool((recording.feature_position == 0).any()), "the first token's features are left out")
+        for layer in range(len(blocks.layers)):
+            start, end = recording.layer_slices[layer]
+            acts = torch.zeros(len(IDS), WIDTH)
+            acts[recording.feature_position[start:end], recording.feature_index[start:end]] = \
+                recording.activation[start:end]
+            rebuilt = held.decode(layer, acts) + recording.errors[layer]
+            torch.testing.assert_close(rebuilt, recording.outputs[layer].float(), rtol=1e-5, atol=1e-5)
+
+    def test_edges_into_a_logit_add_up_to_it(self):
+        for kind in ("gemma3", "gemma2", "qwen3"):
+            with self.subTest(kind=kind):
+                blocks, held, recording = self.frozen(kind)
+                targets = attribution.choose_targets(recording, self.decode)
+                directions = attribution.logit_directions(blocks, recording, targets)
+                graph = attribution.FrozenGraph(blocks, held, recording, batch_size=4)
+                try:
+                    vectors = [("vector", d) for d in directions[:4]]
+                    rows = graph.rows(vectors)
+                    biases = graph.bias_terms(vectors)
+                finally:
+                    graph.close()
+                values = directions[:4] @ recording.final[-1]
+                torch.testing.assert_close(rows.sum(1) + biases, values, rtol=1e-4, atol=1e-4)
+
+    def test_edges_into_a_feature_add_up_to_its_activation(self):
+        for kind in ("gemma3", "qwen3"):
+            with self.subTest(kind=kind):
+                blocks, held, recording = self.frozen(kind, bias=False)
+                late = torch.nonzero(recording.feature_layer >= 1, as_tuple=True)[0][:6].tolist()
+                self.assertTrue(late)
+                graph = attribution.FrozenGraph(blocks, held, recording, batch_size=8)
+                try:
+                    rows = graph.rows([("feature", k) for k in late])
+                finally:
+                    graph.close()
+                for row, k in zip(rows, late):
+                    layer, feature = int(recording.feature_layer[k]), int(recording.feature_index[k])
+                    expected = recording.activation[k] - held.b_enc[layer][feature]
+                    torch.testing.assert_close(row.sum(), expected, rtol=1e-4, atol=1e-4)
+                    # Nothing at or after the feature's own layer can feed it.
+                    later = (recording.feature_layer >= layer).nonzero(as_tuple=True)[0]
+                    self.assertEqual(float(row[later].abs().sum()), 0.0)
+
+    def test_contrast_reads_the_log_odds_gradient(self):
+        blocks, held, recording = self.frozen("qwen3")
+        targets = attribution.choose_targets(recording, self.decode, contrast={"positive": [3, 4], "negative": [5]})
+        self.assertEqual(len(targets), 1)
+        direction = attribution.logit_directions(blocks, recording, targets)[0]
+        hidden = recording.final[-1].clone().requires_grad_(True)
+        logits = blocks.unembed(hidden.to(blocks.dtype)).float()
+        log_probs = torch.log_softmax(logits, -1)
+        odds = torch.logsumexp(log_probs[[3, 4]], 0) - log_probs[5]
+        grad, = torch.autograd.grad(odds, hidden)
+        torch.testing.assert_close(direction, grad, rtol=1e-4, atol=1e-5)
+
+    def test_contrast_needs_two_distinct_sides(self):
+        _, _, recording = self.frozen("qwen3")
+        with self.assertRaisesRegex(ValueError, "both sides"):
+            attribution.choose_targets(recording, self.decode, contrast={"positive": [3], "negative": [3]})
+
+    def test_a_whole_graph_is_consistent_and_saveable(self):
+        model = tiny_model("gemma3")
+        blocks = architecture.blocks(model)
+        held = tiny_transcoders(blocks)
+        stages = []
+        graph = attribution.attribute(blocks, held, IDS, self.decode,
+                                      settings=attribution.Settings(max_feature_nodes=16, batch_size=8),
+                                      progress=lambda *args: stages.append(args[0]))
+        json.dumps(graph)
+        self.assertIn("Tracing features", stages)
+        check = graph["targets_check"]
+        for value, edges, bias in zip(check["values"], check["edge_sums"], check["bias_terms"]):
+            self.assertAlmostEqual(edges + bias, value, places=3)
+        ids = {n["id"] for n in graph["nodes"]}
+        self.assertTrue(all(e["source"] in ids and e["target"] in ids for e in graph["edges"]))
+        stats = graph["stats"]
+        self.assertLessEqual(stats["kept_features"], stats["traced_features"])
+        self.assertLessEqual(stats["traced_features"], 16)
+        self.assertTrue(0 <= stats["error_share"] <= 1)
+        self.assertTrue(any(n["kind"] == "target" for n in graph["nodes"]))
+
+    def test_cancelling_stops_between_batches(self):
+        model = tiny_model("qwen3")
+        blocks = architecture.blocks(model)
+        with self.assertRaises(attribution.Cancelled):
+            attribution.attribute(blocks, tiny_transcoders(blocks), IDS, self.decode,
+                                  settings=attribution.Settings(max_feature_nodes=16, batch_size=4),
+                                  cancelled=lambda: True)
+        self.assertNotIn("forward", vars(blocks.mlp_output(0)), "the frozen model is undone on the way out")
+
+    def test_effect_passes_through_features_per_unit_of_activation(self):
+        # source -> feature (activation 2, edge 4) -> target (edge 6), and source -> target (edge 1).
+        adjacency = torch.zeros(3, 3)
+        adjacency[1, 0] = 4.0
+        adjacency[2, 1] = 6.0
+        adjacency[2, 0] = 1.0
+        weights = torch.tensor([0.0, 0.0, 1.0])
+        effect = attribution._effect(adjacency, weights, torch.tensor([1]), torch.tensor([1.0, 2.0, 1.0]))
+        self.assertAlmostEqual(float(effect[1]), 6.0)
+        self.assertAlmostEqual(float(effect[0]), 1.0 + 4.0 / 2.0 * 6.0)
+
+    def test_settings_are_checked(self):
+        with self.assertRaisesRegex(ValueError, "Feature nodes"):
+            attribution.Settings(max_feature_nodes=2).check()
+        with self.assertRaisesRegex(ValueError, "Edge threshold"):
+            attribution.Settings(edge_threshold=0).check()
+
+
+class InterventionTests(unittest.TestCase):
+    def setUp(self):
+        self.model = tiny_model("gemma3")
+        self.blocks = architecture.blocks(self.model)
+        self.held = tiny_transcoders(self.blocks)
+        self.recording = attribution.record(self.blocks, self.held, IDS)
+
+    def test_scaling_by_one_changes_nothing(self):
+        k = 0
+        layer, feature = int(self.recording.feature_layer[k]), int(self.recording.feature_index[k])
+        plain = interventions.run(self.blocks, self.held, IDS, (), range(64))
+        same = interventions.run(self.blocks, self.held, IDS, [(layer, feature, 1.0, None)], range(64))
+        torch.testing.assert_close(torch.tensor(same["probabilities"]), torch.tensor(plain["probabilities"]))
+
+    def test_boosting_in_the_last_layer_adds_its_decoder_row(self):
+        last = len(self.blocks.layers) - 1
+        start, end = self.recording.layer_slices[last]
+        at_end = [k for k in range(start, end) if int(self.recording.feature_position[k]) == len(IDS) - 1]
+        self.assertTrue(at_end)
+        k = at_end[0]
+        feature, activation = int(self.recording.feature_index[k]), float(self.recording.activation[k])
+        boosted = interventions.run(self.blocks, self.held, IDS, [(last, feature, 3.0, [0])])
+        added = 2.0 * activation * self.held.w_dec[last][feature]
+
+        def hook(_module, _args, output):
+            changed = output.clone()
+            changed[0, -1] += added.to(output.dtype)
+            return changed
+
+        handle = self.blocks.mlp_output(last).register_forward_hook(hook)
+        try:
+            with torch.no_grad():
+                expected = torch.log_softmax(self.model(torch.tensor([IDS])).logits[0, -1].float(), -1)
+        finally:
+            handle.remove()
+        torch.testing.assert_close(boosted["log_probs"], expected, rtol=1e-4, atol=1e-4)
+        self.assertEqual(boosted["active"], 1)
+
+    def test_group_effects_average_over_prefixes(self):
+        k = 0
+        member = (int(self.recording.feature_layer[k]), int(self.recording.feature_index[k]),
+                  len(IDS) - 1 - int(self.recording.feature_position[k]))
+        result = interventions.group_effects(self.blocks, self.held, [IDS, IDS[:5]], {"g": [member]},
+                                             pivot=[3, 4], alternatives=[5, 3], boost=2.0)
+        self.assertEqual(result["prefixes"], 2)
+        self.assertEqual(result["alternatives"], [5])
+        baseline = result["baseline"]
+        self.assertAlmostEqual(baseline["pivot"], baseline["tokens"][3] + baseline["tokens"][4])
+        for kind in ("ablate", "boost"):
+            self.assertTrue(all(0 <= p <= 1 for p in result["groups"]["g"][kind]["tokens"].values()))
+        self.assertGreaterEqual(result["groups"]["g"]["active_prefixes"], 1)
+
+    def test_group_effects_check_their_inputs(self):
+        with self.assertRaisesRegex(ValueError, "pivot"):
+            interventions.group_effects(self.blocks, self.held, [IDS], {"g": []}, pivot=[], alternatives=[])
+        with self.assertRaisesRegex(ValueError, "group"):
+            interventions.group_effects(self.blocks, self.held, [IDS], {}, pivot=[1], alternatives=[])
+
+
+def small_graph():
+    model = tiny_model("qwen3")
+    blocks = architecture.blocks(model)
+    graph = attribution.attribute(blocks, tiny_transcoders(blocks), IDS, lambda t: f"tok{t}",
+                                  settings=attribution.Settings(max_feature_nodes=16, batch_size=8))
+    graph["tokens"][2] = "<script>alert(1)</script>"
+    graph.update(id="abc123", model_id="test/tiny", transcoders="tiny", labels={}, groups={}, effects=None,
+                 prompt={"system": "", "user": "hi", "prefix": "", "raw": False})
+    return graph
+
+
+class RenderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.graph = small_graph()
+
+    def test_graph_view_escapes_text_and_limits_features(self):
+        page = render.graph_view(self.graph, nodes_shown=3, show_errors=False)
+        self.assertNotIn("<script>alert", page)
+        self.assertLessEqual(page.count('class="cg-node feature'), 3)
+        self.assertNotIn('class="cg-node error', page)
+        with_errors = render.graph_view(self.graph, nodes_shown=3, show_errors=True)
+        if any(n["kind"] == "error" for n in self.graph["nodes"]):
+            self.assertIn('class="cg-node error', with_errors)
+
+    def test_selected_and_named_features_are_drawn_so(self):
+        feature = next(n for n in self.graph["nodes"] if n["kind"] == "feature")
+        page = render.graph_view(self.graph, nodes_shown=1, selected=[feature["id"]],
+                                 labels={feature["id"]: "my <name>"}, groups={"g": [feature["id"]]})
+        self.assertIn("cg-node feature sel grouped", page)
+        self.assertIn("my &lt;name&gt;", page)
+
+    def test_group_view_and_card_show_measured_effects(self):
+        members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"][:2]
+        effects = {"prefixes": 2, "boost": 2.0, "every_position": False, "pivot": [3], "alternatives": [5],
+                   "baseline": {"tokens": {"3": 0.2, "5": 0.1}, "pivot": 0.2},
+                   "groups": {"g": {"ablate": {"tokens": {"3": 0.1, "5": 0.1}, "pivot": 0.1},
+                                    "boost": {"tokens": {"3": 0.4, "5": 0.05}, "pivot": 0.4},
+                                    "active_prefixes": 2}}}
+        view = render.group_view(self.graph, {"g": members}, effects, decode=lambda t: f"tok{t}")
+        self.assertIn("ablate ×0.50 · boost ×2.00", view)
+        self.assertIn('class="cg-group promotes"', view)
+        card = render.group_card("g", members, self.graph, effects, decode=lambda t: f"tok{t}")
+        self.assertIn("×2.00 when boosted", card)
+        self.assertIn("×0.50", card)
+        self.assertIn("cg-empty", render.group_view(self.graph, {}))
+
+    def test_feature_card_marks_the_strongest_token(self):
+        feature = next(n for n in self.graph["nodes"] if n["kind"] == "feature")
+        record = {"activation_frequency": 0.001, "top_logits": [" a"], "bottom_logits": [" b"],
+                  "examples_quantiles": [{"examples": [{"tokens": ["x", "<y>", "z"],
+                                                        "tokens_acts_list": [0.0, 3.0, 1.0]}]}]}
+        card = render.feature_card(feature, record, tokens=self.graph["tokens"])
+        self.assertIn('class="peak"', card)
+        self.assertIn("&lt;y&gt;", card)
+        self.assertIn("0.100%", card)
+        self.assertIn("cg-empty", render.feature_card(None))
+
+
+class WorkbenchTests(unittest.TestCase):
+    def test_token_lists_keep_leading_spaces_and_read_escapes(self):
+        self.assertEqual(workbench.parse_tokens(" Wait\nOkay\n\n\\n\\n\r\n"), [" Wait", "Okay", "\n\n"])
+        self.assertEqual(workbench.parse_prefixes("one\n---\ntwo\nlines\n --- \n\n"), ["one", "two\nlines"])
+
+    def test_saved_graphs_round_trip_and_bad_files_are_refused(self):
+        graph = small_graph()
+        with tempfile.TemporaryDirectory() as directory:
+            bench = workbench.Workbench(SimpleNamespace(), directory)
+            path = bench.save(graph)
+            self.assertEqual(workbench.load_graph(path)["nodes"], graph["nodes"])
+            self.assertEqual(len(bench.saved()), 1)
+            bad = Path(directory) / "bad.json"
+            bad.write_text(json.dumps({"format": "something else"}))
+            with self.assertRaisesRegex(ValueError, "not a saved"):
+                workbench.load_graph(bad)
+            broken = dict(graph, edges=[{"source": "nowhere", "target": "target:0", "weight": 1.0}])
+            bad.write_text(json.dumps(broken))
+            with self.assertRaisesRegex(ValueError, "not a valid"):
+                workbench.load_graph(bad)
+
+    def test_background_work_reports_progress_and_errors(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+
+        def work(progress, cancelled):
+            progress("Step", 1, 2)
+            return "result"
+
+        items = list(bench.background("owner", work))
+        self.assertEqual(items, [("progress", "Step", 1, 2), ("done", "result")])
+
+        def fails(progress, cancelled):
+            raise ValueError("broken")
+
+        with self.assertRaisesRegex(ValueError, "broken"):
+            list(bench.background("owner", fails))
+
+    def test_one_run_per_view(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        release = threading.Event()
+        first = bench.background("owner", lambda progress, cancelled: release.wait(5))
+        next_item = threading.Thread(target=lambda: list(first))
+        next_item.start()
+        while "owner" not in bench._sessions:
+            pass
+        with self.assertRaisesRegex(ValueError, "already running"):
+            list(bench.background("owner", lambda progress, cancelled: None))
+        release.set()
+        next_item.join()
+
+
+class TranscoderTests(unittest.TestCase):
+    def test_catalogue_lookup(self):
+        self.assertEqual(transcoders.spec_for("Google/Gemma-3-1B-IT").key, "gemma-3-1b-it")
+        self.assertIsNone(transcoders.spec_for("allenai/Olmo-3-7B-Think"))
+        self.assertIsNone(transcoders.spec_for(None))
+
+    def test_feature_records_are_read_by_range_and_cached(self):
+        record = {"index": 1, "top_logits": [" x"]}
+        packed = gzip.compress(json.dumps(record).encode())
+        raw = struct.pack("<I", len(packed)) + packed
+        self.assertEqual(transcoders.parse_record(raw), record)
+        spec = transcoders.spec_for("google/gemma-3-1b-it")
+        with tempfile.TemporaryDirectory() as directory:
+            index = Path(directory) / "index.json.gz"
+            index.write_bytes(gzip.compress(json.dumps(
+                {"version": "1.0", "3": {"filename": "layer_3.bin", "offsets": [0, 10, 10 + len(raw)]}}).encode()))
+            records = transcoders.FeatureRecords(spec, Path(directory) / "cache")
+            with mock.patch("huggingface_hub.hf_hub_download", return_value=str(index)), \
+                    mock.patch.object(transcoders, "_fetch_range", return_value=raw) as fetch:
+                self.assertEqual(records.get(3, 1), record)
+                self.assertEqual(fetch.call_args.args[1:], (10, 10 + len(raw)))
+                self.assertEqual(records.get(3, 1), record)
+                self.assertEqual(fetch.call_count, 1)
+                with self.assertRaises(OSError):
+                    records.get(3, 7)
+
+
+class ModelAccessTests(unittest.TestCase):
+    def manager(self, backend="torch", precision="full"):
+        manager = FakeManager()
+        manager._lock = threading.Lock()
+        manager.model = object()
+        manager.precision = precision
+        manager._engine = lambda: SimpleNamespace(backend=backend)
+        manager._release_device_cache = mock.Mock()
+        return manager
+
+    def test_the_model_is_held_under_the_lock(self):
+        manager = self.manager()
+        with ModelService(lambda: manager).open_session() as session:
+            with session.transformers_model() as model:
+                self.assertIs(model, manager.model)
+                self.assertTrue(manager._lock.locked())
+            self.assertFalse(manager._lock.locked())
+        manager._release_device_cache.assert_called_once()
+
+    def test_mlx_and_quantized_loads_are_refused(self):
+        for manager, message in ((self.manager(backend="mlx"), "MLX"), (self.manager(precision="4-bit"), "full")):
+            with ModelService(lambda: manager).open_session() as session:
+                with self.assertRaisesRegex(ValueError, message):
+                    with session.transformers_model():
+                        pass
+
+    def test_a_changed_load_is_refused(self):
+        manager = self.manager()
+        with ModelService(lambda: manager).open_session() as session:
+            manager.load_id = "second"
+            with self.assertRaisesRegex(ValueError, "changed"):
+                with session.transformers_model():
+                    pass
+
+
+class RegistryTests(unittest.TestCase):
+    def test_circuits_loads_with_its_script(self):
+        loaded, errors = load_enabled({"circuits"})
+        self.assertEqual(errors, [])
+        self.assertEqual([e.spec.id for e in loaded], ["circuits"])
+        self.assertIn("circuits-pick", loaded[0].js)
+
+
+if __name__ == "__main__":
+    unittest.main()

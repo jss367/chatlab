@@ -296,6 +296,9 @@ def build_app() -> gr.Blocks:
             chat_page.bar.badge_view,
         )
         _wire_page_scripts(demo, chat_page, states, settings_page.writing_suggestions)
+        for extension in extensions:
+            if extension.js:
+                demo.load(None, None, None, js=extension.js)
         wire_model_choice(
             demo, pages, models, refresh, chat_page.bar.default_model_button, images.load_button,
         )
