@@ -48,6 +48,8 @@ class TranscoderSpec:
     weights_gb: float
     input: str = "mlp_input"
     output: str = "mlp_output"
+    # Publisher configs name a model ID but currently do not report its training checkpoint.
+    training_model_revision: str | None = None
 
     def path(self, name):
         return f"{self.subfolder}/{name}" if self.subfolder else name
@@ -86,6 +88,15 @@ def spec_for(model_id):
         if wanted in (m.lower() for m in spec.model_ids):
             return spec
     return None
+
+
+def check_model_revision(spec, revision):
+    """Reject a documented checkpoint mismatch; do not invent missing provenance."""
+    expected = spec.training_model_revision
+    if expected is not None and revision != expected:
+        raise ValueError(f"{spec.title} was trained on model revision {expected}; "
+                         "load that exact checkpoint before using this set.")
+    return expected is not None
 
 
 def supported_models():
