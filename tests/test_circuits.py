@@ -548,7 +548,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
