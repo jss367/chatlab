@@ -314,29 +314,38 @@ class FeatureRecords:
     shows them.
     """
 
-    def __init__(self, spec, cache_dir):
+    def __init__(self, spec, cache_dir, revision=None):
         self.spec = spec
-        self.cache_dir = Path(cache_dir) / spec.key
+        self._cache_root = Path(cache_dir) / spec.key
+        self.revision = revision
+        self.cache_dir = self._cache_root / revision if revision else self._cache_root
         self._index = None
         self._lock = threading.Lock()
 
     def _url(self, name):
         from huggingface_hub import hf_hub_url
 
-        return hf_hub_url(self.spec.repo, self.spec.path(f"features/{name}"))
+        return hf_hub_url(self.spec.repo, self.spec.path(f"features/{name}"), revision=self.revision)
 
     def _read_index(self):
         from huggingface_hub import hf_hub_download
 
         with self._lock:
             if self._index is None:
-                path = hf_hub_download(self.spec.repo, self.spec.path("features/index.json.gz"))
+                path = hf_hub_download(self.spec.repo, self.spec.path("features/index.json.gz"), revision=self.revision)
+                resolved = snapshot_revision(path)
+                if self.revision is not None and self.revision != resolved:
+                    raise OSError("The feature index belongs to another transcoder snapshot.")
+                self.revision = resolved
+                self.cache_dir = self._cache_root / resolved
                 with gzip.open(path, "rt", encoding="utf-8") as handle:
                     self._index = json.load(handle)
             return self._index
 
     def get(self, layer, feature):
         """The record for one feature, or raise ``OSError`` when it cannot be read."""
+        if self.revision is None:
+            self._read_index()
         cached = self.cache_dir / str(layer) / f"{feature}.json"
         if cached.exists():
             try:
@@ -351,6 +360,7 @@ class FeatureRecords:
         if end <= start:
             raise OSError(f"Feature {feature} in layer {layer} has no recorded examples.")
         record = parse_record(_fetch_range(self._url(entry["filename"]), start, end))
+        record["_transcoder_revision"] = self.revision
         try:
             cached.parent.mkdir(parents=True, exist_ok=True)
             cached.write_text(json.dumps(record), encoding="utf-8")

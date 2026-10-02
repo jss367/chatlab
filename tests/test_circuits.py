@@ -611,6 +611,11 @@ class WorkbenchTests(unittest.TestCase):
             path = bench.save(graph)
             self.assertEqual(workbench.load_graph(path)["nodes"], graph["nodes"])
             self.assertEqual(len(bench.saved()), 1)
+            strings = dict(graph, edges=[{**edge, "weight": str(edge["weight"])} for edge in graph["edges"]])
+            path.write_text(json.dumps(strings))
+            loaded = workbench.load_graph(path)
+            self.assertTrue(all(isinstance(edge["weight"], float) for edge in loaded["edges"]))
+            render.graph_view(loaded)
             # Chosen-token traces can legitimately contain more than the ten default targets.
             chosen = dict(graph, nodes=[{**graph["nodes"][-1], "id": f"target:{i}"} for i in range(20)], edges=[])
             path.write_text(json.dumps(chosen))
@@ -707,6 +712,10 @@ class WorkbenchTests(unittest.TestCase):
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     frames = list(handlers["run_interventions"]("view", old, "", "", "", True, 2, False, "group"))
                 self.assertEqual(frames[-1], (gr.skip(),) * 6)
+                with mock.patch.object(workbench.Workbench, "background", completed):
+                    trace_frames = list(handlers["run_trace"]("view", "", "test", "", False,
+                                      "The likeliest next tokens", "", "", 16, .8, .98, 8, 40, False))
+                self.assertTrue(all(value == gr.skip() for value in trace_frames[-1]))
                 feature = next(n["id"] for n in old["nodes"] if n["kind"] == "feature")
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     self.assertEqual(handlers["ablate_focused"]("view", old, feature), gr.skip())
@@ -792,15 +801,17 @@ class TranscoderTests(unittest.TestCase):
         self.assertEqual(transcoders.parse_record(raw), record)
         spec = transcoders.spec_for("google/gemma-3-1b-it")
         with tempfile.TemporaryDirectory() as directory:
-            index = Path(directory) / "index.json.gz"
+            index = Path(directory) / "snapshots" / ("a" * 40) / "index.json.gz"
+            index.parent.mkdir(parents=True)
             index.write_bytes(gzip.compress(json.dumps(
                 {"version": "1.0", "3": {"filename": "layer_3.bin", "offsets": [0, 10, 10 + len(raw)]}}).encode()))
             records = transcoders.FeatureRecords(spec, Path(directory) / "cache")
             with mock.patch("huggingface_hub.hf_hub_download", return_value=str(index)), \
                     mock.patch.object(transcoders, "_fetch_range", return_value=raw) as fetch:
-                self.assertEqual(records.get(3, 1), record)
+                self.assertEqual(records.get(3, 1), record | {"_transcoder_revision": "a" * 40})
                 self.assertEqual(fetch.call_args.args[1:], (10, 10 + len(raw)))
-                self.assertEqual(records.get(3, 1), record)
+                self.assertIn("/resolve/" + "a" * 40 + "/", fetch.call_args.args[0])
+                self.assertEqual(records.get(3, 1), record | {"_transcoder_revision": "a" * 40})
                 self.assertEqual(fetch.call_count, 1)
                 with self.assertRaises(OSError):
                     records.get(3, 7)

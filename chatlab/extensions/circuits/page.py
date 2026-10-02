@@ -361,6 +361,7 @@ def build_page(context):
             raise gr.Error("Write a user message first.")
         skip = (gr.skip(),) * len(graph_outputs)
         graph = None
+        stamp = version(session_id)
         try:
             settings.check()
             for item in bench.background(session_id, lambda p, c: bench.trace(prompt, explain_spec, settings, p, c)):
@@ -373,10 +374,18 @@ def build_page(context):
             return
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
-        path = save(graph, session_id)
+        with version_lock:
+            stale = version(session_id) != stamp
+            if not stale:
+                path = save(graph, session_id)
+                stamp = version(session_id)
+        if stale:
+            yield (gr.skip(), gr.skip(), *skip)
+            return
         stats = graph["stats"]
-        yield (f"Traced {stats['traced_features']} of {stats['active_features']:,} active features.",
-               status_text(bench.status()), *show_graph(graph, path, shown, errors))
+        frame = (f"Traced {stats['traced_features']} of {stats['active_features']:,} active features.",
+                 status_text(bench.status()), *show_graph(graph, path, shown, errors))
+        yield frame if version(session_id) == stamp else (gr.skip(), gr.skip(), *skip)
 
     trace.click(run_trace, [owner, system, user, prefix, raw, explain, explain_tokens, explain_others,
                             max_nodes, node_threshold, edge_threshold, batch, nodes_shown, show_errors],
