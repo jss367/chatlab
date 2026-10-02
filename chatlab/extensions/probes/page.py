@@ -445,7 +445,11 @@ def build_page(context):
             runs.finish(view)
         yield (reading, *rendered(probe, reading, chosen), note, gr.skip())
 
-    run.click(lambda: ("", []), None, [detail, token_table], queue=False)
+    def clear_reading():
+        """Take the last reading off the page before the next run, so it never sits beside other text."""
+        return None, gr.update(value=[], visible=False), "", "", "", []
+
+    run.click(clear_reading, None, [reading_state, strip, heat, reply, detail, token_table], queue=False)
     run.click(read, [probe_state, mode, text, system, temperature, seed, max_tokens, include_prompt, as_user,
                      owner, layer], [reading_state, strip, heat, detail, reply],
               concurrency_id="probes-model", show_progress="hidden")

@@ -385,6 +385,12 @@ class PageTests(unittest.TestCase):
         with self.assertRaises(gr.Error):
             self.fn["open_saved"]("0" * 32)
 
+    def test_a_new_run_clears_the_last_reading_first(self):
+        reading, strip, heat, reply, detail, table = self.fn["clear_reading"]()
+        self.assertIsNone(reading)
+        self.assertEqual((strip["value"], strip["visible"]), ([], False))
+        self.assertEqual((heat, reply, detail, table), ("", "", "", []))
+
     def test_changing_the_layer_repaints_without_the_model(self):
         probe = self.train()[0]
         reading = self.read(probe, READ, WANTED[0])[-1][0]
