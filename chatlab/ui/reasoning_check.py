@@ -133,7 +133,8 @@ def write_csv(results):
 
 def _frame(results, status, running, *, download=None):
     return (list(results), gr.update(value=check.result_rows(results)), status,
-            gr.skip() if download is None else download, *_buttons(running))
+            gr.skip() if download is None else download,
+            *((gr.skip(),) * 5 if running is None else _buttons(running)))
 
 
 def _claim():
@@ -165,7 +166,7 @@ def run_check(kind, turns, position, picked, pattern, max_new_tokens, system_pro
     results = list(results or ())
     refused = _claim()
     if refused:
-        yield _frame(results, refused, False)
+        yield _frame(results, refused, None)
         return
     finished = False
     try:
@@ -212,7 +213,7 @@ def paraphrase_reply(turns, position, picked, max_new_tokens, system_prompt, kee
     skip = gr.skip()
     refused = _claim()
     if refused:
-        yield skip, refused, *_buttons(False)
+        yield skip, refused, *((gr.skip(),) * 5)
         return
     try:
         reply = _reply(turns, position, picked, system_prompt, keep_reasoning)

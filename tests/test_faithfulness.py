@@ -329,6 +329,13 @@ class TabTests(unittest.TestCase):
         self.assertFalse(cleared[-1]["visible"])
         self.assertIsNone(self.manager.occupant)
 
+    def test_a_competing_click_leaves_the_winners_controls_unchanged(self):
+        with mock.patch.object(self.manager, "claim_generation", return_value=GENERATING):
+            frame = self.run_tab(check.CUT)[-1]
+            self.assertEqual(frame[-5:], (gr.skip(),) * 5)
+            frame = list(reasoning_check.paraphrase_reply(self.turns, 1, self.picked, 20, "", False))[-1]
+            self.assertEqual(frame[-5:], (gr.skip(),) * 5)
+
     def test_stopping_closes_the_stream_and_gives_the_slot_back(self):
         steps = reasoning_check.run_check(check.CUT, self.turns, 1, self.picked, "", 20, "", False, [])
         next(steps)
