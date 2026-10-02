@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import queue
 import re
 import threading
@@ -305,7 +306,7 @@ class Workbench:
                 with path.open(encoding="utf-8") as handle:
                     head = json.load(handle)
                 found.append((describe(head), str(path)))
-            except (OSError, ValueError, KeyError, TypeError):
+            except (OSError, ValueError, KeyError, TypeError, OverflowError):
                 continue
         return found
 
@@ -333,6 +334,13 @@ def load_graph(path):
     if not isinstance(graph, dict) or graph.get("format") != attribution.FORMAT:
         raise ValueError("That file is not a saved attribution graph.")
     try:
+        created = graph.get("created", 0)
+        if not isinstance(created, (int, float)) or not math.isfinite(created):
+            raise ValueError
+        try:
+            time.localtime(created)
+        except (OverflowError, OSError) as exc:
+            raise ValueError from exc
         layers, tokens = graph["layers"], graph["tokens"]
         if type(layers) is not int or not 1 <= layers <= 256:
             raise ValueError
@@ -345,7 +353,7 @@ def load_graph(path):
                 or not all(type(token) is int and 0 <= token < 2 ** 31 for token in token_ids)):
             raise ValueError
         nodes, edges = graph["nodes"], graph["edges"]
-        max_nodes = min(20000, 4096 + (layers + 1) * len(tokens) + 4096)
+        max_nodes = min(20000, 4096 + (layers + 1) * len(tokens) + attribution.MAX_CHOSEN_TARGETS)
         if (not isinstance(nodes, list) or not 1 <= len(nodes) <= max_nodes
                 or not isinstance(edges, list) or len(edges) > min(200000, len(nodes) ** 2)):
             raise ValueError
@@ -353,7 +361,7 @@ def load_graph(path):
         if len(ids) != len(nodes) or not all(isinstance(value, str) for value in ids):
             raise ValueError
         limits = {"feature": 4096, "error": layers * len(tokens),
-                  "embedding": len(tokens), "target": 4096}
+                  "embedding": len(tokens), "target": attribution.MAX_CHOSEN_TARGETS}
         for kind, limit in limits.items():
             if sum(n["kind"] == kind for n in nodes) > limit:
                 raise ValueError

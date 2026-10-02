@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 FORMAT = "chatlab-attribution-graph-1"
 MAX_PREFIX = 512
 MAX_TARGETS = 10
+MAX_CHOSEN_TARGETS = 4096
 TARGET_MASS = 0.95
 # Budget for CPU edge, pruning, and sorting allocations before the run is refused.
 MAX_ROW_BYTES = 6 * 1024 ** 3
@@ -188,6 +189,8 @@ def choose_targets(recording, decode, token_ids=None, contrast=None):
     probabilities = torch.softmax(recording.logits, dim=-1)
     if token_ids:
         ids = list(dict.fromkeys(int(t) for t in token_ids))
+        if len(ids) > MAX_CHOSEN_TARGETS:
+            raise ValueError(f"Choose at most {MAX_CHOSEN_TARGETS:,} distinct target tokens.")
     else:
         order = torch.argsort(probabilities, descending=True)[:MAX_TARGETS].tolist()
         ids, mass = [], 0.0
@@ -421,6 +424,8 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
     report = progress or (lambda *_: None)
     stop = cancelled or (lambda: False)
 
+    if token_ids and len(set(token_ids)) > MAX_CHOSEN_TARGETS:
+        raise ValueError(f"Choose at most {MAX_CHOSEN_TARGETS:,} distinct target tokens.")
     report("Reading the prompt", 0, 1)
     recording = record(blocks, transcoders, ids, cancelled=stop)
     targets = choose_targets(recording, decode, token_ids, contrast)
