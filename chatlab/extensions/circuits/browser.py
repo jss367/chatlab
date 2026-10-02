@@ -116,12 +116,15 @@ def build_browser(context, bench):
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         page = {"set": spec.key, "layer": int(layer_value)}
-        mark = selected["feature"] if selected and {k: selected[k] for k in page} == page else None
-        return render.feature_list(int(layer_value), first_feature, spec.width, rows, mark), first_feature, page
+        same_page = (selected and {k: selected[k] for k in page} == page
+                     and first_feature <= selected["feature"] < first_feature + len(rows))
+        mark = selected["feature"] if same_page else None
+        return (render.feature_list(int(layer_value), first_feature, spec.width, rows, mark), first_feature, page,
+                gr.skip() if same_page else None, gr.skip() if same_page else render.feature_detail())
 
     for button, step in ((show, 0), (previous, -1), (following, 1)):
         button.click(partial(list_page, step=step),
-                     [set_choice, layer, start, chosen], [listing, start, shown],
+                     [set_choice, layer, start, chosen], [listing, start, shown, chosen, detail],
                      concurrency_id="circuits-browse")
 
     def picked(page, raw):

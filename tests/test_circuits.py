@@ -478,6 +478,30 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(rows[2], (2, None, "no record"))
         self.assertEqual(rows[3][1], {"layer": 3, "index": 3})
 
+    def test_showing_another_page_clears_the_selected_feature_and_card(self):
+        import gradio as gr
+        from functools import partial
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda *args: None))
+        records = SimpleNamespace(get=lambda layer, feature: self.record)
+        bench = SimpleNamespace(records=lambda spec: records)
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            fn = next(listener.fn for listener in demo.fns.values()
+                      if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            selected = {"set": browser.DEFAULT_SET, "layer": 3, "feature": 2}
+            same = fn(browser.DEFAULT_SET, 3, 0, selected)
+            self.assertEqual(same[3], gr.skip())
+            for key, layer, start in ((browser.DEFAULT_SET, 4, 0),
+                                      (browser.DEFAULT_SET, 3, browser.PAGE_SIZE),
+                                      ("gemma-2-2b", 3, 0)):
+                cleared = fn(key, layer, start, selected)
+                self.assertIsNone(cleared[3])
+                self.assertIn("cg-empty", cleared[4])
+        finally:
+            demo.close()
+
     def test_the_vector_is_the_decoder_row_at_the_peak_activation(self):
         spec = transcoders.spec_for("google/gemma-3-1b-it")
         with mock.patch.object(transcoders, "decoder_row", return_value=[0.5, -1.0]) as row:
