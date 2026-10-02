@@ -53,5 +53,7 @@ torch>=2.5
 torchvision>=0.20
 # 5.3 is the first release with the Metal quantizer behind the 8-bit and
 # 4-bit weight precisions; everything else runs on 4.57, so that stays the
-# floor and an older install is told which version it needs.
-transformers>=4.57,<6
+# floor and an older install is told which version it needs. 5.18 is the
+# ceiling because it accepts only kernels 0.17, which the pin above
+# excludes, and so refuses the 8-bit and 4-bit loads.
+transformers>=4.57,<5.18

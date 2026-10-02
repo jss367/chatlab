@@ -20,6 +20,7 @@ import numpy as np
 
 from chatlab import jacobian_lens
 from chatlab import kv_cache
+from chatlab import model_loading
 from chatlab import steering as steering_vectors
 from chatlab.device_memory import reraise_out_of_memory
 from chatlab.text_generation import ModelChanged
@@ -583,20 +584,20 @@ class InspectionMixin:
     def model_revision(self) -> str | None:
         """The loaded checkpoint's revision, or ``None`` when it is not recorded.
 
-        A Transformers config carries the resolved commit hash; an MLX
-        conversion is loaded from a cache snapshot whose folder is named for
-        its commit. Same ID, different revision means different weights, so
-        this is what a lens written down for the model is compared against.
+        Either backend loads from a cache snapshot whose folder is named for
+        its commit: a Transformers model carries the one it was read at (see
+        :func:`model_loading.checkpoint_revision`), and an MLX conversion's
+        is its snapshot's. Same ID, different revision means different
+        weights, so this is what a lens written down for the model is
+        compared against.
         """
         with self._lock:
             if not self.loaded:
                 return None
             if self._engine().backend == "torch":
-                revision = getattr(getattr(self.model, "config", None), "_commit_hash", None)
-            else:
-                path = self.local_path
-                revision = path.name if path is not None and path.parent.name == "snapshots" else None
-            return revision if isinstance(revision, str) else None
+                return model_loading.checkpoint_revision(self.model)
+            path = self.local_path
+            return model_loading.snapshot_revision(path) if path is not None else None
 
     def import_jacobian_lens(self, path: str, fitted_model_id: str) -> dict:
         """Validate a reference lens file; caller owns the generation reservation.
@@ -613,7 +614,9 @@ class InspectionMixin:
             engine = self._engine()
             if engine.backend == "torch" and self.precision not in (None, "full"):
                 raise ValueError("Load full-precision weights for Jacobian inspection.")
-            lens = jacobian_lens.FittedLens.load(path, engine, self.model_id, fitted_model_id)
+            lens = jacobian_lens.FittedLens.load(
+                path, engine, self.model_id, fitted_model_id, revision
+            )
             import_id = os.urandom(16).hex()
             self._jacobian_lens = (self.load_id, import_id, lens)
             return {

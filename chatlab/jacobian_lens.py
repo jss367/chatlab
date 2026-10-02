@@ -154,7 +154,13 @@ class FittedLens:
     name: str
 
     @classmethod
-    def load(cls, path, engine, model_id: str, fitted_model_id: str):
+    def load(cls, path, engine, model_id: str, fitted_model_id: str, model_revision: str | None):
+        """Read and check the lens at ``path`` against the loaded model.
+
+        ``model_revision`` is the loaded checkpoint's, as
+        :meth:`ModelManager.model_revision` reports it; a Transformers lens
+        that records a revision is refused over any other, unknown included.
+        """
         import torch
 
         layout = model_layout(engine)
@@ -172,7 +178,7 @@ class FittedLens:
             raise ValueError("The lens file names a different model.")
         revision = data.get("model_revision")
         if layout.backend == "torch" and revision is not None:
-            if revision != getattr(engine.model.config, "_commit_hash", None):
+            if revision != model_revision:
                 raise ValueError("The lens file's model revision does not match the loaded checkpoint.")
         width = data.get("d_model")
         if type(width) is not int or width != layout.width:
