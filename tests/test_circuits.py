@@ -13,7 +13,8 @@ from unittest import mock
 import torch
 
 from chatlab.extension_api import ModelService
-from chatlab.extensions.circuits import architecture, attribution, interventions, render, transcoders, workbench
+from chatlab.extensions.circuits import (architecture, attribution, browser, interventions, render, transcoders,
+                                        workbench)
 from chatlab.extensions.registry import load_enabled
 from fakes import FakeManager
 
@@ -431,6 +432,86 @@ class TranscoderTests(unittest.TestCase):
                     records.get(3, 7)
 
 
+class BrowserTests(unittest.TestCase):
+    record = {"act_max": 40.0, "activation_frequency": 0.002, "top_logits": [" Paris", "<b>"],
+              "bottom_logits": [" x"],
+              "examples_quantiles": [{"examples": [
+                  {"tokens": ["in", " France", "."], "tokens_acts_list": [0.0, 9.0, 1.0]},
+                  {"tokens": [" France", " is"], "tokens_acts_list": [5.0, 0.0]},
+                  {"tokens": ["<y>", "z"], "tokens_acts_list": [2.0, 0.0]},
+                  {"tokens": ["bad"], "tokens_acts_list": []},
+              ]}, {"examples": [{"tokens": ["later"], "tokens_acts_list": [1.0]}]}]}
+
+    def test_top_tokens_count_each_top_examples_peak(self):
+        self.assertEqual(render.top_tokens(self.record), [(" France", 2), ("<y>", 1)])
+        self.assertEqual(render.top_tokens({}), [])
+
+    def test_the_list_shows_each_feature_and_marks_the_chosen_one(self):
+        rows = [(100, self.record, None), (101, None, "The Hub answered 404.")]
+        html = render.feature_list(5, 100, 16384, rows, selected=100)
+        self.assertIn("features 100–101 of 16,384", html)
+        self.assertIn('<tr data-feature="100" class="sel">', html)
+        self.assertIn("×2", html)
+        self.assertIn("&lt;b&gt;", html)
+        self.assertIn("0.200%", html)
+        self.assertIn("The Hub answered 404.", html)
+        detail = render.feature_detail(5, 100, self.record)
+        self.assertIn("feature 100", detail)
+        self.assertIn("40", detail)
+        self.assertIn('class="peak"', detail)
+        self.assertIn("unavailable", render.feature_detail(5, 101, None, "gone"))
+        self.assertIn("cg-empty", render.feature_detail())
+
+    def test_pages_stay_inside_the_layer_and_failed_records_are_kept(self):
+        spec = transcoders.spec_for("google/gemma-3-1b-it")
+        self.assertEqual(browser.page_start(spec, -5), 0)
+        self.assertEqual(browser.page_start(spec, 10 ** 9), spec.width - browser.PAGE_SIZE)
+
+        class Records:
+            def get(self, layer, feature):
+                if feature == 2:
+                    raise OSError("no record")
+                return {"layer": layer, "index": feature}
+
+        rows = browser.fetch_page(Records(), 3, 0, count=4)
+        self.assertEqual([r[0] for r in rows], [0, 1, 2, 3])
+        self.assertEqual(rows[2], (2, None, "no record"))
+        self.assertEqual(rows[3][1], {"layer": 3, "index": 3})
+
+    def test_the_vector_is_the_decoder_row_at_the_peak_activation(self):
+        spec = transcoders.spec_for("google/gemma-3-1b-it")
+        with mock.patch.object(transcoders, "decoder_row", return_value=[0.5, -1.0]) as row:
+            vector = browser.feature_vector(spec, 7, 11, self.record, 3.0, "Google/Gemma-3-1B-IT")
+            row.assert_called_once_with(spec, 7, 11)
+            self.assertEqual(vector["vector"], [20.0, -40.0])
+            self.assertEqual((vector["layer"], vector["strength"], vector["enabled"]), (7, 3.0, True))
+            self.assertEqual(vector["model_id"], "Google/Gemma-3-1B-IT")
+            # No record: the row as published. Another model loaded: the set's own.
+            vector = browser.feature_vector(spec, 7, 11, None, 1.0, "Qwen/Qwen3-0.6B")
+            self.assertEqual(vector["vector"], [0.5, -1.0])
+            self.assertEqual(vector["model_id"], "google/gemma-3-1b-it")
+
+    def test_one_decoder_row_is_read_from_the_layer_file(self):
+        from safetensors.torch import save_file
+
+        spec = transcoders.TranscoderSpec("tiny", "Tiny", ("org/tiny",), "org/tiny-tc", "", layers=2, width=3,
+                                          d_model=2, weights_gb=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layer_1.safetensors"
+            save_file({"W_dec": torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])}, str(path))
+            with mock.patch("huggingface_hub.hf_hub_download", return_value=str(path)) as download:
+                self.assertEqual(transcoders.decoder_row(spec, 1, 2), [5.0, 6.0])
+                self.assertEqual(download.call_args.args, ("org/tiny-tc", "layer_1.safetensors"))
+                with self.assertRaisesRegex(ValueError, "features 0–2"):
+                    transcoders.decoder_row(spec, 1, 3)
+                with self.assertRaisesRegex(ValueError, "layers 0–1"):
+                    transcoders.decoder_row(spec, 2, 0)
+            save_file({"W_dec": torch.zeros(3, 5)}, str(path))
+            with mock.patch("huggingface_hub.hf_hub_download", return_value=str(path)):
+                with self.assertRaisesRegex(ValueError, "shape"):
+                    transcoders.decoder_row(spec, 1, 0)
+
+
 class ModelAccessTests(unittest.TestCase):
     def manager(self, backend="torch", precision="full"):
         manager = FakeManager()
@@ -472,6 +553,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual([e.spec.id for e in loaded], ["circuits"])
         self.assertIn("circuits-pick", loaded[0].js)
+        self.assertIn("circuits-feature-pick", loaded[0].js)
 
 
 if __name__ == "__main__":

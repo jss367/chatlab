@@ -14,6 +14,7 @@ import gradio as gr
 from chatlab.ui.token_menu import MENU_BRIDGE_CLASS
 
 from . import render, transcoders
+from .browser import build_browser
 from .attribution import Cancelled, Settings
 from .interventions import DEFAULT_BOOST
 from .workbench import Workbench, load_graph, parse_prefixes, parse_tokens
@@ -51,6 +52,13 @@ JS = r"""
       }
       svg.querySelectorAll('.cg-node[data-node]').forEach(n => n.classList.toggle('sel', chosen.includes(n.dataset.node)));
       write('#circuits-pick', JSON.stringify({selected: chosen, focus: id, nonce: Date.now()}));
+      return;
+    }
+    const row = event.target.closest('#circuits-feature-list tr[data-feature]');
+    if (row) {
+      row.closest('tbody').querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
+      row.classList.add('sel');
+      write('#circuits-feature-pick', JSON.stringify({feature: Number(row.dataset.feature), nonce: Date.now()}));
       return;
     }
     const group = event.target.closest('#circuits-groups .cg-group[data-group]');
@@ -123,90 +131,94 @@ def build_page(context):
                     "replaced by a transcoder, attention and normalization are frozen, and every edge is one "
                     "feature's direct effect on another. The graph is a claim about the model; the "
                     "interventions under **Groups** test it on the real one.")
-        with gr.Row():
-            status = gr.Markdown(status_text(bench.status()))
-        with gr.Row():
-            wanted = gr.Textbox(value="google/gemma-3-1b-it", visible=False)
-            open_models = gr.Button("Open Models", size="sm", scale=0)
-            context.navigation.open_models(open_models, wanted)
-            refresh = gr.Button("Refresh", size="sm", scale=0)
-            load_button = gr.Button("Load transcoders", size="sm", scale=0)
-            unload_button = gr.Button("Unload transcoders", size="sm", scale=0)
-        with gr.Row(equal_height=False):
-            with gr.Column(scale=1, min_width=320):
-                with gr.Accordion("System prompt", open=False):
-                    system = gr.Textbox(label="System prompt", lines=3, show_label=False)
-                user = gr.Textbox(label="User message", lines=4, value=EXAMPLE)
-                prefix = gr.Textbox(label="Reply so far", lines=3,
-                                    info="The reply starts with this text. The graph explains the token after it.")
-                raw = gr.Checkbox(label="Plain text, no chat template", value=False,
-                                  info="For base models: the user message is the whole prompt.")
-                explain = gr.Radio(list(EXPLAIN), value="The likeliest next tokens", label="Explain")
-                explain_tokens = gr.Textbox(label="Tokens, one per line", lines=3, visible=False,
-                                            info='Keep leading spaces. Type \\n for a line break.')
-                explain_others = gr.Textbox(label="Other tokens, one per line", lines=3, visible=False)
-                with gr.Accordion("Graph size", open=False):
-                    max_nodes = gr.Slider(32, 4096, value=400, step=32, label="Features to trace")
-                    node_threshold = gr.Slider(0.5, 1.0, value=0.8, step=0.01, label="Keep features holding this share of influence")
-                    edge_threshold = gr.Slider(0.5, 1.0, value=0.98, step=0.01, label="Keep edges holding this share of influence")
-                    batch = gr.Slider(1, 128, value=32, step=1, label="Targets per backward pass")
+        with gr.Tabs():
+            with gr.Tab("Trace"):
                 with gr.Row():
-                    trace = gr.Button("Trace", variant="primary")
-                    stop = gr.Button("Stop")
-                progress = gr.Markdown("")
-                with gr.Accordion("Saved graphs", open=False):
-                    saved = gr.Dropdown(label="Open a saved graph", choices=bench.saved(), value=None)
-                    upload = gr.File(label="Open a graph file", file_types=[".json"], type="filepath")
-                    download = gr.File(label="This graph", interactive=False)
-            with gr.Column(scale=3):
-                with gr.Tabs():
-                    with gr.Tab("Graph"):
+                    status = gr.Markdown(status_text(bench.status()))
+                with gr.Row():
+                    wanted = gr.Textbox(value="google/gemma-3-1b-it", visible=False)
+                    open_models = gr.Button("Open Models", size="sm", scale=0)
+                    context.navigation.open_models(open_models, wanted)
+                    refresh = gr.Button("Refresh", size="sm", scale=0)
+                    load_button = gr.Button("Load transcoders", size="sm", scale=0)
+                    unload_button = gr.Button("Unload transcoders", size="sm", scale=0)
+                with gr.Row(equal_height=False):
+                    with gr.Column(scale=1, min_width=320):
+                        with gr.Accordion("System prompt", open=False):
+                            system = gr.Textbox(label="System prompt", lines=3, show_label=False)
+                        user = gr.Textbox(label="User message", lines=4, value=EXAMPLE)
+                        prefix = gr.Textbox(label="Reply so far", lines=3,
+                                            info="The reply starts with this text. The graph explains the token after it.")
+                        raw = gr.Checkbox(label="Plain text, no chat template", value=False,
+                                          info="For base models: the user message is the whole prompt.")
+                        explain = gr.Radio(list(EXPLAIN), value="The likeliest next tokens", label="Explain")
+                        explain_tokens = gr.Textbox(label="Tokens, one per line", lines=3, visible=False,
+                                                    info='Keep leading spaces. Type \\n for a line break.')
+                        explain_others = gr.Textbox(label="Other tokens, one per line", lines=3, visible=False)
+                        with gr.Accordion("Graph size", open=False):
+                            max_nodes = gr.Slider(32, 4096, value=400, step=32, label="Features to trace")
+                            node_threshold = gr.Slider(0.5, 1.0, value=0.8, step=0.01, label="Keep features holding this share of influence")
+                            edge_threshold = gr.Slider(0.5, 1.0, value=0.98, step=0.01, label="Keep edges holding this share of influence")
+                            batch = gr.Slider(1, 128, value=32, step=1, label="Targets per backward pass")
                         with gr.Row():
-                            nodes_shown = gr.Slider(5, 200, value=40, step=1, label="Features shown")
-                            show_errors = gr.Checkbox(label="Show transcoder error nodes", value=False)
-                        with gr.Row(equal_height=False):
-                            with gr.Column(scale=5):
-                                graph_view = gr.HTML(NO_GRAPH, elem_id="circuits-graph")
-                            with gr.Column(scale=2, min_width=340):
-                                card = gr.HTML(render.feature_card(None))
+                            trace = gr.Button("Trace", variant="primary")
+                            stop = gr.Button("Stop")
+                        progress = gr.Markdown("")
+                        with gr.Accordion("Saved graphs", open=False):
+                            saved = gr.Dropdown(label="Open a saved graph", choices=bench.saved(), value=None)
+                            upload = gr.File(label="Open a graph file", file_types=[".json"], type="filepath")
+                            download = gr.File(label="This graph", interactive=False)
+                    with gr.Column(scale=3):
+                        with gr.Tabs():
+                            with gr.Tab("Graph"):
                                 with gr.Row():
-                                    label = gr.Textbox(label="Name this feature", scale=3)
-                                    rename = gr.Button("Rename", size="sm", scale=1)
-                                ablate = gr.Button("Ablate this feature", size="sm")
-                                selected_note = gr.Markdown("")
-                                with gr.Row():
-                                    group_name = gr.Textbox(label="Group name", scale=3,
-                                                            placeholder="re-evaluate: Wait / Let me")
-                                    make_group = gr.Button("Group selected", size="sm", scale=1)
-                    with gr.Tab("Groups"):
-                        groups_view = gr.HTML(render.group_view({"nodes": [], "edges": []}, {}),
-                                              elem_id="circuits-groups")
-                        with gr.Row(equal_height=False):
-                            with gr.Column(scale=1, min_width=220):
-                                group_pick = gr.Dropdown(label="Group", choices=[], value=None)
-                                remove_group = gr.Button("Delete this group", size="sm")
-                            with gr.Column(scale=3):
-                                group_card = gr.HTML(render.group_card(None, [], {"nodes": []}))
-                        with gr.Accordion("Interventions", open=True):
-                            with gr.Row():
-                                pivot = gr.Textbox(label="Pivot tokens, one per line", lines=4,
-                                                   info="P(pivot) is their summed probability.")
-                                alternatives = gr.Textbox(label="Alternatives, one per line", lines=4,
-                                                          info="Blank: the model's likeliest other tokens.")
-                            with gr.Row():
-                                boost = gr.Number(label="Boost factor", value=DEFAULT_BOOST, minimum=0, maximum=100)
-                                every_position = gr.Checkbox(
-                                    label="Change features at every position", value=False,
-                                    info="Otherwise only where the graph found them, counted back from the end.")
-                                include_prompt = gr.Checkbox(label="Include the traced prompt", value=True)
-                            prefixes = gr.Textbox(
-                                label="More replies so far, separated by lines holding only ---", lines=5,
-                                info="Each one follows the same system prompt and user message. Probabilities "
-                                     "are averaged over all of them.")
-                            with gr.Row():
-                                run = gr.Button("Run interventions", variant="primary")
-                                stop_run = gr.Button("Stop")
-                            run_progress = gr.Markdown("")
+                                    nodes_shown = gr.Slider(5, 200, value=40, step=1, label="Features shown")
+                                    show_errors = gr.Checkbox(label="Show transcoder error nodes", value=False)
+                                with gr.Row(equal_height=False):
+                                    with gr.Column(scale=5):
+                                        graph_view = gr.HTML(NO_GRAPH, elem_id="circuits-graph")
+                                    with gr.Column(scale=2, min_width=340):
+                                        card = gr.HTML(render.feature_card(None))
+                                        with gr.Row():
+                                            label = gr.Textbox(label="Name this feature", scale=3)
+                                            rename = gr.Button("Rename", size="sm", scale=1)
+                                        ablate = gr.Button("Ablate this feature", size="sm")
+                                        selected_note = gr.Markdown("")
+                                        with gr.Row():
+                                            group_name = gr.Textbox(label="Group name", scale=3,
+                                                                    placeholder="re-evaluate: Wait / Let me")
+                                            make_group = gr.Button("Group selected", size="sm", scale=1)
+                            with gr.Tab("Groups"):
+                                groups_view = gr.HTML(render.group_view({"nodes": [], "edges": []}, {}),
+                                                      elem_id="circuits-groups")
+                                with gr.Row(equal_height=False):
+                                    with gr.Column(scale=1, min_width=220):
+                                        group_pick = gr.Dropdown(label="Group", choices=[], value=None)
+                                        remove_group = gr.Button("Delete this group", size="sm")
+                                    with gr.Column(scale=3):
+                                        group_card = gr.HTML(render.group_card(None, [], {"nodes": []}))
+                                with gr.Accordion("Interventions", open=True):
+                                    with gr.Row():
+                                        pivot = gr.Textbox(label="Pivot tokens, one per line", lines=4,
+                                                           info="P(pivot) is their summed probability.")
+                                        alternatives = gr.Textbox(label="Alternatives, one per line", lines=4,
+                                                                  info="Blank: the model's likeliest other tokens.")
+                                    with gr.Row():
+                                        boost = gr.Number(label="Boost factor", value=DEFAULT_BOOST, minimum=0, maximum=100)
+                                        every_position = gr.Checkbox(
+                                            label="Change features at every position", value=False,
+                                            info="Otherwise only where the graph found them, counted back from the end.")
+                                        include_prompt = gr.Checkbox(label="Include the traced prompt", value=True)
+                                    prefixes = gr.Textbox(
+                                        label="More replies so far, separated by lines holding only ---", lines=5,
+                                        info="Each one follows the same system prompt and user message. Probabilities "
+                                             "are averaged over all of them.")
+                                    with gr.Row():
+                                        run = gr.Button("Run interventions", variant="primary")
+                                        stop_run = gr.Button("Stop")
+                                    run_progress = gr.Markdown("")
+            with gr.Tab("Features"):
+                build_browser(context, bench)
         # What the page's script writes when a node or a group is clicked.
         pick = gr.Textbox(elem_id="circuits-pick", elem_classes=[MENU_BRIDGE_CLASS])
         group_pick_bridge = gr.Textbox(elem_id="circuits-group-pick", elem_classes=[MENU_BRIDGE_CLASS])

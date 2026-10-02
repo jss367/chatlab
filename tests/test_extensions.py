@@ -305,6 +305,50 @@ class RegistryTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_extension_steering_button_steers_the_conversation_and_opens_chat(self):
+        from chatlab.conversation import MAIN_BRANCH, branch_sampling, new_forks
+
+        buttons = []
+        def build(context):
+            button = gr.Button("Steer")
+            strength = gr.Number(2.0)
+            def vector(amount):
+                if amount is None:
+                    raise ValueError("Pick a feature first.")
+                return {"format": "chatlab-steering-1", "model_id": "org/model", "layer": 3,
+                        "vector": [1.0, 0.0], "strength": amount}
+            context.navigation.steer_chat(button, vector, [strength])
+            buttons.append(button)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            listener = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            self.assertEqual(listener.concurrency_id, 'conversation-pane')
+            with mock.patch('gradio.Info') as info:
+                updates = listener.fn(new_forks(), 2.0)
+            self.assertIn("layer 3", info.call_args.args[0])
+            forks = updates[0]
+            held = branch_sampling(forks, MAIN_BRANCH)["steering"]
+            self.assertEqual((held["model_id"], held["layer"], held["strength"]), ("org/model", 3, 2.0))
+            self.assertEqual(held["format"], "chatlab-steering-reference-1")
+            labelled = dict(zip(listener.outputs, updates, strict=True))
+            nav = next(b for b in labelled if getattr(b, 'elem_id', None) == 'nav')
+            self.assertEqual(labelled[nav], 'Chat')
+            chat = next(b for b in labelled if getattr(b, 'elem_id', None) == 'chat-page')
+            self.assertTrue(labelled[chat]['visible'])
+            self.assertFalse(labelled[listener.outputs[-1]]['visible'])
+            enabled = next(b for b in labelled if getattr(b, 'label', None) == 'Enable steering')
+            self.assertEqual(labelled[enabled]['value'], True)
+            with self.assertRaisesRegex(gr.Error, "Pick a feature"):
+                listener.fn(new_forks(), None)
+        finally:
+            demo.close()
+
+    def test_a_host_without_steering_refuses_the_button(self):
+        with self.assertRaisesRegex(ValueError, "cannot hand"):
+            NavigationService(lambda *args: None).steer_chat(object(), lambda: None)
+
     def test_extension_tiles_sit_under_the_built_in_pages_behind_a_rule(self):
         specs = [
             ExtensionSpec('one', 'One', '', 'One', 'one_module'),

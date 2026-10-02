@@ -59,6 +59,17 @@ def import_vector(path, forks):
     return store(forks, value), *controls(value)
 
 
+def apply_vector(forks, value):
+    """Put a vector an extension built on the active conversation, as an import would."""
+    try:
+        value = compact(normalize(value))
+    except (OSError, ValueError, TypeError) as error:
+        raise gr.Error(str(error)) from error
+    if value is None:
+        raise gr.Error("There is no vector to steer with.")
+    return store(forks, value), *controls(value)
+
+
 def remove_vector(forks):
     return store(forks, None), *controls(None)
 

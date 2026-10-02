@@ -449,8 +449,9 @@ class NavigationService:
     The host wires both its navigation selection and page visibility after all
     pages exist. Extensions never need references to the host's UI components.
     """
-    def __init__(self, register_models_button):
+    def __init__(self, register_models_button, register_steering_button=None):
         self._register_models_button = register_models_button
+        self._register_steering_button = register_steering_button
 
     def open_models(self, button, model_id=None):
         """Make this button open model loading when clicked.
@@ -463,6 +464,21 @@ class NavigationService:
         the Models page, whoever named the model.
         """
         self._register_models_button(button, model_id)
+
+    def steer_chat(self, button, vector, inputs=()):
+        """Make this button put a steering vector on the Chat conversation and open Chat.
+
+        ``vector`` is called at the click with the values of ``inputs`` and
+        returns a ``chatlab-steering-1`` object, as an imported vector file
+        would hold. It replaces the vector on the conversation the reader is
+        in, which the Chat page's **Steering vector** controls then show and
+        adjust. A ``ValueError`` it raises is shown to the reader and nothing
+        changes. Whether the loaded model can take the vector is checked
+        before the next response, as it is for an imported one.
+        """
+        if self._register_steering_button is None:
+            raise ValueError("This host cannot hand steering vectors to Chat.")
+        self._register_steering_button(button, vector, list(inputs))
 
 
 @dataclass(frozen=True)

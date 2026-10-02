@@ -68,6 +68,16 @@ A feature's activation is read from its layer's input on the same forward pass, 
 
 **More replies so far** takes further replies, separated by lines holding only `---`. Each follows the same system prompt and user message. Probabilities are averaged over all of them, and the traced prompt is included unless unchecked. This is how a group found in one graph is tested on many prefixes, for example 60 reasoning traces cut at a paragraph break. Each group's card says how many prefixes it was active in.
 
+## Browsing features
+
+The **Features** tab lists every feature of a transcoder set, twenty at a time. No model has to be loaded to browse. Choose the **Transcoders**, a **Layer** and the **First feature**, then press **Show**; **Previous** and **Next** turn the page. Each row gives the feature's index, the tokens it fires on, the tokens its decoder promotes, and how often it is active. *Fires on* counts, over the feature's top-activating examples in the transcoder's training data, which token each example peaked on, most common first. Records are fetched from the Hub as the graph's feature card fetches them, and cached the same way, so a page that was shown once opens offline.
+
+Click a row to read the feature on the right: its highest recorded activation, activation frequency, the tokens it fires on and writes, and its top-activating contexts.
+
+**Steer by this feature** puts the feature's decoder row on the current Chat conversation as its steering vector and opens Chat. The vector is added to the residual stream after the feature's layer, at every position, which is the feature switched on everywhere. The row is scaled to the feature's highest recorded activation, so **Strength** counts multiples of that: 1 adds what the feature writes at its strongest. The default of 3 moves `google/gemma-3-1b-it` toward the feature without breaking its sentences; at 8, the features tried while writing this turned its replies to noise. A negative strength steers away from the feature. The strength, the layer and the switch are then the Chat page's own controls, under **Conversation tools → Steering vector**, and the vector is saved with the conversation like an imported one.
+
+Steering reads one layer's transcoder file, not the whole set, and downloads it first if it is not cached. The vector names the model the transcoders were trained on, so steering refuses to run until that model is loaded through Transformers.
+
 ## Saved graphs
 
 Every graph is saved when it is traced, and again whenever a feature is renamed, a group changes or interventions are run. Graphs are written as `chatlab-attribution-graph-1` JSON under the extension's data directory, in `graphs/`. Open one from **Saved graphs**, or upload a graph file. The current graph is offered as a download.

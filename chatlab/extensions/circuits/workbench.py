@@ -211,15 +211,19 @@ class Workbench:
 
     # Feature details -------------------------------------------------------
 
-    def record(self, graph, node):
-        spec = next((s for s in transcoders.CATALOGUE if s.key == graph.get("transcoders")), None)
-        if spec is None:
-            raise OSError("This graph's transcoders are not in this build's catalogue.")
+    def records(self, spec):
+        """The feature records of one transcoder set, shared by every view."""
         with self._lock:
             records = self._records.get(spec.key)
             if records is None:
                 records = self._records[spec.key] = transcoders.FeatureRecords(spec, self.data_dir / "features")
-        return records.get(node["layer"], node["feature"])
+        return records
+
+    def record(self, graph, node):
+        spec = next((s for s in transcoders.CATALOGUE if s.key == graph.get("transcoders")), None)
+        if spec is None:
+            raise OSError("This graph's transcoders are not in this build's catalogue.")
+        return self.records(spec).get(node["layer"], node["feature"])
 
     def ablate(self, graph, node, progress, cancelled):
         """Ablate one feature at its own position and read each target's change."""
