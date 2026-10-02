@@ -120,8 +120,12 @@ def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *,
         activity[name] = 0
 
     def changes(members, factor):
-        out = []
+        out, seen = [], set()
         for layer, feature, offset in members:
+            key = (layer, feature) if every_position else (layer, feature, offset)
+            if key in seen:
+                continue
+            seen.add(key)
             out.append((layer, feature, factor, None if every_position else [offset]))
         return out
 

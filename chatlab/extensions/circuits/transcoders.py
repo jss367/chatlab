@@ -21,6 +21,7 @@ import logging
 import struct
 import threading
 from dataclasses import dataclass, field
+from uuid import uuid4
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,8 @@ class Transcoders:
     b_dec: list
     threshold: list
     device: object = None
+    revision: str | None = None
+    load_id: str = field(default_factory=lambda: uuid4().hex)
     _unembedded: dict = field(default_factory=dict)
 
     @property
@@ -165,7 +168,15 @@ def _check_cancelled(cancelled):
         raise Cancelled()
 
 
-def download(spec, progress=None, cancelled=None):
+def snapshot_revision(path):
+    for parent in Path(path).parents:
+        if parent.parent.name == "snapshots" and len(parent.name) == 40:
+            if all(c in "0123456789abcdef" for c in parent.name):
+                return parent.name
+    raise ValueError("The transcoder download did not identify an immutable Hub snapshot.")
+
+
+def download(spec, progress=None, cancelled=None, revision=None):
     """Fetch every layer's weights into the Hub cache, one file at a time."""
     from huggingface_hub import hf_hub_download
 
@@ -174,21 +185,27 @@ def download(spec, progress=None, cancelled=None):
         _check_cancelled(cancelled)
         if progress is not None:
             progress(layer, spec.layers)
-        paths.append(hf_hub_download(spec.repo, spec.path(f"layer_{layer}.safetensors")))
+        path = hf_hub_download(spec.repo, spec.path(f"layer_{layer}.safetensors"), revision=revision)
         _check_cancelled(cancelled)
+        resolved = snapshot_revision(path)
+        if revision is not None and resolved != revision:
+            raise ValueError("The transcoder download returned another snapshot.")
+        revision = resolved
+        paths.append(path)
     if progress is not None:
         progress(spec.layers, spec.layers)
     return paths
 
 
-def loaded(spec, device):
+def loaded(spec, device, revision=None):
     """The set already in memory for this device, or ``None``."""
     with _LOAD_LOCK:
         held = _LOADED.get(spec.key)
-    return held if held is not None and str(held.device) == str(device) else None
+    return held if (held is not None and str(held.device) == str(device)
+                    and (revision is None or held.revision == revision)) else None
 
 
-def load(spec, device, progress=None, cancelled=None):
+def load(spec, device, progress=None, cancelled=None, revision=None):
     """Read the whole set onto ``device``, replacing any other set in memory.
 
     Only one set is held at a time: the sets are gigabytes each, and the one
@@ -198,11 +215,11 @@ def load(spec, device, progress=None, cancelled=None):
     from safetensors.torch import load_file
 
     _check_cancelled(cancelled)
-    held = loaded(spec, device)
+    held = loaded(spec, device, revision=revision)
     if held is not None:
         return held
     unload()
-    paths = download(spec, progress, cancelled)
+    paths = download(spec, progress, cancelled, revision=revision)
     parts = {"w_enc": [], "b_enc": [], "w_dec": [], "b_dec": [], "threshold": []}
     tensors, w_enc, w_dec, threshold = {}, None, None, None
     try:
@@ -232,7 +249,7 @@ def load(spec, device, progress=None, cancelled=None):
             parts["threshold"].append(None if threshold is None else place(threshold))
             tensors = {}
         _check_cancelled(cancelled)
-        held = Transcoders(spec, device=device, **parts)
+        held = Transcoders(spec, device=device, revision=snapshot_revision(paths[0]), **parts)
         with _LOAD_LOCK:
             _LOADED[spec.key] = held
         logger.info("Loaded transcoders %s onto %s", spec.key, device)

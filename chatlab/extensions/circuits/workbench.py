@@ -121,18 +121,18 @@ class Workbench:
     def _model(self, session):
         return session.transformers_model()
 
-    def _held(self, model, progress, cancelled=None):
+    def _held(self, model, progress, cancelled=None, revision=None):
         blocks = architecture.blocks(model)
         model_id = self.models.loaded_model_id()
         spec = transcoders.spec_for(model_id)
         if spec is None:
             raise ValueError(f"No transcoders are published for {model_id or 'the loaded model'}. "
                              f"Load one of: {', '.join(transcoders.supported_models())}.")
-        held = transcoders.loaded(spec, blocks.device)
+        held = transcoders.loaded(spec, blocks.device, revision=revision)
         if held is None:
             held = transcoders.load(spec, blocks.device,
                                     progress=lambda done, total: progress("Reading transcoders", done, total),
-                                    cancelled=cancelled)
+                                    cancelled=cancelled, revision=revision)
         return blocks, held, spec
 
     def load_transcoders(self, progress, cancelled):
@@ -192,7 +192,8 @@ class Workbench:
                 self._describe(graph, blocks, held, decode)
                 graph.update(id=uuid4().hex, created=time.time(), model_id=session.model_id,
                              load_id=session.load_id, process_id=PROCESS_ID, model_revision=revision,
-                             transcoders=spec.key, prompt=prompt, explain=explain,
+                             transcoders=spec.key, transcoder_revision=held.revision,
+                             transcoder_load_id=held.load_id, prompt=prompt, explain=explain,
                              labels={}, groups={}, effects=None)
                 return graph
 
@@ -233,13 +234,23 @@ class Workbench:
         with self.models.open_session() as session:
             self._same_model(graph, session)
             with self._model(session) as model:
-                blocks, held, _ = self._held(model, progress, cancelled)
+                blocks, held, _ = self._held(model, progress, cancelled, revision=graph.get("transcoder_revision"))
+                self._same_transcoders(graph, held)
                 ids = graph["ids"]
                 offset = len(ids) - 1 - node["position"]
                 targets = [n for n in graph["nodes"] if n["kind"] == "target"]
                 before = interventions.run(blocks, held, ids)["log_probs"]
                 after = interventions.run(blocks, held, ids, [(node["layer"], node["feature"], 0.0, [offset])])["log_probs"]
                 return {"deltas": [_target_log_odds(t, after) - _target_log_odds(t, before) for t in targets]}
+
+    @staticmethod
+    def _same_transcoders(graph, held):
+        revision = graph.get("transcoder_revision")
+        if revision:
+            if held.revision != revision:
+                raise ValueError("This graph belongs to another transcoder revision; trace it again.")
+        elif graph.get("transcoder_load_id") != held.load_id:
+            raise ValueError("This graph belongs to another transcoder load; trace it again.")
 
     @staticmethod
     def _same_model(graph, session):
@@ -260,7 +271,8 @@ class Workbench:
         with self.models.open_session() as session:
             self._same_model(graph, session)
             with self._model(session) as model:
-                blocks, held, _ = self._held(model, progress, cancelled)
+                blocks, held, _ = self._held(model, progress, cancelled, revision=graph.get("transcoder_revision"))
+                self._same_transcoders(graph, held)
                 pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
                 alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
                 prefixes = [graph["ids"]] if include_prompt else []
