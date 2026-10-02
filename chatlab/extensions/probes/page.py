@@ -95,6 +95,10 @@ class Runs:
             self._shown[owner] = None
             return self._turns[owner]
 
+    def snapshot(self, owner):
+        with self._lock:
+            return self._turns.get(owner, 0)
+
     def live(self, owner, turn):
         with self._lock:
             return self._turns.get(owner, 0) == turn
@@ -339,7 +343,7 @@ def build_page(context):
                      chat_template, paired, pool, l2]
 
     def train_probe(probe_name, looking_for, against, wanted, unwanted, template, pairs, pooling, strength, view):
-        turn = runs.turn(view)
+        turn = runs.snapshot(view)
         positive, negative = parse_examples(wanted), parse_examples(unwanted)
         looking_for, against = (looking_for or "").strip(), (against or "").strip()
         try:

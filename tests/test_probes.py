@@ -291,6 +291,16 @@ class PageTests(unittest.TestCase):
         # The training artifact is retained even when its UI completion is stale.
         self.assertEqual(len(list(self.data.glob("*.json"))), 2)
 
+    def test_failed_training_preserves_the_displayed_reading(self):
+        probe = self.train()[0]
+        reading = self.read(probe, READ, WANTED[0])[-1][0]
+        with self.assertRaises(gr.Error):
+            self.train(wanted="only one example")
+        painted = self.fn["change_layer"](probe, reading, 1, "owner")
+        self.assertNotEqual(painted, (gr.skip(), gr.skip()))
+        note, _ = self.fn["inspect_token"](probe, reading, 1, "owner", SimpleNamespace(index=0))
+        self.assertIn("Token 1", note)
+
     def test_training_refusals_name_the_problem(self):
         with self.assertRaisesRegex(gr.Error, "2 to 64 examples of Greeting"):
             self.train(wanted="Hello")
