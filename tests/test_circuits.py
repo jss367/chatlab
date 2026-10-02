@@ -228,6 +228,15 @@ class AttributionTests(unittest.TestCase):
                                       settings=attribution.Settings(max_feature_nodes=16, batch_size=8))
             rows.assert_not_called()
 
+    def test_memory_refusal_happens_before_frozen_graph_construction(self):
+        blocks = architecture.blocks(tiny_model("gemma3"))
+        held = tiny_transcoders(blocks)
+        with mock.patch.object(attribution, "MAX_ROW_BYTES", 1), \
+                mock.patch.object(attribution, "FrozenGraph") as frozen:
+            with self.assertRaisesRegex(ValueError, "would need"):
+                attribution.attribute(blocks, held, IDS, self.decode)
+            frozen.assert_not_called()
+
     def test_contrast_needs_two_distinct_sides(self):
         _, _, recording = self.frozen("qwen3")
         with self.assertRaisesRegex(ValueError, "both sides"):
@@ -523,11 +532,47 @@ class WorkbenchTests(unittest.TestCase):
                 graph = small_graph()
                 members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
                 graph.update(groups={"old": members}, effects={"groups": {"old": {"stale": True}}})
-                changed = fn(graph, members[:1], "new", 40, False)[0]
+                changed = fn(graph, members[:1], "new", 40, False, "view")[0]
                 self.assertIsNone(changed["effects"])
                 self.assertEqual(changed["groups"]["new"], members[:1])
                 saved = workbench.load_graph(Path(directory) / "graphs" / f"{graph['id']}.json")
                 self.assertIsNone(saved["effects"])
+            finally:
+                demo.close()
+
+    def test_mutations_refresh_and_reuse_the_current_views_download(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                graph = small_graph()
+                members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
+                grouped = handlers["group_selected"](graph, members, "group", 40, False, "view")
+                offered = Path(grouped[-1])
+                self.assertEqual(json.loads(offered.read_text())["groups"], {"group": members})
+                renamed = handlers["rename_node"](grouped[0], members[0], "renamed", members, 40, False, "view")
+                self.assertEqual(Path(renamed[-1]), offered)
+                self.assertEqual(json.loads(offered.read_text())["labels"][members[0]], "renamed")
+                deleted = handlers["delete_group"](renamed[0], "group", members, 40, False, "view")
+                self.assertEqual(Path(deleted[-1]), offered)
+                self.assertEqual(json.loads(offered.read_text())["groups"], {})
+                self.assertEqual([p.name for p in offered.parent.iterdir()], ["circuit.json"])
+                # Another view gets its own owner and copy.
+                other = handlers["group_selected"](graph, members, "other", 40, False, "other")
+                self.assertNotEqual(Path(other[-1]).parent, offered.parent)
+                owner = next(component for component in demo.blocks.values()
+                             if isinstance(component, gr.State)
+                             and getattr(component.delete_callback, "__name__", None) == "forget")
+                owner.delete_callback("view")
+                self.assertFalse(offered.parent.exists())
+                self.assertTrue(Path(other[-1]).exists())
             finally:
                 demo.close()
 
