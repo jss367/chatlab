@@ -260,12 +260,49 @@ class PageTests(unittest.TestCase):
         self.assertEqual(frames[1][2], gr.skip())
         self.assertIn("Contradictions:** none", frames[-1][2])
         self.assertTrue(Path(frames[-1][8]).is_file())
+        # The download is a copy where Gradio may serve it, not the saved file itself.
+        download = Path(frames[-1][8]).resolve()
+        self.assertTrue(download.is_relative_to(Path(tempfile.gettempdir()).resolve()))
+        self.assertNotEqual(download.parent, self.data.resolve())
+        self.assertEqual(download.read_text(), (self.data / download.name).read_text())
         game = list(self.fn["play"](game, "a", "owner", 1.0, 7, 64))[-1][0]
         self.assertEqual(self.manager.calls[1]["seed"], 8)
         self.assertEqual([m["role"] for m in self.manager.calls[1]["messages"]],
                          ["system", "user", "assistant", "user"])
         saved_game = json.loads((self.data / f"{game['id']}.json").read_text())
         self.assertEqual([t["guess"] for t in saved_game["turns"]], ["Let's play.", "a"])
+        # A later response replaces the same copy rather than leaving one behind per response.
+        later = list(self.fn["play"](game, "z", "owner", 1.0, 7, 64))[-1]
+        self.assertEqual(Path(later[8]).resolve(), download)
+        self.assertEqual(sorted(p.name for p in download.parent.iterdir()), [download.name])
+        self.assertEqual(download.read_text(), (self.data / download.name).read_text())
+        # A new game's copy retires the last game's, so the directory never grows with games.
+        self.manager.replies.append("Board: _ _ _")
+        another = Path(list(self.fn["start_game"](SYSTEM, "Again.", "owner", 1.0, 7, 64))[-1][8]).resolve()
+        self.assertNotEqual(another.name, download.name)
+        self.assertEqual(sorted(p.name for p in another.parent.iterdir()), [another.name])
+        self.assertTrue((self.data / download.name).is_file())
+
+    def test_staged_download_is_removed_after_normal_process_exit(self):
+        import os
+        import subprocess
+        import sys
+        code = """
+import tempfile
+from pathlib import Path
+from unittest import mock
+import test_hangman
+case = test_hangman.PageTests()
+case.setUp()
+# Avoid writing any actual model state or touching user files.
+frames = list(case.fn['start_game'](test_hangman.SYSTEM, "Let's play.", 'owner', 1.0, 7, 64))
+print('STAGED:' + str(Path(frames[-1][8]).parent))
+"""
+        process = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env={**os.environ, "PYTHONPATH": str(Path(__file__).parent)}, check=True)
+        directory = next(line.removeprefix("STAGED:") for line in process.stdout.splitlines()
+                         if line.startswith("STAGED:"))
+        self.assertFalse(Path(directory).exists())
 
     def test_no_model_leaves_no_empty_turn_behind(self):
         self.manager.busy = True
