@@ -856,14 +856,15 @@ class BrowserTests(unittest.TestCase):
             raw_show = show
             show = lambda key, layer, start, selected: raw_show(key, layer, start, selected, "view", begin("view")[0])
             raw_pick = handlers_by_name(demo)["picked"]
-            pick = lambda page, raw: raw_pick(page, raw, "view")
+            pick = lambda page, raw: raw_pick(page, raw, "view",
+                                             handlers_by_name(demo)["begin_pick"](page, raw, "view")[0])
             old = show(browser.DEFAULT_SET, 3, 0, None)[2]
             new = show(browser.DEFAULT_SET, 4, 0, None)[2]
             records.get.reset_mock()
-            self.assertEqual(pick(new, json.dumps(dict(feature=2, page_id=old["stamp"]))), (gr.skip(), gr.skip()))
-            self.assertEqual(pick(new, json.dumps(dict(feature=99, page_id=new["stamp"]))), (gr.skip(), gr.skip()))
+            self.assertEqual(pick(new, json.dumps(dict(feature=2, page_id=old["stamp"]))), (gr.skip(),) * 3)
+            self.assertEqual(pick(new, json.dumps(dict(feature=99, page_id=new["stamp"]))), (gr.skip(),) * 3)
             records.get.assert_not_called()
-            card, selected = pick(new, json.dumps(dict(feature=2, page_id=new["stamp"])))
+            card, selected, _ = pick(new, json.dumps(dict(feature=2, page_id=new["stamp"])))
             self.assertEqual((selected["layer"], selected["feature"]), (4, 2))
             self.assertIn("feature 2", card)
             html = show(browser.DEFAULT_SET, 4, 0, None)[0]
@@ -902,6 +903,42 @@ class BrowserTests(unittest.TestCase):
             switched = handlers_by_name(demo)["choose_set"]("gemma-2-2b", "view")
             self.assertFalse(switched[-1]["interactive"])
             self.assertEqual(show(browser.DEFAULT_SET, 3, 0, None, "view", next_stamp), (gr.skip(),) * 6)
+        finally:
+            demo.close()
+
+    def test_steering_is_refused_when_another_row_is_picked(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        vectors = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs: vectors.append(fn)))
+        bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            handlers = handlers_by_name(demo)
+            begin = handlers["begin_page"]
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", begin("view")[0])[2]
+            raw = lambda feature: json.dumps(dict(feature=feature, page_id=page["stamp"]))
+            stamp = handlers["begin_pick"](page, raw(1), "view")[0]
+            selected = handlers["picked"](page, raw(1), "view", stamp)[1]
+            changed = handlers["begin_pick"](page, raw(2), "view")
+            self.assertIsNone(changed[1])
+            self.assertFalse(changed[2]["interactive"])
+            with self.assertRaisesRegex(ValueError, "Wait for"):
+                vectors[0](selected, 3, "view")
+            selected = handlers["picked"](page, raw(2), "view", changed[0])[1]
+
+            def switched_during_download(*args):
+                handlers["begin_pick"](page, raw(3), "view")
+                return {"vector": [1.0]}
+
+            with mock.patch.object(browser, "feature_vector", side_effect=switched_during_download):
+                with self.assertRaisesRegex(ValueError, "changed"):
+                    vectors[0](selected, 3, "view")
         finally:
             demo.close()
 
