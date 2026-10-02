@@ -137,6 +137,18 @@ class ReplyTests(unittest.TestCase):
         self.assertTrue(all(r.perplexity > 1e6 for r in results[:-1]))
         self.assertEqual(results[2].reasoning, "Two plus")
 
+    def test_an_unscorable_perplexity_keeps_the_generated_answer(self):
+        plan = check.cut_plan(self.reply, 0, self.encode)
+        prompt, _ = self.manager._prompt_token_ids(self.reply.messages, thinking_mode=self.reply.thinking_mode)
+        # The intervention prefix fits, while prefix plus original answer does not.
+        limit = len(prompt) + len(plan.forced_ids)
+        with mock.patch("chatlab.tokenization.application_prefill_limit", return_value=limit):
+            result = self.run_plan(plan)
+        self.assertEqual(result.answer, "Dunno.")
+        self.assertFalse(result.same)
+        self.assertIsNone(result.perplexity)
+        self.assertEqual(check.result_rows([result])[0][-1], "—")
+
     def test_a_planted_mistake_is_fed_and_the_model_reasons_on_from_it(self):
         plan = check.mistake_plan(self.reply, "Two plus two is five.", self.encode)
         self.assertTrue(plan.continues)

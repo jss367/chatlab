@@ -411,6 +411,14 @@ def original_answer_perplexity(manager, reply, prefix_ids, encode_after):
         answer = encode_after(list(prefix_ids), reply.answer)
     if not answer:
         return None
+    # Scoring replays the original answer as well as the intervention prefix.
+    # A valid generated answer can still leave too little prefill room for it.
+    from chatlab.tokenization import generation_prefill_token_limit
+    prompt_ids = reply.prompt_override_ids
+    if prompt_ids is None:
+        prompt_ids, _ = manager._prompt_token_ids(reply.messages, thinking_mode=reply.thinking_mode)
+    if len(prompt_ids) + len(prefix_ids) + len(answer) > generation_prefill_token_limit(manager.model):
+        return None
     last = yield from _generate(manager, reply, list(prefix_ids) + list(answer), 1)
     return perplexity_of(last.metrics, len(prefix_ids), len(answer))
 
