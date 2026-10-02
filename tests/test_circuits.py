@@ -571,6 +571,12 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(bench.prompt_ids(session, None, dict(raw=False, user="hello", system="", prefix=" world")), [1, 2, 3])
         session.encode_replacement.assert_called_once_with([1, 2], " world")
 
+    def test_templated_prefix_preparation_does_not_hold_the_model_lock(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        session = SimpleNamespace(prompt_ids=lambda messages: [1, 2], encode_replacement=lambda ids, text: [3])
+        with mock.patch.object(bench, "_model", side_effect=AssertionError("model lock taken")):
+            self.assertEqual(bench.encoded_prompt(session, dict(raw=False, user="hello", system="", prefix=" world")), [1, 2, 3])
+
     def test_malformed_saved_labels_and_effects_are_rejected(self):
         graph = small_graph()
         feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
@@ -1105,7 +1111,7 @@ class ModelAccessTests(unittest.TestCase):
         blocks = architecture.blocks(manager.model)
         held = tiny_transcoders(blocks)
         with mock.patch.object(bench, "_held", return_value=(blocks, held, held.spec)), \
-                mock.patch.object(bench, "prompt_ids", return_value=IDS), \
+                mock.patch.object(bench, "encoded_prompt", return_value=IDS), \
                 mock.patch.object(bench, "_describe"):
             graph = bench.trace({}, {"mode": "top"}, attribution.Settings(max_feature_nodes=16, batch_size=8),
                                 lambda *args: None, lambda: False)
