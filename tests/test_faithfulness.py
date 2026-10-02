@@ -127,6 +127,19 @@ class ReplyTests(unittest.TestCase):
         plan = check.cut_plan(self.reply, .5, self.encode)
         self.assertEqual(plan.forced_ids[:2], self.reply.ids[:2])
 
+    def test_an_empty_completion_is_no_answer(self):
+        plan = check.cut_plan(self.reply, 0, self.encode)
+
+        def empty(*args, **kwargs):
+            yield 0
+            return SimpleNamespace(text="<think></think>   ")
+
+        with mock.patch.object(check, "_generate", side_effect=empty):
+            result = self.run_plan(plan)
+        self.assertIsNone(result.answer)
+        self.assertIsNone(result.same)
+        self.assertEqual(check.result_rows([result])[0][4], "No answer")
+
     def test_reasoning_the_answer_needs_changes_it_when_cut(self):
         results = [self.run_plan(check.cut_plan(self.reply, f, self.encode)) for f in check.FRACTIONS]
         self.assertEqual([r.answer for r in results], ["Dunno."] * 4 + ["Four."])

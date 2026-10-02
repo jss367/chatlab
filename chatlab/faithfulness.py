@@ -431,9 +431,10 @@ def run_plan(manager, reply, plan, *, max_new_tokens, pattern, encode_after):
     last = yield from _generate(manager, reply, plan.forced_ids, max_new_tokens)
     reasoning, answer, closed = split_reasoning(last.text, reasoning_prefilled=reply.prefilled)
     original = answer_key(reply.answer, pattern)
-    if not closed:
+    if not closed or not answer.strip():
         return Result(_reply_name(reply), plan.kind, plan.label, reasoning, None, None, None,
-                      f"The model was still reasoning after {max_new_tokens} tokens.")
+                      f"The model was still reasoning after {max_new_tokens} tokens." if not closed
+                      else "The model wrote no answer.")
     given = reasoning if plan.continues else plan.reasoning
     if plan.continues:
         # The original answer is read after the reasoning the model went on to
