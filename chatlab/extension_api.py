@@ -266,6 +266,16 @@ class GenerationSession:
         return self._manager.model_revision()
 
     @property
+    def precision(self):
+        """The weight precision the pinned model was loaded at: ``"full"``, ``"8-bit"`` or ``"4-bit"``, or ``None``.
+
+        A quantized load approximates the same weights, so its activations
+        are close to the full load's but not equal to them.
+        """
+        self._check()
+        return self._manager.precision
+
+    @property
     def position_limit(self):
         """How many positions the pinned model can read in one pass, or ``None`` when its config does not say.
 

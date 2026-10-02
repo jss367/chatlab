@@ -166,6 +166,7 @@ class FileTests(unittest.TestCase):
             (dict(created=-1.0), "between 1970 and 3000"),
             (dict(model_revision=""), "revision"),
             (dict(model_revision=7), "revision"),
+            (dict(precision="2-bit"), "precision"),
             (dict(layers=[dict(layers[0], weights=[1e300] * len(layers[0]["weights"])), layers[1]]), "32-bit"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
@@ -345,6 +346,29 @@ class PageTests(unittest.TestCase):
         # A load that records no revision cannot be told apart, so it is not refused.
         with mock.patch.object(self.manager, "model_revision", return_value=None):
             self.assertTrue(self.read(probe, READ, "Hello")[-1][0]["token_ids"])
+
+    def test_another_precision_reads_with_a_note(self):
+        self.manager.precision = "full"
+        probe = self.train()[0]
+        self.assertEqual(probe["precision"], "full")
+        self.assertEqual(self.read(probe, READ, "Hello")[-1][3], "")
+        self.manager.precision = "4-bit"
+        frame = self.read(probe, READ, "Hello")[-1]
+        self.assertTrue(frame[0]["token_ids"])
+        self.assertIn("trained on full weights and this load is 4-bit", frame[3])
+
+    def test_the_reply_gets_what_the_prompt_leaves_of_one_reading(self):
+        probe = self.train()[0]
+        prompt = len(self.manager._prompt_token_ids([{"role": "user", "content": "Hello"}])[0])
+        def read(limit, asked):
+            with mock.patch("chatlab.extensions.probes.page.READ_LIMIT", limit):
+                return list(self.fn["read"](probe, GENERATE, "Hello", "", 0.0, 42, asked, False, False, "owner", 1))
+
+        with mock.patch.object(self.manager, "generate", wraps=self.manager.generate) as generate:
+            read(prompt + 2, prompt + 2)
+        self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 2)
+        with self.assertRaisesRegex(gr.Error, "leaves no room for a reply"):
+            read(prompt, 1)
 
     def test_a_probe_for_another_model_is_refused(self):
         probe = dict(self.train()[0], model_id="other/model")

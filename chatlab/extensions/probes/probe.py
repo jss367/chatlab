@@ -26,6 +26,7 @@ MAX_EXAMPLES = 64
 FOLDS = 5
 DEFAULT_L2 = 1.0
 POOLS = ("last", "mean")
+PRECISIONS = ("full", "8-bit", "4-bit")
 NEWTON_STEPS = 100
 # The first second of the year 3000, comfortably inside what a date can show.
 LATEST_CREATED = 32503680000.0
@@ -170,7 +171,7 @@ def _short(value):
     return float(f"{float(value):.9g}")
 
 
-def build(*, name, model_id, model_revision=None, positive_label, negative_label, positive_examples, negative_examples,
+def build(*, name, model_id, model_revision=None, precision=None, positive_label, negative_label, positive_examples, negative_examples,
           pool, chat_template, l2, layers, folds, paired=False):
     """A fitted probe as the JSON it is saved and exported as."""
     probe = {
@@ -179,6 +180,7 @@ def build(*, name, model_id, model_revision=None, positive_label, negative_label
         "name": name,
         "model_id": model_id,
         "model_revision": model_revision,
+        "precision": precision,
         "positive_label": positive_label,
         "negative_label": negative_label,
         "pool": pool,
@@ -256,6 +258,9 @@ def normalize(value):
     revision = value.get("model_revision")
     if revision is not None and (not isinstance(revision, str) or not 0 < len(revision) <= 200):
         raise ValueError("The probe's model revision must be text of at most 200 characters, or null.")
+    precision = value.get("precision")
+    if precision is not None and precision not in PRECISIONS:
+        raise ValueError("The probe's precision must be full, 8-bit, 4-bit or null.")
     created = number(value.get("created"), "creation time")
     # The saved list shows the date, so it has to be one a date can hold.
     if not 0 <= created <= LATEST_CREATED:
@@ -266,6 +271,7 @@ def normalize(value):
     return {
         "format": FORMAT, "id": probe_id, "name": text("name"), "model_id": text("model_id", 300),
         "model_revision": revision,
+        "precision": precision,
         "positive_label": positive_label, "negative_label": negative_label,
         "pool": value["pool"], "chat_template": value["chat_template"],
         "l2": number(value.get("l2"), "L2 strength"), "folds": int(number(value.get("folds"), "folds")),

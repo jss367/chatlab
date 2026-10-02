@@ -308,13 +308,13 @@ def build_page(context):
                                  f"{len(positive)} and {len(negative)}.")
             strength = float(strength)
             with context.models.open_session() as session:
-                model_id, revision = session.model_id, session.model_revision
+                model_id, revision, precision = session.model_id, session.model_revision, session.precision
                 wanted_rows = session.read_examples(positive, chat_template=template, pool=pooling)
                 unwanted_rows = session.read_examples(negative, chat_template=template, pool=pooling)
             # The model is released before fitting, which needs only the arrays.
             fitted, folds = probes.train(wanted_rows, unwanted_rows, l2=strength, paired=pairs)
             probe = probes.build(name=(probe_name or "").strip() or "Probe", model_id=model_id,
-                                 model_revision=revision,
+                                 model_revision=revision, precision=precision,
                                  positive_label=looking_for, negative_label=against,
                                  positive_examples=positive, negative_examples=negative, pool=pooling,
                                  chat_template=template, l2=strength, layers=fitted, folds=folds, paired=pairs)
@@ -383,7 +383,7 @@ def build_page(context):
             cancel = runs.start(view)
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
-        reading = None
+        reading, note = None, ""
         try:
             with context.models.open_session() as session:
                 runs.attach(view, session)
@@ -395,12 +395,24 @@ def build_page(context):
                     raise ValueError(f"This probe was trained on revision {probe['model_revision'][:12]} of "
                                      f"{probe['model_id']}, and revision {current[:12]} is loaded. "
                                      "Its directions belong to the other weights; train it again here.")
+                # Another precision approximates the same weights, so the probe
+                # still applies; how well it carries over is the reader's to judge.
+                trained_at, loaded_at = probe["precision"], session.precision
+                note = (f"This probe was trained on {trained_at} weights and this load is {loaded_at}, "
+                        "so its readings are approximate." if trained_at and loaded_at and trained_at != loaded_at
+                        else "")
                 if chosen_mode == GENERATE:
                     messages = ([{"role": "system", "content": system_text}] if system_text.strip() else [])
                     messages.append({"role": "user", "content": message})
                     limit, seed_value = int(token_limit), int(random_seed)
                     if not 1 <= limit <= READ_LIMIT or seed_value < 0:
                         raise ValueError(f"Seed must be nonnegative and tokens per reply between 1 and {READ_LIMIT:,}.")
+                    # Prompt and reply are read in one pass, so the reply gets what the prompt leaves.
+                    prompt_length = len(session.prompt_ids(messages))
+                    if prompt_length >= READ_LIMIT:
+                        raise ValueError(f"The prompt alone is {prompt_length:,} tokens, which leaves no room "
+                                         f"for a reply in a {READ_LIMIT:,}-token reading. Shorten it.")
+                    limit = min(limit, READ_LIMIT - prompt_length)
                     last = None
                     stream = session.generate(messages, temperature=float(temp), top_p=1.0, top_k=0,
                                               max_new_tokens=limit, seed=seed_value)
@@ -433,7 +445,7 @@ def build_page(context):
             raise gr.Error(str(exc)) from exc
         finally:
             runs.finish(view)
-        yield (reading, *rendered(probe, reading, chosen), "", gr.skip())
+        yield (reading, *rendered(probe, reading, chosen), note, gr.skip())
 
     run.click(lambda: ("", []), None, [detail, token_table], queue=False)
     run.click(read, [probe_state, mode, text, system, temperature, seed, max_tokens, include_prompt, as_user,
