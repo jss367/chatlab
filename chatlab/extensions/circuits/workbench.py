@@ -322,8 +322,7 @@ class Workbench:
                 alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
                 if not alternatives:
                     logits = interventions.run(blocks, held, graph["ids"])["log_probs"]
-                    ranked = [int(t) for t in logits.argsort(descending=True)[:20].tolist()]
-                    alternatives = [t for t in ranked if t not in set(pivot)][:8]
+                    alternatives = automatic_alternatives(logits, pivot)
                 nodes = {n["id"]: n for n in graph["nodes"]}
                 n = len(graph["ids"])
                 groups = {name: [(nodes[m]["layer"], nodes[m]["feature"], n - 1 - nodes[m]["position"])
@@ -522,10 +521,14 @@ def load_graph(path):
             _validate_effects(graph["effects"], graph["groups"])
         if len(graph["groups"]) > 4096:
             raise ValueError
+        memberships = set()
         for name, members in graph["groups"].items():
             if (not isinstance(name, str) or not isinstance(members, list) or len(members) > 4096
                     or not all(isinstance(member, str) and member in feature_ids for member in members)):
                 raise ValueError
+            if len(set(members)) != len(members) or memberships.intersection(members):
+                raise ValueError
+            memberships.update(members)
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise ValueError("That file is not a valid attribution graph.") from exc
     return graph
@@ -568,6 +571,12 @@ def _validate_effects(effects, groups):
     texts = effects.get("token_text", {})
     if not isinstance(texts, dict) or len(texts) > 8192 or any(not isinstance(v, str) or len(v) > 4096 for v in texts.values()):
         raise ValueError
+
+
+def automatic_alternatives(log_probs, pivot):
+    excluded = set(pivot)
+    ranked = log_probs.argsort(descending=True).tolist()
+    return [int(t) for t in ranked if t not in excluded][:8]
 
 
 def _target_log_odds(target, log_probs):

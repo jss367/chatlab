@@ -396,13 +396,23 @@ def _fetch_range(url, start, end):
 
     headers = build_hf_headers()
     headers["Range"] = f"bytes={start}-{end - 1}"
+    expected = end - start
+    if type(start) is not int or type(end) is not int or start < 0 or not 0 < expected <= 16 * 1024 * 1024:
+        raise OSError("A feature record range is invalid or too large.")
     try:
-        response = get_session().get(url, headers=headers, timeout=30, follow_redirects=True)
+        with get_session().stream("GET", url, headers=headers, timeout=30, follow_redirects=True) as response:
+            if response.status_code != 206:
+                raise OSError(f"The Hub answered {response.status_code}; feature examples need a range response.")
+            chunks, size = [], 0
+            for chunk in response.iter_bytes(chunk_size=65536):
+                size += len(chunk)
+                if size > expected:
+                    raise OSError("The feature range response exceeded the requested size.")
+                chunks.append(chunk)
+            if size != expected:
+                raise OSError("A feature range response was cut short.")
+            return b"".join(chunks)
+    except OSError:
+        raise
     except Exception as exc:
         raise OSError(f"Could not reach the Hub for feature examples: {exc}") from exc
-    if response.status_code not in (200, 206):
-        raise OSError(f"The Hub answered {response.status_code} for feature examples.")
-    data = response.content
-    if response.status_code == 200:
-        data = data[start:end]
-    return data
