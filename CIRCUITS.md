@@ -29,6 +29,8 @@ Write a user message and, optionally, the start of the reply. The graph explains
 - **Chosen tokens**: one node per token you list.
 - **Pivot tokens against others**: a single node for log P(pivot) − log P(other), where each side's probability is the sum over its tokens. This is the "pivot – other" node: what pushes the model toward *Wait*, *But* or *Hmm* and away from *So* or *The*.
 
+The publisher configurations identify each base model by repository name but do not report the exact model checkpoint used for training. ChatLab therefore marks **checkpoint compatibility as unverified**, rather than treating a matching repository name as proof. Traces record the actual loaded model revision and immutable transcoder revision. The recorded reconstruction-error terms and frozen-forward check use the actual loaded model, and interventions measure that model directly; published feature examples remain descriptions of the publisher's training data, whose calibration for a different checkpoint is unverified. If a publisher supplies an exact training revision, the catalogue can record it and ChatLab refuses other or unknown model revisions for that set.
+
 List tokens one per line. Leading spaces matter, since most vocabularies treat " Wait" and "Wait" as different tokens. Type `\n` for a line break. A line that is not exactly one token is refused, with its token count.
 
 ### What the trace does

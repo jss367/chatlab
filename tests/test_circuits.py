@@ -792,6 +792,17 @@ class WorkbenchTests(unittest.TestCase):
 
 
 class TranscoderTests(unittest.TestCase):
+    def test_training_checkpoint_provenance_is_explicit_and_known_mismatches_are_refused(self):
+        from dataclasses import replace
+        spec = transcoders.spec_for("google/gemma-3-1b-it")
+        self.assertIsNone(spec.training_model_revision)
+        self.assertFalse(transcoders.check_model_revision(spec, "a" * 40))
+        documented = replace(spec, training_model_revision="a" * 40)
+        self.assertTrue(transcoders.check_model_revision(documented, "a" * 40))
+        for loaded in (None, "b" * 40):
+            with self.assertRaisesRegex(ValueError, "exact checkpoint"):
+                transcoders.check_model_revision(documented, loaded)
+
     def test_catalogue_lookup(self):
         self.assertEqual(transcoders.spec_for("Google/Gemma-3-1B-IT").key, "gemma-3-1b-it")
         self.assertIsNone(transcoders.spec_for("allenai/Olmo-3-7B-Think"))
@@ -1073,6 +1084,8 @@ class ModelAccessTests(unittest.TestCase):
             graph = bench.trace({}, {"mode": "top"}, attribution.Settings(max_feature_nodes=16, batch_size=8),
                                 lambda *args: None, lambda: False)
             self.assertEqual(graph["model_revision"], "a" * 40)
+            self.assertIsNone(graph["training_model_revision"])
+            self.assertEqual(graph["checkpoint_compatibility"], "unverified")
             feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
             self.assertIn("deltas", bench.ablate(graph, feature, lambda *args: None, lambda: False))
 
