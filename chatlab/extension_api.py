@@ -279,9 +279,10 @@ class GenerationSession:
     def position_limit(self):
         """How many positions the pinned model can read in one pass, or ``None`` when its config does not say.
 
-        A response that runs into the window ends on one sampled token the
-        model never read, so a full reading of prompt and response can be one
-        longer than this. Trim to it before :meth:`project_layers`.
+        A response allowed to run into the window ends on one sampled token
+        the model never read, which no reading can include, so limit a
+        response's new tokens to what its prompt leaves of this before
+        reading prompt and response with :meth:`project_layers`.
         """
         self._check()
         from chatlab.tokenization import model_position_limit

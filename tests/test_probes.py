@@ -316,25 +316,11 @@ class PageTests(unittest.TestCase):
         self.assertEqual(len(self.read(probe, GENERATE, "Hello", layer=0)[-1][1]["value"]),
                          len(reading["token_ids"]) - prompt)
 
-    def test_a_reply_at_the_window_leaves_out_the_token_the_model_never_read(self):
-        probe = self.train()[0]
-        with ModelService(lambda: self.manager).open_session() as session:
-            self.assertEqual(session.position_limit, 64)
-        full = self.read(probe, GENERATE, "Hello", show_prompt=True)[-1][0]
-        window = len(full["token_ids"]) - 1
-        # Generation is left alone; only the window the reading is trimmed to moves.
-        with mock.patch("chatlab.tokenization.model_position_limit", return_value=window):
-            trimmed = self.read(probe, GENERATE, "Hello", show_prompt=True)[-1][0]
-        self.assertEqual(trimmed["token_ids"], full["token_ids"][:window])
-        self.assertEqual(len(trimmed["probabilities"][0]), window)
-
     def test_a_passage_longer_than_the_window_is_refused_not_cut_short(self):
         probe = self.train()[0]
         with mock.patch("chatlab.tokenization.model_position_limit", return_value=1):
-            # The reply is trimmed to the window; the passage is the reader's own and is not.
-            with mock.patch("chatlab.model_inspection.model_position_limit", return_value=1):
-                with self.assertRaisesRegex(gr.Error, "above the 1 one reading may be"):
-                    self.read(probe, READ, WANTED[0])
+            with self.assertRaisesRegex(gr.Error, "above the 1 one reading may be"):
+                self.read(probe, READ, WANTED[0])
 
     def test_a_probe_for_another_revision_is_refused_when_both_are_known(self):
         with mock.patch.object(self.manager, "model_revision", return_value="a" * 40):
@@ -364,11 +350,17 @@ class PageTests(unittest.TestCase):
             with mock.patch("chatlab.extensions.probes.page.READ_LIMIT", limit):
                 return list(self.fn["read"](probe, GENERATE, "Hello", "", 0.0, 42, asked, False, False, "owner", 1))
 
+        with ModelService(lambda: self.manager).open_session() as session:
+            self.assertEqual(session.position_limit, 64)
         with mock.patch.object(self.manager, "generate", wraps=self.manager.generate) as generate:
             read(prompt + 2, prompt + 2)
         self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 2)
         with self.assertRaisesRegex(gr.Error, "leaves no room for a reply"):
             read(prompt, 1)
+        # A window smaller than the cap is the limit, so a prompt that fills it is refused too.
+        with mock.patch("chatlab.tokenization.model_position_limit", return_value=prompt):
+            with self.assertRaisesRegex(gr.Error, f"no room for a reply in a {prompt}-token reading"):
+                read(prompt + 2, 1)
 
     def test_a_probe_for_another_model_is_refused(self):
         probe = dict(self.train()[0], model_id="other/model")

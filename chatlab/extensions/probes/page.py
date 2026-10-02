@@ -407,12 +407,15 @@ def build_page(context):
                     limit, seed_value = int(token_limit), int(random_seed)
                     if not 1 <= limit <= READ_LIMIT or seed_value < 0:
                         raise ValueError(f"Seed must be nonnegative and tokens per reply between 1 and {READ_LIMIT:,}.")
-                    # Prompt and reply are read in one pass, so the reply gets what the prompt leaves.
+                    # Prompt and reply are read in one pass, so the reply gets what the
+                    # prompt leaves of it: the flat cap or the model's window, whichever is less.
+                    window = session.position_limit
+                    reading_limit = READ_LIMIT if window is None else min(READ_LIMIT, window)
                     prompt_length = len(session.prompt_ids(messages))
-                    if prompt_length >= READ_LIMIT:
+                    if prompt_length >= reading_limit:
                         raise ValueError(f"The prompt alone is {prompt_length:,} tokens, which leaves no room "
-                                         f"for a reply in a {READ_LIMIT:,}-token reading. Shorten it.")
-                    limit = min(limit, READ_LIMIT - prompt_length)
+                                         f"for a reply in a {reading_limit:,}-token reading. Shorten it.")
+                    limit = min(limit, reading_limit - prompt_length)
                     last = None
                     stream = session.generate(messages, temperature=float(temp), top_p=1.0, top_k=0,
                                               max_new_tokens=limit, seed=seed_value)
@@ -428,11 +431,6 @@ def build_page(context):
                     prompt_ids = [int(value) for value in last.prompt_ids]
                     ids = prompt_ids + [int(metric["token_id"]) for metric in last.metrics]
                     first = 0 if show_prompt else len(prompt_ids)
-                    window = session.position_limit
-                    if window is not None and len(ids) > window:
-                        # A reply that ran into the window ends on a token the
-                        # model sampled but never read, so there is no reading of it.
-                        ids = ids[:window]
                 else:
                     # A passage longer than the window is refused by the reading
                     # itself rather than cut short: a prefix is not what was asked for.
