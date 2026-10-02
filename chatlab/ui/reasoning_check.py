@@ -183,6 +183,7 @@ def run_check(kind, turns, position, picked, pattern, max_new_tokens, system_pro
             running = check.run_plan(runtime.MANAGER, reply, plan, max_new_tokens=max_new_tokens, pattern=pattern,
                                      encode_after=encode_after)
             note = f"**Running** · {kind} · answer {index} of {len(plans)} · {plan.label}"
+            yield _frame(results, note, True)
             while True:
                 try:
                     tokens = next(running)
@@ -219,6 +220,7 @@ def paraphrase_reply(turns, position, picked, max_new_tokens, system_prompt, kee
         # for a model that reasons before it writes one.
         budget = max(int(max_new_tokens), 2 * len(reply.ids) + 256)
         writing = check.write_paraphrase(runtime.MANAGER, reply, budget)
+        yield skip, "**Writing a paraphrase**", *_buttons(True)
         while True:
             try:
                 tokens = next(writing)

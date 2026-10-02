@@ -498,7 +498,8 @@ def result_rows(results):
 def result_detail(result):
     """The reasoning one result was given and the answer it got, in full, as Markdown."""
     def block(text):
-        fence = "````" if "```" in (text or "") else "```"
+        longest = max((len(run) for run in re.findall(r"`+", text or "")), default=0)
+        fence = "`" * max(3, longest + 1)
         return f"{fence}text\n{text}\n{fence}"
 
     given = block(result.reasoning) if result.reasoning.strip() else "None."

@@ -277,6 +277,34 @@ class TabTests(unittest.TestCase):
             frames = self.run_tab(check.CUT)
         self.assertEqual(frames[-1][2], reasoning_check.BUSY)
 
+    def test_stop_is_visible_before_the_first_prefill(self):
+        def expensive_run(*args, **kwargs):
+            raise AssertionError("The first prefill ran before Stop was published")
+            yield
+        with mock.patch.object(check, "run_plan", side_effect=expensive_run):
+            steps = reasoning_check.run_check(check.CUT, self.turns, 1, self.picked, "", 20, "", False, [])
+            frame = next(steps)
+            self.assertTrue(frame[-1]["visible"])
+            steps.close()
+        self.assertIsNone(self.manager.occupant)
+        with mock.patch.object(check, "write_paraphrase", side_effect=expensive_run):
+            steps = reasoning_check.paraphrase_reply(self.turns, 1, self.picked, 20, "", False)
+            frame = next(steps)
+            self.assertTrue(frame[-1]["visible"])
+            steps.close()
+        self.assertIsNone(self.manager.occupant)
+
+    def test_detail_fences_are_longer_than_any_content_backtick_run(self):
+        result = self.run_tab(check.MISTAKE, "Two plus two is five.")[-1][0][0]
+        from dataclasses import replace
+        for count in (3, 4, 5, 12):
+            content = "before\n" + "`" * count + "\nafter"
+            detail = check.result_detail(replace(result, reasoning=content, answer=content))
+            fence = "`" * (count + 1)
+            self.assertEqual(detail.count(fence + "text\n"), 2)
+            self.assertEqual(detail.splitlines().count(fence), 2)
+            self.assertEqual(detail.count(content), 2)
+
     def test_stopping_closes_the_stream_and_gives_the_slot_back(self):
         steps = reasoning_check.run_check(check.CUT, self.turns, 1, self.picked, "", 20, "", False, [])
         next(steps)
