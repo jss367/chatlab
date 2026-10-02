@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import re
+import tempfile
 import threading
 from collections import Counter
 from pathlib import Path
@@ -283,13 +284,21 @@ def build_page(context):
     inspector = [detail, alternatives]
 
     def save(game):
+        """Save the game and return a copy of it where the interface may serve it.
+
+        Gradio only serves returned files from its temporary directories and
+        the working directory, and the extension's data directory is neither
+        when the app is started from a checkout.
+        """
         text = saved(game)
         if len(text.encode("utf-8")) > MAX_FILE_BYTES:
             raise OSError("the game is larger than a saved game can be opened at")
         path = context.data_dir / f"{game['id']}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         write_private_text(path, text)
-        return str(path)
+        copy_path = Path(tempfile.mkdtemp(prefix="chatlab-hangman-")) / path.name
+        write_private_text(copy_path, text)
+        return str(copy_path)
 
     def respond(game, session_id, text, temp, random_seed, token_limit, edit=None):
         """Generate one reply to ``text`` at the end of ``game``, streaming frames.

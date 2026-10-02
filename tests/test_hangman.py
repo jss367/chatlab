@@ -260,6 +260,11 @@ class PageTests(unittest.TestCase):
         self.assertEqual(frames[1][2], gr.skip())
         self.assertIn("Contradictions:** none", frames[-1][2])
         self.assertTrue(Path(frames[-1][8]).is_file())
+        # The download is a copy where Gradio may serve it, not the saved file itself.
+        download = Path(frames[-1][8]).resolve()
+        self.assertTrue(download.is_relative_to(Path(tempfile.gettempdir()).resolve()))
+        self.assertNotEqual(download.parent, self.data.resolve())
+        self.assertEqual(download.read_text(), (self.data / download.name).read_text())
         game = list(self.fn["play"](game, "a", "owner", 1.0, 7, 64))[-1][0]
         self.assertEqual(self.manager.calls[1]["seed"], 8)
         self.assertEqual([m["role"] for m in self.manager.calls[1]["messages"]],
