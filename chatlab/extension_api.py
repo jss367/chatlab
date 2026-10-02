@@ -215,6 +215,45 @@ class GenerationSession:
         self._check()
         return set(self._manager.hidden_token_ids())
 
+    def example_ids(self, text, *, chat_template=False):
+        """The token IDs one example is read as, by :meth:`read_examples` and Chat's vector extraction.
+
+        With ``chat_template`` the text is put in a user turn and followed by
+        the generation prompt, so the last position is where the model would
+        answer from; without it the text is read as a passage, with whatever
+        marker the tokenizer opens one with. A model with no template reads
+        the passage either way.
+        """
+        self._check()
+        return [int(value) for value in self._manager._example_ids(str(text), bool(chat_template))]
+
+    def read_examples(self, texts, *, chat_template=False, pool="last"):
+        """Each example's decoder block outputs, pooled to one vector per block.
+
+        A NumPy array of shape ``(examples, blocks, width)``, read exactly as
+        Chat reads the examples a steering vector is extracted from: ``pool``
+        is ``"last"`` for the final position or ``"mean"`` for the average,
+        and block ``n`` is the output a steering vector at layer ``n`` would
+        be added to. Needs a PyTorch load; an MLX one is refused with
+        ``SteeringError``.
+        """
+        self._check()
+        return self._manager.read_examples(
+            list(texts), use_chat_template=bool(chat_template), pool=pool, load_id=self.load_id,
+        )
+
+    def project_layers(self, ids, directions):
+        """Read every position of a token sequence along one direction per block.
+
+        ``directions`` is one vector per decoder block, shaped
+        ``(blocks, width)``. Returns a NumPy array shaped
+        ``(blocks, positions)`` of dot products between each block's output
+        at each position and that block's direction, from one forward pass
+        that keeps nothing else. Needs a PyTorch load, as :meth:`read_examples`.
+        """
+        self._check()
+        return self._manager.project_blocks(list(ids), directions, load_id=self.load_id)
+
     def check_steering(self, steering):
         """Raise ``ValueError`` if the pinned model cannot take this vector.
 
@@ -287,6 +326,22 @@ class TokenInspector:
         from chatlab.token_metrics import DEFAULT_COLOR_SCALE
         from chatlab.ui.panel import strip_value
         return strip_value(metrics, DEFAULT_COLOR_SCALE)
+
+    @property
+    def palette(self):
+        """The fills ChatLab paints its scales with, so an extension's own scale matches.
+
+        ``sequential`` runs from cool to warm in five steps; ``diverging``
+        runs from red through a neutral middle to blue; ``unscored`` is the
+        grey a token with no measurement is painted.
+        """
+        from chatlab.token_metrics import DIVERGING_FILLS, SEQUENTIAL_FILLS, UNSCORED_FILL
+        return {"sequential": SEQUENTIAL_FILLS, "diverging": DIVERGING_FILLS, "unscored": UNSCORED_FILL}
+
+    def display_text(self, text, fallback=""):
+        """A token's text as the strip shows it, with whitespace and empty tokens made visible."""
+        from chatlab.token_metrics import display_token
+        return display_token(text, fallback)
 
     def describe(self, metric):
         from chatlab.ui.panel import describe_token

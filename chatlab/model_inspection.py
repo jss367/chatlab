@@ -476,6 +476,167 @@ class InspectionMixin:
             )
         return np.stack(captured)
 
+    def _reading_blocks(self, load_id, *, missing: str, changed: str, mlx: str):
+        """The decoder blocks a forward hook reads, once the load is checked.
+
+        Shared by everything that reads the residual stream out of the model
+        rather than generating from it: a steering extraction, a probe's
+        examples and a probe's reading of a passage. Each says in its own
+        words what was being read when it is refused. Called under the model
+        lock, inside inference mode.
+        """
+
+        if not self.loaded:
+            raise RuntimeError(missing)
+        if load_id is not None and load_id != self.load_id:
+            raise ModelChanged(
+                f"The model in memory is {self.model_id}, not the one {changed}. Ask again."
+            )
+        if self._engine().backend != "torch":
+            raise steering_vectors.SteeringError(mlx)
+        # Refuse an architecture the vector could not be added back to,
+        # here rather than at the end of a pass over every example. This
+        # is the same block list the steering hook installs on.
+        blocks = steering_vectors.decoder_layers(self.model)
+        self._drop_inspect_cache()
+        return blocks
+
+    def _example_readings(self, examples, use_chat_template: bool, pool: str, blocks) -> list[np.ndarray]:
+        """Every example read at every block, pooled, one array per example."""
+
+        window = model_position_limit(self.model)
+        limit = STEERING_EXAMPLE_TOKEN_LIMIT
+        if window is not None:
+            limit = min(limit, window)
+        readings = []
+        for index, example in enumerate(examples, start=1):
+            ids = self._example_ids(example, use_chat_template)
+            if not ids:
+                raise ValueError(f"Example {index} did not produce any tokens.")
+            if len(ids) > limit:
+                raise ValueError(
+                    f"Example {index} is {len(ids):,} tokens, above the "
+                    f"{limit:,} one example may be. Shorten it."
+                )
+            readings.append(self._pooled_block_outputs(ids, blocks, pool))
+        return readings
+
+    @_guards_device_memory
+    def read_examples(
+        self,
+        examples: Sequence[str],
+        *,
+        use_chat_template: bool = False,
+        pool: str = "last",
+        load_id: str | None = None,
+    ) -> np.ndarray:
+        """Every decoder block's output for each example, pooled as a steering extraction pools it.
+
+        One row per example, one pooled vector per block: the same reading
+        :meth:`extract_steering` takes the difference in means of, returned
+        whole for a caller fitting something else to it, such as a probe.
+        Read through the same hooks, so what is fitted here is defined
+        against the tensor a steering vector would be added to.
+        """
+
+        if pool not in STEERING_POOLS:
+            raise ValueError("Pool the examples by their last token or their mean.")
+        examples = [str(value) for value in examples]
+        if not examples:
+            raise ValueError("Give at least one example.")
+
+        import torch
+
+        with self._lock, torch.inference_mode():
+            blocks = self._reading_blocks(
+                load_id,
+                missing="Load a model before reading examples through it.",
+                changed="these examples were to be read through",
+                mlx=(
+                    "Reading examples needs a PyTorch model: the reading is "
+                    "taken through a forward hook, which an MLX checkpoint has "
+                    "nowhere to put. Load the model's unquantized Transformers "
+                    "version instead."
+                ),
+            )
+            return np.stack(self._example_readings(examples, use_chat_template, pool, blocks))
+
+    @_guards_device_memory
+    def project_blocks(self, token_ids: Sequence[int], directions, *, load_id: str | None = None) -> np.ndarray:
+        """Every position's block output, read along one direction per block.
+
+        ``directions`` holds one vector per decoder block, indexed as the
+        steering hook indexes them. The answer has a row per block and a
+        column per position: the dot product of that block's output at that
+        position with that block's direction. Only the products leave the
+        hook, so a passage of a few thousand tokens costs one forward pass
+        and a few numbers per token, never every layer's full sequence.
+        """
+
+        import torch
+
+        ids = [int(value) for value in token_ids]
+        if not ids:
+            raise ValueError("There are no tokens to read.")
+        directions = np.asarray(directions, dtype=np.float32)
+        with self._lock, torch.inference_mode():
+            blocks = self._reading_blocks(
+                load_id,
+                missing="Load a model before reading a passage through it.",
+                changed="this passage was to be read through",
+                mlx=(
+                    "Reading a passage along a direction needs a PyTorch model: "
+                    "the reading is taken through a forward hook, which an MLX "
+                    "checkpoint has nowhere to put. Load the model's unquantized "
+                    "Transformers version instead."
+                ),
+            )
+            if directions.ndim != 2 or directions.shape[0] != len(blocks):
+                raise ValueError(
+                    f"Give one direction for each of this model's {len(blocks)} decoder blocks."
+                )
+            window = model_position_limit(self.model)
+            if window is not None and len(ids) > window:
+                raise ValueError(
+                    f"That is {len(ids):,} tokens, above the {window:,} this model can read at once."
+                )
+            device = next(self.model.parameters()).device
+            captured: list[np.ndarray | None] = [None] * len(blocks)
+
+            def record(index: int):
+                def capture(_module, _inputs, output):
+                    hidden = output[0] if isinstance(output, tuple) else output
+                    if not isinstance(hidden, torch.Tensor) or hidden.dim() != 3:
+                        raise steering_vectors.SteeringError(
+                            "This model's decoder blocks do not return a residual "
+                            "tensor a direction could be read along."
+                        )
+                    if hidden.shape[-1] != directions.shape[1]:
+                        raise ValueError(
+                            f"These directions are {directions.shape[1]:,} wide; this "
+                            f"model's blocks are {hidden.shape[-1]:,}."
+                        )
+                    direction = torch.from_numpy(directions[index]).to(device=hidden.device)
+                    captured[index] = (hidden[0].float() @ direction).cpu().numpy()
+
+                return capture
+
+            handles = [block.register_forward_hook(record(index)) for index, block in enumerate(blocks)]
+            try:
+                self.model(
+                    input_ids=torch.tensor([ids], dtype=torch.long, device=device),
+                    use_cache=False,
+                )
+            finally:
+                for handle in handles:
+                    handle.remove()
+            if any(row is None for row in captured):
+                raise steering_vectors.SteeringError(
+                    "Some of this model's decoder blocks did not run, so the "
+                    "passage could not be read at them."
+                )
+            return np.stack(captured).astype(np.float64)
+
     @_guards_device_memory
     def extract_steering(
         self,
@@ -521,47 +682,22 @@ class InspectionMixin:
         import torch
 
         with self._lock, torch.inference_mode():
-            if not self.loaded:
-                raise RuntimeError("Download and load a model before extracting a vector.")
-            if load_id is not None and load_id != self.load_id:
-                raise ModelChanged(
-                    f"The model in memory is {self.model_id}, not the one these "
-                    "examples were to be read through. Ask again."
-                )
-            engine = self._engine()
-            if engine.backend != "torch":
-                raise steering_vectors.SteeringError(
+            blocks = self._reading_blocks(
+                load_id,
+                missing="Download and load a model before extracting a vector.",
+                changed="these examples were to be read through",
+                mlx=(
                     "Extracting a vector needs a PyTorch model: the reading is "
                     "taken through a forward hook, which an MLX checkpoint has "
                     "nowhere to put. Load the model's unquantized Transformers "
                     "version to extract from it."
-                )
-            # Refuse an architecture the vector could not be added back to,
-            # here rather than at the end of a pass over every example. This
-            # is the same block list the steering hook installs on.
-            blocks = steering_vectors.decoder_layers(self.model)
-            self._drop_inspect_cache()
-
-            window = model_position_limit(self.model)
-            limit = STEERING_EXAMPLE_TOKEN_LIMIT
-            if window is not None:
-                limit = min(limit, window)
+                ),
+            )
             chat_template_missing = use_chat_template and not self.tokenizer.chat_template
-
-            readings = []
-            for examples in (positive, negative):
-                side = []
-                for index, example in enumerate(examples, start=1):
-                    ids = self._example_ids(example, use_chat_template)
-                    if not ids:
-                        raise ValueError(f"Example {index} did not produce any tokens.")
-                    if len(ids) > limit:
-                        raise ValueError(
-                            f"Example {index} is {len(ids):,} tokens, above the "
-                            f"{limit:,} one example may be. Shorten it."
-                        )
-                    side.append(self._pooled_block_outputs(ids, blocks, pool))
-                readings.append(side)
+            readings = [
+                self._example_readings(examples, use_chat_template, pool, blocks)
+                for examples in (positive, negative)
+            ]
 
             layers, stats = steering_vectors.contrast_directions(*readings)
             return SteeringExtraction(

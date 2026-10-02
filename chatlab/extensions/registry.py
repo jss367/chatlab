@@ -37,6 +37,9 @@ CATALOGUE = (
     ExtensionSpec("hangman", "Hangman",
                   "Play hangman with the model as host, check each board against the last and branch replies at any token.",
                   "Hangman", "chatlab.extensions.hangman", icon="spell-check"),
+    ExtensionSpec("probes", "Linear probes",
+                  "Fit a logistic probe at every layer from labelled examples and read any reply with it, token by token.",
+                  "Probes", "chatlab.extensions.probes", icon="layers"),
 )
 
 
