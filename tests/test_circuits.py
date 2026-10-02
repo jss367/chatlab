@@ -562,6 +562,20 @@ class WorkbenchTests(unittest.TestCase):
         other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
         self.assertNotEqual(other, ids)
 
+    def test_long_prompts_are_rejected_before_transcoder_loading(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        session = SimpleNamespace(prompt_ids=lambda messages: [1] * (attribution.MAX_PREFIX + 1))
+        with self.assertRaisesRegex(ValueError, "prompt tokens"):
+            bench.encoded_prompt(session, dict(raw=False, user="long", system="", prefix=""))
+
+    def test_feature_descriptions_check_cancellation_before_decoder_work(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        held = SimpleNamespace(decoder_rows=mock.Mock())
+        blocks = SimpleNamespace(unembed=SimpleNamespace(weight=torch.empty(64, 2)))
+        with self.assertRaises(attribution.Cancelled):
+            bench._describe({"nodes": [{"kind": "feature"}]}, blocks, held, str, lambda: True)
+        held.decoder_rows.assert_not_called()
+
     def test_reply_prefix_uses_the_retained_prompt_context(self):
         bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
         session = SimpleNamespace(prompt_ids=mock.Mock(return_value=[1, 2]),
@@ -738,6 +752,10 @@ class WorkbenchTests(unittest.TestCase):
                 with mock.patch.object(workbench.Workbench, "background", stopped):
                     frames = list(handlers_by_name(demo)["load_now"]("view"))
                 self.assertEqual(frames[-1][0], "Stopped.")
+                graph = small_graph()
+                feature = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+                with mock.patch.object(workbench.Workbench, "background", stopped):
+                    self.assertEqual(handlers_by_name(demo)["ablate_focused"]("view", graph, feature), gr.skip())
             finally:
                 demo.close()
 
@@ -770,6 +788,19 @@ class WorkbenchTests(unittest.TestCase):
                     trace_frames = list(handlers["run_trace"]("view", "", "test", "", False,
                                       "The likeliest next tokens", "", "", 16, .8, .98, 8, 40, False))
                 self.assertTrue(all(value == gr.skip() for value in trace_frames[-1]))
+                # A newer graph may also open during rendering, after the result was saved.
+                original = render.group_view
+                def switched(*args, **kwargs):
+                    if args[2] is not None:
+                        handlers["open_path"](path, 40, False, "view")
+                        return "old rendering"
+                    return original(*args, **kwargs)
+                def done(*args):
+                    yield "result", {"groups": {}, "prefixes": 1}
+                with mock.patch.object(workbench.Workbench, "background", done), mock.patch.object(render, "group_view", switched):
+                    late_frames = list(handlers["run_interventions"]("view", old, "", "", "", True, 2, False, "group"))
+                self.assertEqual(late_frames[-1], (gr.skip(),) * 6)
+
                 feature = next(n["id"] for n in old["nodes"] if n["kind"] == "feature")
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     self.assertEqual(handlers["ablate_focused"]("view", old, feature), gr.skip())
