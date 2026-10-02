@@ -6,6 +6,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -121,9 +122,17 @@ def _progress_text(stage, done, total):
 
 def build_page(context):
     bench = Workbench(context.models, context.data_dir)
+    staging, staging_lock = {}, threading.Lock()
+
+    def forget(session_id):
+        bench.cancel(session_id)
+        with staging_lock:
+            directory = staging.pop(session_id, None)
+        if directory is not None:
+            directory.cleanup()
 
     with gr.Column(elem_id="circuits-page"):
-        owner = gr.State(value=lambda: uuid4().hex, delete_callback=bench.cancel)
+        owner = gr.State(value=lambda: uuid4().hex, delete_callback=forget)
         graph_state = gr.State(None)
         selection = gr.State([])
         focus = gr.State(None)
@@ -262,15 +271,25 @@ def build_page(context):
         return render.feature_card(node, record, graph.get("labels") if graph else None, ablation, problem,
                                    graph["tokens"] if graph else None)
 
-    def staged(path, graph):
-        """A copy of a saved graph where the interface is allowed to serve it."""
-        copy = Path(tempfile.mkdtemp(prefix="chatlab-circuits-")) / f"circuit-{graph['id'][:8]}.json"
-        return str(shutil.copy(path, copy))
+    def staged(path, graph, session_id):
+        """One owned download location per view, reused after every mutation."""
+        with staging_lock:
+            directory = staging.get(session_id)
+            if directory is None:
+                directory = staging[session_id] = tempfile.TemporaryDirectory(prefix="chatlab-circuits-")
+            copy = Path(directory.name) / "circuit.json"
+            partial = Path(directory.name) / ".circuit.tmp"
+            try:
+                shutil.copyfile(path, partial)
+                partial.replace(copy)
+            finally:
+                partial.unlink(missing_ok=True)
+            return str(copy)
 
-    def save(graph):
-        """Save the graph, and return a copy the download box can offer."""
+    def save(graph, session_id):
+        """Save the graph, and refresh the current view's download copy."""
         try:
-            return staged(bench.save(graph), graph)
+            return staged(bench.save(graph), graph, session_id)
         except OSError as exc:
             logger.warning("Could not save graph %s: %s", graph.get("id"), exc)
             gr.Warning(f"The graph was not saved: {exc}.")
@@ -342,7 +361,7 @@ def build_page(context):
             return
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
-        path = save(graph)
+        path = save(graph, session_id)
         stats = graph["stats"]
         yield (f"Traced {stats['traced_features']} of {stats['active_features']:,} active features.",
                status_text(bench.status()), *show_graph(graph, path, shown, errors))
@@ -377,7 +396,7 @@ def build_page(context):
     pick.input(picked, [graph_state, pick], [selection, focus, card, selected_note, label],
                concurrency_id="circuits-read", trigger_mode="always_last", show_progress="hidden")
 
-    def rename_node(graph, focused, text, chosen, shown, errors):
+    def rename_node(graph, focused, text, chosen, shown, errors, session_id):
         node = node_of(graph, focused)
         if node is None or node["kind"] != "feature":
             raise gr.Error("Click a feature in the graph first.")
@@ -387,13 +406,13 @@ def build_page(context):
         else:
             labels.pop(focused, None)
         graph = {**graph, "labels": labels}
-        save(graph)
-        return graph, draw(graph, chosen, shown, errors), describe_card(graph, focused), *draw_groups(graph, None)
+        path = save(graph, session_id)
+        return graph, draw(graph, chosen, shown, errors), describe_card(graph, focused), *draw_groups(graph, None), path
 
-    rename.click(rename_node, [graph_state, focus, label, selection, nodes_shown, show_errors],
-                 [graph_state, graph_view, card, groups_view, group_pick, group_card], concurrency_id="circuits-read")
+    rename.click(rename_node, [graph_state, focus, label, selection, nodes_shown, show_errors, owner],
+                 [graph_state, graph_view, card, groups_view, group_pick, group_card, download], concurrency_id="circuits-read")
 
-    def group_selected(graph, chosen, name, shown, errors):
+    def group_selected(graph, chosen, name, shown, errors, session_id):
         if not graph:
             raise gr.Error("Trace a graph first.")
         members = [i for i in chosen if i.startswith("f:")]
@@ -404,12 +423,12 @@ def build_page(context):
         groups = {g: ms for g, ms in groups.items() if ms}
         groups[name] = members
         graph = {**graph, "groups": groups, "effects": None}
-        save(graph)
+        path = save(graph, session_id)
         gr.Info(f"Grouped {len(members)} feature{'s' * (len(members) != 1)} as {name}.")
-        return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, name), ""
+        return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, name), "", path
 
-    make_group.click(group_selected, [graph_state, selection, group_name, nodes_shown, show_errors],
-                     [graph_state, graph_view, groups_view, group_pick, group_card, group_name],
+    make_group.click(group_selected, [graph_state, selection, group_name, nodes_shown, show_errors, owner],
+                     [graph_state, graph_view, groups_view, group_pick, group_card, group_name, download],
                      concurrency_id="circuits-read")
 
     def choose_group(graph, name):
@@ -431,16 +450,16 @@ def build_page(context):
 
     group_pick_bridge.input(group_clicked, [graph_state, group_pick_bridge], [group_pick, group_card], queue=False)
 
-    def delete_group(graph, name, chosen, shown, errors):
+    def delete_group(graph, name, chosen, shown, errors, session_id):
         if not graph or name not in graph["groups"]:
             raise gr.Error("Choose a group first.")
         groups = {g: m for g, m in graph["groups"].items() if g != name}
         graph = {**graph, "groups": groups, "effects": None}
-        save(graph)
-        return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, None)
+        path = save(graph, session_id)
+        return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, None), path
 
-    remove_group.click(delete_group, [graph_state, group_pick, selection, nodes_shown, show_errors],
-                       [graph_state, graph_view, groups_view, group_pick, group_card], concurrency_id="circuits-read")
+    remove_group.click(delete_group, [graph_state, group_pick, selection, nodes_shown, show_errors, owner],
+                       [graph_state, graph_view, groups_view, group_pick, group_card, download], concurrency_id="circuits-read")
 
     # Measuring -----------------------------------------------------------------
 
@@ -465,7 +484,7 @@ def build_page(context):
             raise gr.Error("Trace a graph first.")
         if not graph["groups"]:
             raise gr.Error("Group some features in the graph first.")
-        skip = (gr.skip(),) * 4
+        skip = (gr.skip(),) * 5
         effects = None
         try:
             factor = float(factor)
@@ -488,18 +507,18 @@ def build_page(context):
         except (TypeError, ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         graph = {**graph, "effects": effects}
-        save(graph)
+        path = save(graph, session_id)
         yield (f"Measured {len(graph['groups'])} group{'s' * (len(graph['groups']) != 1)} on "
-               f"{effects['prefixes']} prefix{'es' * (effects['prefixes'] != 1)}.", graph, *draw_groups(graph, name))
+               f"{effects['prefixes']} prefix{'es' * (effects['prefixes'] != 1)}.", graph, *draw_groups(graph, name), path)
 
     run.click(run_interventions, [owner, graph_state, pivot, alternatives, prefixes, include_prompt, boost,
                                   every_position, group_pick],
-              [run_progress, graph_state, groups_view, group_pick, group_card],
+              [run_progress, graph_state, groups_view, group_pick, group_card, download],
               concurrency_id="circuits", show_progress="hidden")
 
     # Opening saved graphs --------------------------------------------------------
 
-    def open_path(path, shown, errors):
+    def open_path(path, shown, errors, session_id):
         if not path:
             return (gr.skip(),) * len(graph_outputs)
         try:
@@ -507,10 +526,10 @@ def build_page(context):
         except (OSError, ValueError) as exc:
             raise gr.Error(str(exc)) from exc
         try:
-            offered = staged(path, graph)
+            offered = staged(path, graph, session_id)
         except OSError:
             offered = None
         return show_graph(graph, offered, shown, errors)
 
-    saved.input(open_path, [saved, nodes_shown, show_errors], graph_outputs, concurrency_id="circuits-read")
-    upload.upload(open_path, [upload, nodes_shown, show_errors], graph_outputs, concurrency_id="circuits-read")
+    saved.input(open_path, [saved, nodes_shown, show_errors, owner], graph_outputs, concurrency_id="circuits-read")
+    upload.upload(open_path, [upload, nodes_shown, show_errors, owner], graph_outputs, concurrency_id="circuits-read")

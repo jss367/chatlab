@@ -401,19 +401,18 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
     targets = choose_targets(recording, decode, token_ids, contrast)
     directions = logit_directions(blocks, recording, targets)
     features = len(recording.activation)
+    columns = features + (len(recording.errors) + 1) * len(ids)
+    budget = min(settings.max_feature_nodes, features)
+    # Reserve CPU tracing/pruning/sorting space before the batched frozen
+    # model allocates any cloned activations or attention patterns.
+    total_nodes = budget + (len(recording.errors) + 1) * len(ids) + len(targets)
+    allocation_bytes = 4 * (budget + len(targets)) * columns * 4 + 64 * total_nodes ** 2
+    if allocation_bytes > MAX_ROW_BYTES:
+        raise ValueError(
+            f"This prompt has {features:,} active features; a graph of {budget} of them would need "
+            f"{allocation_bytes / 1024 ** 3:.1f} GB. Use a shorter prompt or fewer nodes.")
     graph = FrozenGraph(blocks, transcoders, recording, settings.batch_size)
     try:
-        columns = graph.columns
-        budget = min(settings.max_feature_nodes, features)
-        # Include dense pruning matrices and worst-case nonzero-edge sorting,
-        # which stay alive alongside the tracing rows. The factor of four on
-        # tracing rows also reserves normalization and batch temporaries.
-        total_nodes = budget + (len(recording.errors) + 1) * len(ids) + len(targets)
-        allocation_bytes = 4 * (budget + len(targets)) * columns * 4 + 64 * total_nodes ** 2
-        if allocation_bytes > MAX_ROW_BYTES:
-            raise ValueError(
-                f"This prompt has {features:,} active features; a graph of {budget} of them would need "
-                f"{allocation_bytes / 1024 ** 3:.1f} GB. Use a shorter prompt or fewer nodes.")
         rows = torch.zeros(len(targets) + budget, columns, dtype=torch.float32)
         normalized = torch.zeros_like(rows)
         vectors = [("vector", d) for d in directions]

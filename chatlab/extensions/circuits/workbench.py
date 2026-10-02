@@ -22,6 +22,7 @@ from . import architecture, attribution, interventions, transcoders
 
 logger = logging.getLogger(__name__)
 
+PROCESS_ID = uuid4().hex
 TOP_LOGITS = 6
 MAX_GRAPH_BYTES = 256 * 1024 ** 2
 
@@ -119,7 +120,7 @@ class Workbench:
     def _model(self, session):
         return session.transformers_model()
 
-    def _held(self, model, progress):
+    def _held(self, model, progress, cancelled=None):
         blocks = architecture.blocks(model)
         model_id = self.models.loaded_model_id()
         spec = transcoders.spec_for(model_id)
@@ -129,12 +130,13 @@ class Workbench:
         held = transcoders.loaded(spec, blocks.device)
         if held is None:
             held = transcoders.load(spec, blocks.device,
-                                    progress=lambda done, total: progress("Reading transcoders", done, total))
+                                    progress=lambda done, total: progress("Reading transcoders", done, total),
+                                    cancelled=cancelled)
         return blocks, held, spec
 
     def load_transcoders(self, progress, cancelled):
         with self.models.open_session() as session, self._model(session) as model:
-            _, held, spec = self._held(model, progress)
+            _, held, spec = self._held(model, progress, cancelled)
             return spec
 
     def prompt_ids(self, session, model, prompt):
@@ -165,30 +167,33 @@ class Workbench:
 
     def trace(self, prompt, explain, settings, progress, cancelled):
         """A finished graph for the prompt, labelled and ready to save."""
-        with self.models.open_session() as session, self._model(session) as model:
-            blocks, held, spec = self._held(model, progress)
-            ids = self.prompt_ids(session, model, prompt)
+        with self.models.open_session() as session:
+            revision = session.model_revision
+            with self._model(session) as model:
+                blocks, held, spec = self._held(model, progress, cancelled)
+                ids = self.prompt_ids(session, model, prompt)
 
-            def decode(token):
-                return session.decode([int(token)])
+                def decode(token):
+                    return session.decode([int(token)])
 
-            token_ids, contrast = None, None
-            if explain["mode"] == "tokens":
-                token_ids = self.single_tokens(session, explain["tokens"], "Tokens to explain")
-                if not token_ids:
-                    raise ValueError("List the tokens to explain, one per line.")
-            elif explain["mode"] == "contrast":
-                positive = self.single_tokens(session, explain["tokens"], "Pivot tokens")
-                negative = self.single_tokens(session, explain["others"], "Other tokens")
-                contrast = {"positive": positive, "negative": negative,
-                            "label": " / ".join(explain["tokens"][:3]) + " vs other"}
-            graph = attribution.attribute(blocks, held, ids, decode, settings=settings, token_ids=token_ids,
-                                          contrast=contrast, progress=progress, cancelled=cancelled)
-            self._describe(graph, blocks, held, decode)
-            graph.update(id=uuid4().hex, created=time.time(), model_id=session.model_id,
-                         load_id=session.load_id, transcoders=spec.key, prompt=prompt, explain=explain,
-                         labels={}, groups={}, effects=None)
-            return graph
+                token_ids, contrast = None, None
+                if explain["mode"] == "tokens":
+                    token_ids = self.single_tokens(session, explain["tokens"], "Tokens to explain")
+                    if not token_ids:
+                        raise ValueError("List the tokens to explain, one per line.")
+                elif explain["mode"] == "contrast":
+                    positive = self.single_tokens(session, explain["tokens"], "Pivot tokens")
+                    negative = self.single_tokens(session, explain["others"], "Other tokens")
+                    contrast = {"positive": positive, "negative": negative,
+                                "label": " / ".join(explain["tokens"][:3]) + " vs other"}
+                graph = attribution.attribute(blocks, held, ids, decode, settings=settings, token_ids=token_ids,
+                                              contrast=contrast, progress=progress, cancelled=cancelled)
+                self._describe(graph, blocks, held, decode)
+                graph.update(id=uuid4().hex, created=time.time(), model_id=session.model_id,
+                             load_id=session.load_id, process_id=PROCESS_ID, model_revision=revision,
+                             transcoders=spec.key, prompt=prompt, explain=explain,
+                             labels={}, groups={}, effects=None)
+                return graph
 
     def _describe(self, graph, blocks, held, decode):
         """What each kept feature writes into the vocabulary, read off its decoder row."""
@@ -228,48 +233,56 @@ class Workbench:
 
     def ablate(self, graph, node, progress, cancelled):
         """Ablate one feature at its own position and read each target's change."""
-        with self.models.open_session() as session, self._model(session) as model:
+        with self.models.open_session() as session:
             self._same_model(graph, session)
-            blocks, held, _ = self._held(model, progress)
-            ids = graph["ids"]
-            offset = len(ids) - 1 - node["position"]
-            targets = [n for n in graph["nodes"] if n["kind"] == "target"]
-            before = interventions.run(blocks, held, ids)["log_probs"]
-            after = interventions.run(blocks, held, ids, [(node["layer"], node["feature"], 0.0, [offset])])["log_probs"]
-            return {"deltas": [_target_log_odds(t, after) - _target_log_odds(t, before) for t in targets]}
+            with self._model(session) as model:
+                blocks, held, _ = self._held(model, progress, cancelled)
+                ids = graph["ids"]
+                offset = len(ids) - 1 - node["position"]
+                targets = [n for n in graph["nodes"] if n["kind"] == "target"]
+                before = interventions.run(blocks, held, ids)["log_probs"]
+                after = interventions.run(blocks, held, ids, [(node["layer"], node["feature"], 0.0, [offset])])["log_probs"]
+                return {"deltas": [_target_log_odds(t, after) - _target_log_odds(t, before) for t in targets]}
 
     @staticmethod
     def _same_model(graph, session):
         if graph.get("model_id") != session.model_id:
             raise ValueError(f"This graph was traced on {graph.get('model_id')}; load that model to measure it.")
+        revision = graph.get("model_revision")
+        if revision:
+            if revision != session.model_revision:
+                raise ValueError("This graph belongs to another model revision; trace it again on this load.")
+        elif graph.get("process_id") != PROCESS_ID or graph.get("load_id") != session.load_id:
+            raise ValueError("This graph belongs to another model load; trace it again on this load.")
 
     def group_effects(self, graph, pivot_texts, alternative_texts, prefix_texts, include_prompt, boost,
                       every_position, progress, cancelled):
-        with self.models.open_session() as session, self._model(session) as model:
+        with self.models.open_session() as session:
             self._same_model(graph, session)
-            blocks, held, _ = self._held(model, progress)
-            pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
-            alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
-            prefixes = [graph["ids"]] if include_prompt else []
-            prompt = graph.get("prompt") or {}
-            for text in prefix_texts:
-                prefixes.append(self.prompt_ids(session, model, {**prompt, "prefix": text}))
-            if not alternatives:
-                logits = interventions.run(blocks, held, graph["ids"])["log_probs"]
-                ranked = [int(t) for t in logits.argsort(descending=True)[:20].tolist()]
-                alternatives = [t for t in ranked if t not in set(pivot)][:8]
-            nodes = {n["id"]: n for n in graph["nodes"]}
-            n = len(graph["ids"])
-            groups = {name: [(nodes[m]["layer"], nodes[m]["feature"], n - 1 - nodes[m]["position"])
-                             for m in members if m in nodes and nodes[m]["kind"] == "feature"]
-                      for name, members in graph["groups"].items()}
-            groups = {name: members for name, members in groups.items() if members}
-            effects = interventions.group_effects(
-                blocks, held, prefixes, groups, pivot, alternatives, boost=boost,
-                every_position=every_position, progress=lambda d, t: progress("Intervening", d, t),
-                cancelled=cancelled)
-            effects["token_text"] = {str(t): session.decode([t]) for t in [*pivot, *alternatives]}
-            return effects
+            with self._model(session) as model:
+                blocks, held, _ = self._held(model, progress, cancelled)
+                pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
+                alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
+                prefixes = [graph["ids"]] if include_prompt else []
+                prompt = graph.get("prompt") or {}
+                for text in prefix_texts:
+                    prefixes.append(self.prompt_ids(session, model, {**prompt, "prefix": text}))
+                if not alternatives:
+                    logits = interventions.run(blocks, held, graph["ids"])["log_probs"]
+                    ranked = [int(t) for t in logits.argsort(descending=True)[:20].tolist()]
+                    alternatives = [t for t in ranked if t not in set(pivot)][:8]
+                nodes = {n["id"]: n for n in graph["nodes"]}
+                n = len(graph["ids"])
+                groups = {name: [(nodes[m]["layer"], nodes[m]["feature"], n - 1 - nodes[m]["position"])
+                                 for m in members if m in nodes and nodes[m]["kind"] == "feature"]
+                          for name, members in graph["groups"].items()}
+                groups = {name: members for name, members in groups.items() if members}
+                effects = interventions.group_effects(
+                    blocks, held, prefixes, groups, pivot, alternatives, boost=boost,
+                    every_position=every_position, progress=lambda d, t: progress("Intervening", d, t),
+                    cancelled=cancelled)
+                effects["token_text"] = {str(t): session.decode([t]) for t in [*pivot, *alternatives]}
+                return effects
 
     # Saving -----------------------------------------------------------------
 
@@ -324,11 +337,33 @@ def load_graph(path):
     if not isinstance(graph, dict) or graph.get("format") != attribution.FORMAT:
         raise ValueError("That file is not a saved attribution graph.")
     try:
+        layers, tokens = graph["layers"], graph["tokens"]
+        if type(layers) is not int or not 1 <= layers <= 256:
+            raise ValueError
+        if not isinstance(tokens, list) or not 2 <= len(tokens) <= attribution.MAX_PREFIX:
+            raise ValueError
+        if not all(isinstance(token, str) for token in tokens):
+            raise ValueError
+        token_ids = graph["ids"]
+        if (not isinstance(token_ids, list) or len(token_ids) != len(tokens)
+                or not all(type(token) is int and 0 <= token < 2 ** 31 for token in token_ids)):
+            raise ValueError
         ids = {n["id"] for n in graph["nodes"]}
         for node in graph["nodes"]:
             if node["kind"] not in ("feature", "error", "embedding", "target"):
                 raise ValueError
-            int(node["layer"]), int(node["position"]), float(node["influence"]), float(node["effect"])
+            layer, position = node["layer"], node["position"]
+            if type(layer) is not int or type(position) is not int or not 0 <= position < len(tokens):
+                raise ValueError
+            if node["kind"] == "embedding":
+                valid_layer = layer == -1
+            elif node["kind"] == "target":
+                valid_layer = layer == layers
+            else:
+                valid_layer = 0 <= layer < layers
+            if not valid_layer:
+                raise ValueError
+            float(node["influence"]), float(node["effect"])
         for edge in graph["edges"]:
             if edge["source"] not in ids or edge["target"] not in ids:
                 raise ValueError

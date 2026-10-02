@@ -229,6 +229,15 @@ class AttributionTests(unittest.TestCase):
                                       settings=attribution.Settings(max_feature_nodes=16, batch_size=8))
             rows.assert_not_called()
 
+    def test_memory_refusal_happens_before_frozen_graph_construction(self):
+        blocks = architecture.blocks(tiny_model("gemma3"))
+        held = tiny_transcoders(blocks)
+        with mock.patch.object(attribution, "MAX_ROW_BYTES", 1), \
+                mock.patch.object(attribution, "FrozenGraph") as frozen:
+            with self.assertRaisesRegex(ValueError, "would need"):
+                attribution.attribute(blocks, held, IDS, self.decode)
+            frozen.assert_not_called()
+
     def test_contrast_needs_two_distinct_sides(self):
         _, _, recording = self.frozen("qwen3")
         with self.assertRaisesRegex(ValueError, "both sides"):
@@ -400,6 +409,43 @@ class RenderTests(unittest.TestCase):
         self.assertIn("cg-empty", render.feature_card(None))
 
 
+class TranscoderLifecycleTests(unittest.TestCase):
+    def test_unload_drops_references_before_releasing_device_caches(self):
+        import weakref
+        held = tiny_transcoders(architecture.blocks(tiny_model("qwen3")))
+        reference = weakref.ref(held)
+        transcoders._LOADED[held.spec.key] = held
+        del held
+        with mock.patch("chatlab.model_loading.LoadingMixin._release_device_cache") as release:
+            release.side_effect = lambda: self.assertIsNone(reference())
+            self.assertTrue(transcoders.unload())
+            release.assert_called_once()
+        self.assertFalse(transcoders._LOADED)
+
+    def test_cancellation_stops_download_before_the_next_layer(self):
+        spec = transcoders.spec_for("google/gemma-3-1b-it")
+        cancelled = threading.Event()
+        def fetch(*args):
+            cancelled.set()
+            return "layer_0.safetensors"
+        with mock.patch("huggingface_hub.hf_hub_download", side_effect=fetch) as download:
+            with self.assertRaises(attribution.Cancelled):
+                transcoders.download(spec, cancelled=cancelled.is_set)
+            download.assert_called_once()
+
+    def test_cancellation_stops_device_loading_before_another_layer(self):
+        spec = transcoders.TranscoderSpec("tiny", "Tiny", ("test/tiny",), "test/tiny", "", 2, 3, 2, 0.0)
+        cancelled = threading.Event()
+        def read(path):
+            cancelled.set()
+            return {}
+        with mock.patch.object(transcoders, "download", return_value=["layer0", "layer1"]), \
+                mock.patch("safetensors.torch.load_file", side_effect=read) as load:
+            with self.assertRaises(attribution.Cancelled):
+                transcoders.load(spec, "cpu", cancelled=cancelled.is_set)
+            load.assert_called_once_with("layer0")
+        self.assertFalse(transcoders.in_memory(spec))
+
 class WorkbenchTests(unittest.TestCase):
     def test_token_lists_keep_leading_spaces_and_read_escapes(self):
         self.assertEqual(workbench.parse_tokens(" Wait\nOkay\n\n\\n\\n\r\n"), [" Wait", "Okay", "\n\n"])
@@ -414,6 +460,32 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(ids, [1] + [ord(c) for c in "prompt first reply"])
         other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
         self.assertNotEqual(other, ids)
+
+    def test_interventions_require_the_traced_weight_snapshot(self):
+        session = SimpleNamespace(model_id="test/tiny", model_revision="a" * 40, load_id="test/tiny#2")
+        graph = dict(model_id=session.model_id, model_revision="a" * 40)
+        workbench.Workbench._same_model(graph, session)
+        with self.assertRaisesRegex(ValueError, "another model revision"):
+            workbench.Workbench._same_model({**graph, "model_revision": "b" * 40}, session)
+        unknown = dict(model_id=session.model_id, model_revision=None,
+                       load_id=session.load_id, process_id=workbench.PROCESS_ID)
+        workbench.Workbench._same_model(unknown, session)
+        for change in (dict(load_id="test/tiny#1"), dict(process_id="previous process"), dict(process_id=None)):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "another model load"):
+                workbench.Workbench._same_model(unknown | change, session)
+
+    def test_uploaded_graph_dimensions_are_bounded_before_rendering(self):
+        graph = small_graph()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for change in (dict(layers=10 ** 12), dict(layers=0), dict(layers="3"),
+                           dict(tokens=["x"] * 513), dict(ids=[1]),
+                           dict(nodes=[{**graph["nodes"][0], "position": 999}]),
+                           dict(nodes=[{**graph["nodes"][0], "layer": 999}])):
+                with self.subTest(change=change):
+                    path.write_text(json.dumps(graph | change))
+                    with self.assertRaisesRegex(ValueError, "not a valid"):
+                        workbench.load_graph(path)
 
     def test_saved_graphs_round_trip_and_bad_files_are_refused(self):
         graph = small_graph()
@@ -461,11 +533,47 @@ class WorkbenchTests(unittest.TestCase):
                 graph = small_graph()
                 members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
                 graph.update(groups={"old": members}, effects={"groups": {"old": {"stale": True}}})
-                changed = fn(graph, members[:1], "new", 40, False)[0]
+                changed = fn(graph, members[:1], "new", 40, False, "view")[0]
                 self.assertIsNone(changed["effects"])
                 self.assertEqual(changed["groups"]["new"], members[:1])
                 saved = workbench.load_graph(Path(directory) / "graphs" / f"{graph['id']}.json")
                 self.assertIsNone(saved["effects"])
+            finally:
+                demo.close()
+
+    def test_mutations_refresh_and_reuse_the_current_views_download(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                graph = small_graph()
+                members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
+                grouped = handlers["group_selected"](graph, members, "group", 40, False, "view")
+                offered = Path(grouped[-1])
+                self.assertEqual(json.loads(offered.read_text())["groups"], {"group": members})
+                renamed = handlers["rename_node"](grouped[0], members[0], "renamed", members, 40, False, "view")
+                self.assertEqual(Path(renamed[-1]), offered)
+                self.assertEqual(json.loads(offered.read_text())["labels"][members[0]], "renamed")
+                deleted = handlers["delete_group"](renamed[0], "group", members, 40, False, "view")
+                self.assertEqual(Path(deleted[-1]), offered)
+                self.assertEqual(json.loads(offered.read_text())["groups"], {})
+                self.assertEqual([p.name for p in offered.parent.iterdir()], ["circuit.json"])
+                # Another view gets its own owner and copy.
+                other = handlers["group_selected"](graph, members, "other", 40, False, "other")
+                self.assertNotEqual(Path(other[-1]).parent, offered.parent)
+                owner = next(component for component in demo.blocks.values()
+                             if isinstance(component, gr.State)
+                             and getattr(component.delete_callback, "__name__", None) == "forget")
+                owner.delete_callback("view")
+                self.assertFalse(offered.parent.exists())
+                self.assertTrue(Path(other[-1]).exists())
             finally:
                 demo.close()
 
@@ -715,6 +823,27 @@ class ModelAccessTests(unittest.TestCase):
                 self.assertTrue(manager._lock.locked())
             self.assertFalse(manager._lock.locked())
         manager._release_device_cache.assert_called_once()
+
+    def test_trace_reads_revision_before_taking_the_model_lock(self):
+        manager = self.manager()
+        manager.model = tiny_model("qwen3")
+        manager.tokenizer = SimpleNamespace(decode=lambda ids, **kwargs: str(ids[0]))
+        def revision():
+            self.assertFalse(manager._lock.locked(), "revision lookup must not recursively acquire the model lock")
+            return "a" * 40
+        manager.model_revision = revision
+        models = SimpleNamespace(open_session=ModelService(lambda: manager).open_session)
+        bench = workbench.Workbench(models, tempfile.gettempdir())
+        blocks = architecture.blocks(manager.model)
+        held = tiny_transcoders(blocks)
+        with mock.patch.object(bench, "_held", return_value=(blocks, held, held.spec)), \
+                mock.patch.object(bench, "prompt_ids", return_value=IDS), \
+                mock.patch.object(bench, "_describe"):
+            graph = bench.trace({}, {"mode": "top"}, attribution.Settings(max_feature_nodes=16, batch_size=8),
+                                lambda *args: None, lambda: False)
+            self.assertEqual(graph["model_revision"], "a" * 40)
+            feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
+            self.assertIn("deltas", bench.ablate(graph, feature, lambda *args: None, lambda: False))
 
     def test_mlx_and_quantized_loads_are_refused(self):
         for manager, message in ((self.manager(backend="mlx"), "MLX"), (self.manager(precision="4-bit"), "full")):
