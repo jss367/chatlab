@@ -24,6 +24,8 @@ EDGES = (0.1, 0.3, 0.7, 0.9)
 LAYER_HEADERS = ["Layer", "Held-out accuracy", "Held-out loss", "Training accuracy"]
 TOKEN_HEADERS = ["Layer", "Probability"]
 NO_PROBE = "Train a probe or open a saved one."
+# The host reads at most this many tokens in one pass (its scoring cap).
+READ_LIMIT = 4096
 
 CSS = """
 #probes-page {overflow-y:auto; min-height:0; padding:12px;}
@@ -241,8 +243,9 @@ def build_page(context):
                                         info="Leave empty to send no system message.")
                     temperature = gr.Slider(0, 2, value=0.7, step=0.05, label="Temperature")
                     seed = gr.Number(value=42, precision=0, minimum=0, label="Seed")
-                    max_tokens = gr.Number(value=512, precision=0, minimum=1, maximum=32768,
-                                           label="Tokens per reply")
+                    max_tokens = gr.Number(value=512, precision=0, minimum=1, maximum=READ_LIMIT,
+                                           label="Tokens per reply",
+                                           info=f"Prompt and reply are read in one pass of at most {READ_LIMIT:,} tokens.")
                 with gr.Row():
                     run = gr.Button("Read", variant="primary")
                     stop = gr.Button("Stop")
@@ -396,8 +399,8 @@ def build_page(context):
                     messages = ([{"role": "system", "content": system_text}] if system_text.strip() else [])
                     messages.append({"role": "user", "content": message})
                     limit, seed_value = int(token_limit), int(random_seed)
-                    if not 1 <= limit <= 32768 or seed_value < 0:
-                        raise ValueError("Seed must be nonnegative and tokens per reply between 1 and 32768.")
+                    if not 1 <= limit <= READ_LIMIT or seed_value < 0:
+                        raise ValueError(f"Seed must be nonnegative and tokens per reply between 1 and {READ_LIMIT:,}.")
                     last = None
                     stream = session.generate(messages, temperature=float(temp), top_p=1.0, top_k=0,
                                               max_new_tokens=limit, seed=seed_value)

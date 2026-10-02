@@ -207,6 +207,10 @@ class HostReadingTests(unittest.TestCase):
             held.project_blocks(ids, np.zeros((3, 8)))
         with self.assertRaisesRegex(ValueError, "4 wide; this model's blocks are 8"):
             held.project_blocks(ids, np.zeros((2, 4)))
+        # The flat cap holds even for a model whose window would allow more.
+        with mock.patch("chatlab.tokenization.SCORE_TOKEN_LIMIT", len(ids) - 1):
+            with self.assertRaisesRegex(ValueError, f"above the {len(ids) - 1} one reading may be"):
+                held.project_blocks(ids, np.zeros((2, 8)))
         self.assertFalse(steering.decoder_layers(held.model)[0]._forward_hooks)
         previous = held.load_id
         held.model_id = "other/model"
@@ -328,7 +332,7 @@ class PageTests(unittest.TestCase):
         with mock.patch("chatlab.tokenization.model_position_limit", return_value=1):
             # The reply is trimmed to the window; the passage is the reader's own and is not.
             with mock.patch("chatlab.model_inspection.model_position_limit", return_value=1):
-                with self.assertRaisesRegex(gr.Error, "above the 1 this model can read"):
+                with self.assertRaisesRegex(gr.Error, "above the 1 one reading may be"):
                     self.read(probe, READ, WANTED[0])
 
     def test_a_probe_for_another_revision_is_refused_when_both_are_known(self):

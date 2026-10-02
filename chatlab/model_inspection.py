@@ -595,10 +595,12 @@ class InspectionMixin:
                 raise ValueError(
                     f"Give one direction for each of this model's {len(blocks)} decoder blocks."
                 )
-            window = model_position_limit(self.model)
-            if window is not None and len(ids) > window:
+            # One pass with no cache holds every layer's attention over the
+            # whole passage, so the flat scoring cap applies as well as the window.
+            limit = score_token_limit(self.model)
+            if len(ids) > limit:
                 raise ValueError(
-                    f"That is {len(ids):,} tokens, above the {window:,} this model can read at once."
+                    f"That is {len(ids):,} tokens, above the {limit:,} one reading may be. Shorten it."
                 )
             device = next(self.model.parameters()).device
             captured: list[np.ndarray | None] = [None] * len(blocks)
