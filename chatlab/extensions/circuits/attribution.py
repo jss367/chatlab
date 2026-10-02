@@ -380,7 +380,12 @@ class FrozenGraph:
         return total.cpu()
 
 
-def _influence(rows, weights, row_of_column, iterations=None):
+def _check_cancelled(cancelled):
+    if cancelled and cancelled():
+        raise Cancelled()
+
+
+def _influence(rows, weights, row_of_column, iterations=None, cancelled=None):
     """Each column's share of the targets' influence, through every path the rows cover.
 
     ``rows`` are absolute, row-normalized edge weights. Influence starts at
@@ -395,6 +400,7 @@ def _influence(rows, weights, row_of_column, iterations=None):
     x = weights.clone()
     total = torch.zeros(rows.shape[1], dtype=torch.float32)
     for _ in range(iterations or 4096):
+        _check_cancelled(cancelled)
         contribution = x @ rows
         total += contribution
         x = torch.zeros_like(weights)
@@ -473,7 +479,7 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
         while len(chosen) < budget:
             if stop():
                 raise Cancelled()
-            influence = _influence(normalized[:used], weights[:used], row_of_column)[:features]
+            influence = _influence(normalized[:used], weights[:used], row_of_column, cancelled=cancelled)[:features]
             if chosen:
                 influence[torch.tensor(chosen, dtype=torch.long)] = -1
             order = torch.argsort(influence, descending=True)
@@ -493,7 +499,7 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
         graph.close()
 
     report("Pruning", 0, 1)
-    result = _prune(recording, targets, rows[:used], weights[:used], chosen, settings, decode)
+    result = _prune(recording, targets, rows[:used], weights[:used], chosen, settings, decode, cancelled)
     result["transcoder_width"] = transcoders.spec.width
     result["targets_check"] = {
         "values": values.tolist(),
@@ -503,10 +509,11 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
     return result
 
 
-def _prune(recording, targets, rows, weights, chosen, settings, decode):
+def _prune(recording, targets, rows, weights, chosen, settings, decode, cancelled=None):
     """Restrict to the chosen features, then keep the nodes and edges that carry the influence."""
     import torch
 
+    _check_cancelled(cancelled)
     n, layers = len(recording.ids), len(recording.errors)
     features = len(recording.activation)
     count = len(targets)
@@ -518,13 +525,14 @@ def _prune(recording, targets, rows, weights, chosen, settings, decode):
     adjacency = torch.zeros(total, total, dtype=torch.float32)
     adjacency[:s, :s + e + n] = rows[count:][:, keep_columns]
     adjacency[s + e + n:, :s + e + n] = rows[:count][:, keep_columns]
+    _check_cancelled(cancelled)
     normalized = _normalized(adjacency)
     node_weights = torch.zeros(total)
     node_weights[s + e + n:] = weights[:count]
     has_row = torch.full((total,), -1, dtype=torch.long)
     has_row[:s] = torch.arange(s)
     has_row[s + e + n:] = torch.arange(s + e + n, total)
-    node_influence = _influence_square(normalized, node_weights, has_row)
+    node_influence = _influence_square(normalized, node_weights, has_row, cancelled)
 
     # Node pruning: the fewest features holding node_threshold of the influence.
     feature_influence = node_influence[:s]
@@ -538,8 +546,9 @@ def _prune(recording, targets, rows, weights, chosen, settings, decode):
     kept[s:] = True
     masked = normalized * kept[:, None] * kept[None, :]
     masked = _normalized(masked)
-    node_influence = _influence_square(masked, node_weights, has_row)
+    node_influence = _influence_square(masked, node_weights, has_row, cancelled)
 
+    _check_cancelled(cancelled)
     # Edge pruning: the fewest edges holding edge_threshold of the influence.
     score = (node_influence + node_weights)[:, None] * masked
     flat = score.flatten()
@@ -553,10 +562,11 @@ def _prune(recording, targets, rows, weights, chosen, settings, decode):
         edge_keep[nonzero[order[:cut]]] = True
     edge_keep = edge_keep.view(total, total)
 
+    _check_cancelled(cancelled)
     # Signed total effect of each node on the weighted targets.
     activation = torch.ones(total)
     activation[:s] = recording.activation[chosen_t].cpu()
-    effect = _effect(adjacency, node_weights, torch.arange(s), activation)
+    effect = _effect(adjacency, node_weights, torch.arange(s), activation, cancelled)
 
     connected = edge_keep.any(0) | edge_keep.any(1)
     connected[s + e + n:] = True
@@ -592,6 +602,7 @@ def _prune(recording, targets, rows, weights, chosen, settings, decode):
         if target_node in index_of and source_node in index_of:
             edges.append({"source": nodes[index_of[source_node]]["id"], "target": nodes[index_of[target_node]]["id"],
                           "weight": float(adjacency[target_node, source_node])})
+    _check_cancelled(cancelled)
     sources = node_influence[s:s + e + n]
     error_share = float(sources[:e].sum() / sources.sum().clamp(min=1e-30))
     return {
@@ -605,13 +616,14 @@ def _prune(recording, targets, rows, weights, chosen, settings, decode):
     }
 
 
-def _influence_square(normalized, weights, has_row):
+def _influence_square(normalized, weights, has_row, cancelled=None):
     import torch
 
     x = weights.clone()
     total = torch.zeros_like(weights)
     rows = torch.nonzero(has_row >= 0, as_tuple=True)[0]
     for _ in range(4096):
+        _check_cancelled(cancelled)
         contribution = x @ normalized
         total += contribution
         x = torch.zeros_like(weights)
@@ -621,7 +633,7 @@ def _influence_square(normalized, weights, has_row):
     return total
 
 
-def _effect(adjacency, weights, feature_rows, activation):
+def _effect(adjacency, weights, feature_rows, activation, cancelled=None):
     """Each node's signed contribution to the weighted targets, direct and indirect.
 
     A feature's edges are into its pre-activation, so passing influence on
@@ -633,6 +645,7 @@ def _effect(adjacency, weights, feature_rows, activation):
     x = weights.clone()
     total = torch.zeros_like(weights)
     for _ in range(4096):
+        _check_cancelled(cancelled)
         contribution = x @ adjacency
         total += contribution
         x = torch.zeros_like(weights)
