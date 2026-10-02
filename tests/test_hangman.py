@@ -271,6 +271,11 @@ class PageTests(unittest.TestCase):
                          ["system", "user", "assistant", "user"])
         saved_game = json.loads((self.data / f"{game['id']}.json").read_text())
         self.assertEqual([t["guess"] for t in saved_game["turns"]], ["Let's play.", "a"])
+        # A later response replaces the same copy rather than leaving one behind per response.
+        later = list(self.fn["play"](game, "z", "owner", 1.0, 7, 64))[-1]
+        self.assertEqual(Path(later[8]).resolve(), download)
+        self.assertEqual(sorted(p.name for p in download.parent.iterdir()), [download.name])
+        self.assertEqual(download.read_text(), (self.data / download.name).read_text())
 
     def test_no_model_leaves_no_empty_turn_behind(self):
         self.manager.busy = True

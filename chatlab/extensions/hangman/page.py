@@ -8,6 +8,7 @@ import threading
 from collections import Counter
 from pathlib import Path
 import time
+from uuid import uuid4
 
 import gradio as gr
 
@@ -283,12 +284,17 @@ def build_page(context):
     outputs = [game_state, chat, check_panel, picker, note, token_state, strip, raw, download]
     inspector = [detail, alternatives]
 
+    staging = {"directory": None}
+
     def save(game):
         """Save the game and return a copy of it where the interface may serve it.
 
         Gradio only serves returned files from its temporary directories and
         the working directory, and the extension's data directory is neither
-        when the app is started from a checkout.
+        when the app is started from a checkout. Every copy goes in one
+        directory, named after its game and replaced whole, so a long game
+        keeps one copy rather than one per response; Gradio caches what it
+        serves, so replacing the copy never touches a download in progress.
         """
         text = saved(game)
         if len(text.encode("utf-8")) > MAX_FILE_BYTES:
@@ -296,8 +302,15 @@ def build_page(context):
         path = context.data_dir / f"{game['id']}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         write_private_text(path, text)
-        copy_path = Path(tempfile.mkdtemp(prefix="chatlab-hangman-")) / path.name
-        write_private_text(copy_path, text)
+        if staging["directory"] is None or not staging["directory"].is_dir():
+            staging["directory"] = Path(tempfile.mkdtemp(prefix="chatlab-hangman-"))
+        copy_path = staging["directory"] / path.name
+        partial = staging["directory"] / f".{path.name}.{uuid4().hex}.tmp"
+        try:
+            write_private_text(partial, text)
+            partial.replace(copy_path)
+        finally:
+            partial.unlink(missing_ok=True)
         return str(copy_path)
 
     def respond(game, session_id, text, temp, random_seed, token_limit, edit=None):
