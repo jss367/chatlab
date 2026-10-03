@@ -367,9 +367,11 @@ class RegistryTests(unittest.TestCase):
             application = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "apply_prepared_steering")
             self.assertNotEqual(preparation.concurrency_id, "conversation-pane")
             self.assertEqual(application.concurrency_id, "conversation-pane")
-            payload = preparation.fn()
+            payload = preparation.fn(new_forks())
             application.fn(new_forks(), payload)
             prepare.assert_called_once()
+            with self.assertRaisesRegex(gr.Error, "active conversation changed"):
+                application.fn({**new_forks(), "active": "Different chat"}, payload)
             valid[0] = False
             with self.assertRaisesRegex(gr.Error, "Selection changed"):
                 application.fn(new_forks(), payload)

@@ -564,15 +564,18 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
             button.click(steer, [states.forks, *inputs], outputs, concurrency_id=CONVERSATION_PANE_QUEUE)
         else:
             prepared = gr.State(None)
-            def prepare_steering(*values, build=prepare):
+            def prepare_steering(forks, *values, build=prepare):
                 try:
-                    return build(*values), values
+                    branch = (forks or {}).get("active", MAIN_BRANCH)
+                    return build(*values), values, branch
                 except ValueError as error:
                     raise gr.Error(str(error)) from error
             def apply_prepared_steering(forks, payload, apply=steer):
-                value, values = payload
+                value, values, branch = payload
+                if (forks or {}).get("active", MAIN_BRANCH) != branch:
+                    raise gr.Error("The active conversation changed while preparing steering. Try again on the intended conversation.")
                 return apply(forks, value, *values)
-            event = button.click(prepare_steering, inputs, prepared,
+            event = button.click(prepare_steering, [states.forks, *inputs], prepared,
                                  concurrency_id="extension-steering-prepare")
             event.success(apply_prepared_steering, [states.forks, prepared], outputs,
                           concurrency_id=CONVERSATION_PANE_QUEUE)
