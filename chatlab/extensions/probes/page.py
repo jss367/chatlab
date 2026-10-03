@@ -1,6 +1,7 @@
 """Train linear probes on the loaded model's residual stream and read passages with them."""
 import html
 import logging
+import math
 import re
 import tempfile
 import threading
@@ -382,6 +383,8 @@ def build_page(context):
                 raise ValueError(f"Paired examples need the same number of lines on each side; there are "
                                  f"{len(positive)} and {len(negative)}.")
             strength = float(strength)
+            if not math.isfinite(strength) or strength <= 0:
+                raise ValueError("L2 strength must be positive and finite.")
             with context.models.open_session() as session:
                 model_id, revision, precision = session.model_id, session.model_revision, session.precision
                 wanted_rows = session.read_examples(positive, chat_template=template, pool=pooling)

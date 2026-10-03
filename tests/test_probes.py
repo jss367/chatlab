@@ -325,6 +325,16 @@ class PageTests(unittest.TestCase):
         note, _ = self.fn["inspect_token"](probe, reading, 1, "owner", SimpleNamespace(index=0))
         self.assertIn("Token 1", note)
 
+    def test_invalid_l2_is_refused_before_model_work(self):
+        with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("must not read examples")):
+            for strength in (0, -1, float("nan"), float("inf")):
+                with self.subTest(strength=strength), self.assertRaisesRegex(gr.Error, "positive and finite"):
+                    self.train(strength=strength)
+        probe = trained()
+        for strength in (0, -1):
+            with self.assertRaisesRegex(ValueError, "positive and finite"):
+                probes.normalize(probe | {"l2": strength})
+
     def test_training_refusals_name_the_problem(self):
         with self.assertRaisesRegex(gr.Error, "2 to 64 examples of Greeting"):
             self.train(wanted="Hello")
