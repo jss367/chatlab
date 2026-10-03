@@ -369,6 +369,7 @@ class RegistryTests(unittest.TestCase):
             demo = app.build_app()
         try:
             capture = listener_named(demo, "capture_steering")
+            self.assertIsInstance(capture.outputs[0], gr.Textbox)
             apply = listener_named(demo, "apply_captured_steering")
             for name, values in (("remove_vector", ()), ("import_vector", ("not-read.json",)),
                                  ("use_extracted", (None, 0)), ("remember_steering", (None, False, 1., 0))):
@@ -473,14 +474,14 @@ class RegistryTests(unittest.TestCase):
             selected = {"feature": "A"}
             receipt = capture.fn(forks, selected)
             selected["feature"] = "B"
-            self.assertEqual(receipt[0], ({"feature": "A"},))
-            payload = preparation.fn(receipt)
+            self.assertEqual(forks["_steering_requests"][receipt][0], ({"feature": "A"},))
+            payload = preparation.fn(forks, receipt)
             application.fn(forks, payload)
             prepare.assert_called_once()
-            with self.assertRaisesRegex(gr.Error, "active conversation changed"):
+            with self.assertRaisesRegex(gr.Error, "active conversation changed|Steering changed"):
                 application.fn({**forks, "active": "Different chat"}, payload)
             # Clear all creates fresh forks with the same Main label.
-            with self.assertRaisesRegex(gr.Error, "active conversation changed"):
+            with self.assertRaisesRegex(gr.Error, "active conversation changed|Steering changed"):
                 application.fn(new_forks(), payload)
             from chatlab.conversation import copy_forks
             with self.assertRaisesRegex(gr.Error, "Steering changed"):
@@ -491,11 +492,11 @@ class RegistryTests(unittest.TestCase):
             newer_receipt = capture.fn(forks, selected)
             with self.assertRaisesRegex(gr.Error, "Steering changed"):
                 application.fn(forks, payload)
-            payload = (payload[0], *newer_receipt)
+            payload = preparation.fn(forks, newer_receipt)
             valid[0] = False
             with self.assertRaisesRegex(gr.Error, "Selection changed"):
                 application.fn(forks, payload)
-            prepare.assert_called_once()
+            self.assertEqual(prepare.call_count, 2)
             from concurrent.futures import ThreadPoolExecutor
             import time
             class SlowGenerations(dict):
@@ -506,7 +507,7 @@ class RegistryTests(unittest.TestCase):
             forks["_steering_generation"] = SlowGenerations(forks["_steering_generation"])
             with ThreadPoolExecutor(max_workers=8) as pool:
                 receipts = list(pool.map(lambda _: capture.fn(forks), range(8)))
-            self.assertEqual(len({r[-1] for r in receipts}), 8)
+            self.assertEqual(len(set(receipts)), 8)
             # Copies returned before State publication retain the live reservation ledger.
             copied = copy_forks(forks)
             before = copied["_steering_generation"][forks["active"]]
@@ -517,7 +518,7 @@ class RegistryTests(unittest.TestCase):
             entered, release, capture_started, captured_next = Event(), Event(), Event(), Event()
             valid[0] = True
             current_receipt = capture.fn(forks, selected)
-            current_payload = (payload[0], *current_receipt)
+            current_payload = preparation.fn(forks, current_receipt)
             original_apply = layout_module.apply_vector
             def paused_apply(*args):
                 entered.set()
@@ -543,7 +544,7 @@ class RegistryTests(unittest.TestCase):
                     next_receipt = newer.result(timeout=2)
             with self.assertRaisesRegex(gr.Error, "Steering changed"):
                 application.fn(applied[0], current_payload)
-            application.fn(applied[0], (payload[0], *next_receipt))
+            application.fn(applied[0], preparation.fn(applied[0], next_receipt))
             with self.assertRaisesRegex(gr.Error, "Steering changed"):
                 application.fn(forks, payload)
         finally:

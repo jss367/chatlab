@@ -15,13 +15,11 @@ which answer to the pane and the Chat page both.
 
 from __future__ import annotations
 
-from copy import deepcopy
 
 import html
 import logging
 from dataclasses import dataclass
 from functools import partial
-from uuid import uuid4
 
 import gradio as gr
 
@@ -115,6 +113,7 @@ from chatlab.ui.settings_layout import (
 from chatlab.ui.settings_page import refresh_hardware, update_sampling_label
 from chatlab.ui.steering import (
     STEERING_LOCK,
+    reserve_steering,
     apply_vector,
     description as steering_description,
     load_with_steering,
@@ -565,20 +564,15 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
             return (*applied, CHAT_PAGE, *show_page(CHAT_PAGE),
                     *(gr.update(visible=False) for _ in pages.extensions))
         outputs = [states.forks, *chat_page.steering.outputs, *page_outputs]
-        captured = gr.State(None)
+        captured = gr.Textbox(visible=False)
         def capture_steering(forks, *values):
-            # Reserve only ephemeral request metadata on the live view;
-            # returning a copied conversation here could overwrite a queued reply.
-            with capture_lock:
-                identity = forks.setdefault("_view_identity", uuid4().hex)
-                branch = forks.get("active", MAIN_BRANCH)
-                generations = forks.setdefault("_steering_generation", {})
-                generations[branch] = generations.get(branch, 0) + 1
-                generation = generations[branch]
-                forks.get("_steering_requests", {}).clear()
-            # The reservation precedes potentially slow copies: an older
-            # callback finishing last cannot acquire a newer generation.
-            return (deepcopy(values), branch, identity, generation)
+            return reserve_steering(forks, values)
+        def captured_receipt(forks, ticket, prepared=False):
+            key = ticket + ":prepared" if prepared and isinstance(ticket, str) else ticket
+            receipt = forks.get("_steering_requests", {}).get(key) if isinstance(ticket, str) else None
+            if receipt is None:
+                raise gr.Error("Steering changed while this request was preparing. Keep the newer choice or try again.")
+            return receipt
         def validate_receipt(forks, branch, identity, generation):
             if ((forks or {}).get("active", MAIN_BRANCH) != branch
                     or (forks or {}).get("_view_identity") != identity):
@@ -588,26 +582,33 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
         event = button.click(capture_steering, [states.forks, *inputs], captured, queue=False)
         if prepare is None:
             def apply_captured_steering(forks, receipt, apply=steer):
-                values, branch, identity, generation = receipt
                 with capture_lock:
+                    values, branch, identity, generation = captured_receipt(forks, receipt)
                     validate_receipt(forks, branch, identity, generation)
                     return apply(forks, *values)
             event.success(apply_captured_steering, [states.forks, captured], outputs,
                           concurrency_id=CONVERSATION_PANE_QUEUE)
         else:
-            prepared = gr.State(None)
-            def prepare_steering(receipt, build=prepare):
-                values, branch, identity, generation = receipt
+            prepared = gr.Textbox(visible=False)
+            def prepare_steering(forks, ticket, build=prepare):
+                with capture_lock:
+                    receipt = captured_receipt(forks, ticket)
+                    values, branch, identity, generation = receipt
+                    validate_receipt(forks, branch, identity, generation)
                 try:
-                    return build(*values), values, branch, identity, generation
+                    value = build(*values)
                 except ValueError as error:
                     raise gr.Error(str(error)) from error
-            def apply_prepared_steering(forks, payload, apply=steer):
-                value, values, branch, identity, generation = payload
                 with capture_lock:
                     validate_receipt(forks, branch, identity, generation)
+                    forks["_steering_requests"][ticket + ":prepared"] = (value, *receipt)
+                return ticket
+            def apply_prepared_steering(forks, ticket, apply=steer):
+                with capture_lock:
+                    value, values, branch, identity, generation = captured_receipt(forks, ticket, prepared=True)
+                    validate_receipt(forks, branch, identity, generation)
                     return apply(forks, value, *values)
-            prepared_event = event.success(prepare_steering, captured, prepared,
+            prepared_event = event.success(prepare_steering, [states.forks, captured], prepared,
                                            concurrency_id="extension-steering-prepare")
             prepared_event.success(apply_prepared_steering, [states.forks, prepared], outputs,
                                    concurrency_id=CONVERSATION_PANE_QUEUE)

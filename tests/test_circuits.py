@@ -638,6 +638,25 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn('<&"', card)
         self.assertIn('…', card)
 
+    def test_large_intervention_display_keeps_all_measurements_but_bounds_dom(self):
+        import re
+        members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"][:1]
+        ids = list(range(8192))
+        tokens = {str(token): .0001 for token in ids}
+        result = dict(tokens=tokens, pivot=.4096)
+        effects = dict(pivot=ids[:4096], alternatives=ids[4096:], prefixes=1, boost=2.,
+                       baseline=result, groups={"g": dict(ablate=result, boost=result, active_prefixes=1)})
+        view = render.group_view(self.graph, {"g": members}, effects)
+        card = render.group_card("g", members, self.graph, effects)
+        self.assertEqual(view.count('<rect class="bar '), 128)
+        self.assertEqual(card.count('<div class="cg-mult">'), 256)
+        self.assertEqual(view.count('Showing 64 of 4,096 tokens'), 2)
+        self.assertEqual(card.count('Showing 128 of 8,192 measured tokens.'), 2)
+        height = float(re.search(r'viewBox="0 0 [^ ]+ ([^"]+)"', view)[1])
+        self.assertLess(height, 3100)
+        self.assertEqual(len(effects["baseline"]["tokens"]), 8192)
+        self.assertEqual(len(effects["pivot"]), 4096)
+
     def test_group_view_and_card_show_measured_effects(self):
         members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"][:2]
         effects = {"prefixes": 2, "boost": 2.0, "every_position": False, "pivot": [3], "alternatives": [5],
@@ -752,6 +771,34 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(ids, [1] + [ord(c) for c in "prompt first reply"])
         other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
         self.assertNotEqual(other, ids)
+
+    def test_intervention_raw_bounds_precede_session_and_encoding(self):
+        opened = mock.Mock(side_effect=AssertionError("model session acquired"))
+        bench = workbench.Workbench(SimpleNamespace(open_session=opened), tempfile.gettempdir())
+        for pivot, alternatives, prefixes in ((["1"] * 4097, [], []), (["1"], ["2"] * 4097, []),
+                                               (["1"], [], ["x"] * 256), (["x" * 32769], [], []),
+                                               (["1"], [], ["x" * 32769])):
+            with self.subTest(pivot=len(pivot), alternatives=len(alternatives), prefixes=len(prefixes)), \
+                    self.assertRaisesRegex(ValueError, "at most"):
+                bench.group_effects({}, pivot, alternatives, prefixes, True, 2., False,
+                                    lambda *args: None, lambda: False)
+        opened.assert_not_called()
+
+    def test_cancellation_interrupts_intervention_prefix_encoding(self):
+        stopped = [False]
+        session = SimpleNamespace(encode=lambda text: [1])
+        bench = workbench.Workbench(SimpleNamespace(open_session=lambda: contextlib.nullcontext(session)),
+                                   tempfile.gettempdir())
+        def encoded(*args):
+            stopped[0] = True
+            return IDS
+        with mock.patch.object(bench, "_same_model"), \
+                mock.patch.object(bench, "encoded_prompt", side_effect=encoded) as encoding, \
+                mock.patch.object(bench, "_model", side_effect=AssertionError("model loaded")):
+            with self.assertRaises(attribution.Cancelled):
+                bench.group_effects({"groups": {"g": []}}, ["1"], [], ["first", "second"], False,
+                                    2., False, lambda *args: None, lambda: stopped[0])
+            self.assertEqual(encoding.call_count, 1)
 
     def test_invalid_target_and_intervention_tokens_fail_before_model_loading(self):
         session = SimpleNamespace(model_revision=None, encode=lambda text: [1, 2] if text == "multi" else [int(text)])
