@@ -73,6 +73,18 @@ def data_directory(extension_id):
     return Path(os.environ.get("XDG_DATA_HOME", "~/.local/share")).expanduser() / "chatlab" / "extensions" / extension_id
 
 
+def started_extensions(enabled_ids):
+    """The extensions this run started with: every enabled one it tried to load.
+
+    The saved choice is compared with these rather than with the pages that
+    opened. An enabled extension that failed to load is still the choice
+    this run was started under, and a restart would only fail it again; the
+    card lists why it failed instead of asking for one.
+    """
+
+    return [spec.id for spec in CATALOGUE if spec.id in enabled_ids]
+
+
 def save_extensions(selected, active_ids):
     known = {spec.id for spec in CATALOGUE}
     if not isinstance(selected, list) or any(item not in known for item in selected):

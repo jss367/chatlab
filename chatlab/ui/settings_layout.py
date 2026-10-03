@@ -18,7 +18,7 @@ from chatlab.thinking import THINKING_CHOICES
 from chatlab.ui import runtime
 from chatlab.ui.common import CONVERSATION_PANE_QUEUE
 from chatlab.ui.conversations import remember_branch_sampling
-from chatlab.ui.extensions_page import build_extension_settings
+from chatlab.ui.extensions_page import build_extension_settings, started_extensions
 from chatlab.ui.icons import icon_classes
 from chatlab.ui.scoring import SAMPLING_LABEL_QUEUE
 from chatlab.ui.settings_page import (
@@ -229,7 +229,7 @@ def build_settings_page(
                         )
 
                 with gr.Column(elem_classes=["settings-card"]):
-                    extension_settings, active_extensions = build_extension_settings([ext.spec.id for ext in extensions], extension_errors)
+                    extension_settings, active_extensions = build_extension_settings(started_extensions(saved.enabled_extensions), extension_errors)
     return SettingsPage(
         column=settings_page,
         system_prompt=system_prompt,

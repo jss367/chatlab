@@ -48,6 +48,7 @@ import json
 import logging
 import os
 import threading
+import time
 from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
@@ -362,8 +363,8 @@ def read(path: Path | None = None) -> dict | None:
     """The saved conversations, or ``None`` when there are none to restore.
 
     An unreadable file is reported in the log and treated as absent rather
-    than raised: the page must still open, and the file is left where it is
-    for the reader to look at.
+    than raised: the page must still open. The next save keeps it aside
+    rather than writing over it; see :func:`_keep_unreadable`.
     """
 
     target = path or library_path()
@@ -397,6 +398,54 @@ def taken_names(path: Path | None = None) -> set[str]:
     return set(forks["branches"]) | set(forks["updated"])
 
 
+def _read_for_save(target: Path) -> dict | None:
+    """What a save merges into: the file on disk, with an unreadable one kept aside first.
+
+    Called with ``_WRITE_LOCK`` held.
+    """
+
+    existing = read(target)
+    if existing is None and not _keep_unreadable(target):
+        raise OSError("The unreadable conversations file could not be preserved.")
+    return existing
+
+
+def _keep_unreadable(target: Path) -> bool:
+    """Move a conversations file :func:`read` could not use out of the way of a save.
+
+    An unreadable file reads as no conversations at all, and the save that
+    follows would put only what the page holds over it: one turn this
+    version does not understand - a role it does not know, an origin it
+    rejects - would cost every conversation the file held. The file is kept
+    beside the new one instead, for the reader to mend, as the settings file
+    is.
+    """
+
+    if not target.is_file():
+        return True
+    kept = target.with_name(f"{target.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex}")
+    try:
+        os.replace(target, kept)
+    except OSError as error:
+        logger.warning("Could not keep the unreadable conversations file %s aside: %s", target, error)
+        return False
+    logger.warning("Kept the unreadable conversations file as %s.", kept)
+    return True
+
+
+def unreadable_copies(path: Path | None = None) -> list[Path]:
+    """The conversations files :func:`_keep_unreadable` has kept aside, oldest first.
+
+    The pictures they name are still theirs: a sweep of unreferenced pictures
+    counts them, so mending one of these files does not find its pictures gone.
+    """
+
+    target = path or library_path()
+    if not target.parent.is_dir():
+        return []
+    return sorted(p for p in target.parent.iterdir() if p.name.startswith(f"{target.name}.unreadable-"))
+
+
 def _replace(target: Path, text: str) -> bool:
     """Put ``text`` in place of ``target`` in one rename; ``False`` if it could not be.
 
@@ -426,8 +475,8 @@ def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool
 
     What is on disk is read first and merged with ``forks`` as :func:`merge`
     describes, so a save from one page keeps what another page saved since
-    this one loaded. A file that cannot be read is replaced, as it always
-    was; :func:`read` has said why in the log.
+    this one loaded. A file that cannot be read is kept aside under another
+    name rather than replaced; :func:`read` has said why in the log.
 
     Background jobs use ``preserve_active`` to save their source transcript
     without changing which conversation the reader selected most recently.
@@ -435,7 +484,10 @@ def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool
 
     target = path or library_path()
     with _WRITE_LOCK:
-        existing = read(target)
+        try:
+            existing = _read_for_save(target)
+        except OSError:
+            return None
         merged = merge(forks, existing)
         if preserve_active and existing and existing["active"] in merged["branches"]:
             merged["active"] = existing["active"]
@@ -460,7 +512,10 @@ def claim_name(forks: dict | None, prefix: str, path: Path | None = None) -> str
     forks = copy_forks(forks)
     target = path or library_path()
     with _WRITE_LOCK:
-        on_disk = read(target)
+        try:
+            on_disk = _read_for_save(target)
+        except OSError:
+            return next_branch_name(forks, prefix)
         taken = set(on_disk["branches"]) | set(on_disk["updated"]) if on_disk else set()
         name = next_branch_name(forks, prefix, taken)
         put_branch(forks, name, [])

@@ -107,6 +107,58 @@ class RoundTripTests(unittest.TestCase):
             self.assertIsNone(library.read(self.path))
         self.assertEqual(self.path.read_text(), "{not json")
 
+    def test_a_save_over_an_unreadable_file_keeps_the_file_aside(self):
+        forks = new_forks()
+        put_branch(forks, MAIN_BRANCH, [make_turn("user", "keep me")])
+        put_branch(forks, "Chat 1", [make_turn("user", "and me")])
+        library.write(forks, self.path)
+        # One turn this version cannot read makes the whole file unreadable.
+        data = json.loads(self.path.read_text())
+        data["branches"][1]["turns"][0]["role"] = "system"
+        unreadable = json.dumps(data)
+        self.path.write_text(unreadable)
+
+        with self.assertLogs(library.logger, level="WARNING"):
+            self.assertEqual(library.write(new_forks(), self.path), self.path)
+            library.claim_name(new_forks(), "Chat", self.path)
+        kept = library.unreadable_copies(self.path)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0].read_text(), unreadable)
+        # The save itself went ahead, over nothing.
+        self.assertEqual(list(library.read(self.path)["branches"]), [MAIN_BRANCH, "Chat 1"])
+        self.assertEqual(library.read(self.path)["branches"]["Chat 1"], [])
+
+    def test_unreadable_backups_do_not_collide_within_one_second(self):
+        self.path.parent.mkdir(parents=True)
+        with mock.patch.object(library.time, "strftime", return_value="20261003-010000"):
+            for raw in ("{first broken", "{second broken"):
+                self.path.write_text(raw)
+                with self.assertLogs(library.logger, level="WARNING"):
+                    library.write(new_forks(), self.path)
+        self.assertEqual({p.read_text() for p in library.unreadable_copies(self.path)},
+                         {"{first broken", "{second broken"})
+
+    def test_backup_lookup_treats_the_configured_filename_literally(self):
+        self.path.parent.mkdir(parents=True)
+        target = self.path.with_name("chat[1]*?.json")
+        target.write_text("{broken")
+        with self.assertLogs(library.logger, level="WARNING"):
+            library.write(new_forks(), target)
+        copies = library.unreadable_copies(target)
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].read_text(), "{broken")
+
+    def test_failed_backup_preservation_aborts_both_save_paths(self):
+        self.path.parent.mkdir(parents=True)
+        raw = "{only recovery copy"
+        self.path.write_text(raw)
+        with mock.patch.object(library.os, "replace", side_effect=OSError("filename too long")) as replace:
+            with self.assertLogs(library.logger, level="WARNING"):
+                self.assertIsNone(library.write(new_forks(), self.path))
+                self.assertEqual(library.claim_name(new_forks(), "Chat", self.path), "Chat 1")
+            self.assertEqual(replace.call_count, 2)
+        self.assertEqual(self.path.read_text(), raw)
+
     def test_a_file_from_another_app_is_refused(self):
         with self.assertRaises(ValueError):
             library.parse(json.dumps({"format": "other", "branches": []}))
