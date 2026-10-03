@@ -660,6 +660,21 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn('<&"', card)
         self.assertIn('…', card)
 
+    def test_group_box_display_is_bounded_without_mutating_saved_groups(self):
+        import re
+        feature = next(n for n in self.graph["nodes"] if n["kind"] == "feature")
+        nodes = [dict(feature, id=f"feature{i}", layer=0, feature=i) for i in range(4096)]
+        graph = dict(self.graph, nodes=nodes, edges=[])
+        groups = {f"group{i}": [n["id"]] for i, n in enumerate(nodes)}
+        view = render.group_view(graph, groups)
+        self.assertEqual(view.count('<g class="cg-group '), 64)
+        self.assertIn("Showing 64 of 4,096 groups.", view)
+        height = float(re.search(r'viewBox="0 0 [^ ]+ ([^"]+)"', view)[1])
+        self.assertLess(height, 6000)
+        self.assertLess(len(view), 50000)
+        self.assertEqual(len(groups), 4096)
+        self.assertEqual(len(graph["nodes"]), 4096)
+
     def test_large_intervention_display_keeps_all_measurements_but_bounds_dom(self):
         import re
         members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"][:1]
@@ -870,7 +885,7 @@ class WorkbenchTests(unittest.TestCase):
         opened = mock.Mock(side_effect=AssertionError("model session acquired"))
         bench = workbench.Workbench(SimpleNamespace(open_session=opened), tempfile.gettempdir())
         for key in ("tokens", "others"):
-            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "32768"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "4096"):
                 bench.trace({}, {"mode": "contrast", "tokens": ["1"], "others": ["2"], key: ["x" * 32769]},
                             attribution.Settings(), lambda *args: None, lambda: False)
         opened.assert_not_called()
@@ -1254,6 +1269,16 @@ class WorkbenchTests(unittest.TestCase):
                 bench.ablate(graph, node, lambda *_args: None, lambda: stopped)
             self.assertEqual(passes.call_count, 1)
 
+    def test_inactive_explanation_text_cannot_exceed_saved_schema_bounds(self):
+        models = SimpleNamespace(open_session=mock.Mock(side_effect=AssertionError("model acquired")))
+        bench = workbench.Workbench(models, tempfile.gettempdir())
+        for field in ("tokens", "others"):
+            explain = dict(mode="top", tokens=[], others=[])
+            explain[field] = ["x" * 4097]
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "4096 characters"):
+                bench.trace({}, explain, attribution.Settings(), lambda *_: None, lambda: False)
+        models.open_session.assert_not_called()
+
     def test_duplicate_trace_entries_are_bounded_before_tokenization(self):
         models = SimpleNamespace(open_session=mock.Mock(side_effect=AssertionError("must not tokenize")))
         bench = workbench.Workbench(models, tempfile.gettempdir())
@@ -1550,6 +1575,48 @@ class WorkbenchTests(unittest.TestCase):
                     result = handlers["picked"](graph, json.dumps(dict(selected=[members[1]], focus=members[1])), "view")
                     self.assertEqual(result[1], members[1])
                     work.assert_not_called()
+            finally:
+                demo.close()
+
+    def test_new_trace_request_cancels_the_active_model_work(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None, lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                original = handlers["begin_trace"]("view")
+                entered, release, cancelled = threading.Event(), threading.Event(), threading.Event()
+                def running(_bench, _prompt, _explain, _settings, _progress, stop):
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError("new trace did not cancel")
+                    if stop():
+                        cancelled.set()
+                        raise attribution.Cancelled()
+                    raise AssertionError("active cancellation flag was not set")
+                real_cancel = workbench.Workbench.cancel
+                def cancel(bench, owner):
+                    real_cancel(bench, owner)
+                    release.set()
+                with mock.patch.object(workbench.Workbench, "trace", autospec=True, side_effect=running), \
+                        mock.patch.object(workbench.Workbench, "cancel", autospec=True, side_effect=cancel):
+                    frames = []
+                    thread = threading.Thread(target=lambda: frames.extend(handlers["run_trace"](
+                        "view", "", "hi", "", False, "The likeliest next tokens", "", "", 40, .8, .98, 8, 40, False, original)))
+                    thread.start()
+                    self.assertTrue(entered.wait(5))
+                    newer = handlers["begin_trace"]("view")
+                    thread.join(5)
+                    self.assertFalse(thread.is_alive())
+                    self.assertNotEqual(original, newer)
+                    self.assertTrue(cancelled.is_set())
+                    self.assertTrue(all(value == gr.skip() for frame in frames for value in frame))
             finally:
                 demo.close()
 

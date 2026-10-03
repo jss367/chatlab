@@ -372,6 +372,7 @@ def build_page(context):
         with version_lock:
             request = uuid4().hex
             trace_requests[session_id] = (request, version(session_id))
+            bench.cancel(session_id)
             return request
 
     def run_trace(session_id, system_text, user_text, prefix_text, plain, choice, tokens_text, others_text,
@@ -400,7 +401,10 @@ def build_page(context):
                 else:
                     graph = item[1]
         except Cancelled:
-            yield ("Stopped.", gr.skip(), *skip)
+            if request is not None and trace_requests.get(session_id, (None,))[0] != request:
+                yield (gr.skip(), gr.skip(), *skip)
+            else:
+                yield ("Stopped.", gr.skip(), *skip)
             return
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
