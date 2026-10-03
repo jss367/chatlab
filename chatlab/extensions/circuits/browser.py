@@ -41,7 +41,7 @@ def spec_named(key):
 def page_start(spec, start):
     """The first feature of the page holding ``start``, inside the layer."""
     start = int(start or 0)
-    return max(0, min(start, spec.width - PAGE_SIZE))
+    return max(0, min(start, spec.width - 1)) // PAGE_SIZE * PAGE_SIZE
 
 
 def fetch_page(records, layer, start, count=PAGE_SIZE):
@@ -180,7 +180,7 @@ def build_browser(context, bench):
             spec = spec_named(key)
             first_feature = page_start(spec, int(start_value or 0) + step * PAGE_SIZE)
             records = bench.records(spec)
-            rows = fetch_page(records, int(layer_value), first_feature)
+            rows = fetch_page(records, int(layer_value), first_feature, min(PAGE_SIZE, spec.width - first_feature))
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         page = {"set": spec.key, "layer": int(layer_value), "start": first_feature, "count": len(rows),

@@ -2361,7 +2361,14 @@ class BrowserTests(unittest.TestCase):
     def test_pages_stay_inside_the_layer_and_failed_records_are_kept(self):
         spec = transcoders.spec_for("google/gemma-3-1b-it")
         self.assertEqual(browser.page_start(spec, -5), 0)
-        self.assertEqual(browser.page_start(spec, 10 ** 9), spec.width - browser.PAGE_SIZE)
+        last = (spec.width - 1) // browser.PAGE_SIZE * browser.PAGE_SIZE
+        self.assertEqual(browser.page_start(spec, 10 ** 9), last)
+        previous = last - browser.PAGE_SIZE
+        self.assertEqual(browser.page_start(spec, previous + browser.PAGE_SIZE), last)
+        self.assertEqual(browser.page_start(spec, last - browser.PAGE_SIZE), previous)
+        self.assertEqual(browser.page_start(spec, last + browser.PAGE_SIZE), last)
+        self.assertEqual(browser.page_start(spec, last + 1), last)
+        self.assertLess(spec.width - last, browser.PAGE_SIZE)
 
         class Records:
             def get(self, layer, feature):
