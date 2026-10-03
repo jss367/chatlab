@@ -256,7 +256,8 @@ class GenerationSession:
         that keeps nothing else. Needs a PyTorch load, as :meth:`read_examples`.
         """
         self._check()
-        return self._manager.project_blocks(list(ids), directions, load_id=self.load_id)
+        return self._manager.project_blocks(list(ids), directions, load_id=self.load_id,
+                                            cancelled=self._cancelled.is_set)
 
     @property
     def model_revision(self):

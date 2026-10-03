@@ -12,6 +12,7 @@ from uuid import uuid4
 import gradio as gr
 import numpy as np
 
+from chatlab.model_inspection import ProjectionCancelled
 from chatlab.extension_api import write_private_text
 from . import probe as probes
 
@@ -394,6 +395,9 @@ def build_page(context):
         positive, negative = parse_examples(wanted), parse_examples(unwanted)
         looking_for, against = (looking_for or "").strip(), (against or "").strip()
         try:
+            probe_name = (probe_name or "").strip() or "Probe"
+            if len(probe_name) > 200 or len(looking_for) > 60 or len(against) > 60:
+                raise ValueError("Use at most 200 characters for the probe name and 60 for each label.")
             if not looking_for or not against or looking_for == against:
                 raise ValueError("Give the two sides different labels.")
             for side, examples in ((looking_for, positive), (against, negative)):
@@ -412,7 +416,7 @@ def build_page(context):
                 unwanted_rows = session.read_examples(negative, chat_template=template, pool=pooling)
             # The model is released before fitting, which needs only the arrays.
             fitted, folds = probes.train(wanted_rows, unwanted_rows, l2=strength, paired=pairs)
-            probe = probes.build(name=(probe_name or "").strip() or "Probe", model_id=model_id,
+            probe = probes.build(name=probe_name, model_id=model_id,
                                  model_revision=revision, precision=precision,
                                  positive_label=looking_for, negative_label=against,
                                  positive_examples=positive, negative_examples=negative, pool=pooling,
@@ -472,7 +476,7 @@ def build_page(context):
 
         The reply streams into its box; the probe's reading arrives once, at
         the end, because it is one forward pass over the finished sequence.
-        Stopping a reply still reads what was generated.
+        Stopping retains the generated reply without starting further model reads.
         """
         if probe is None:
             raise gr.Error(NO_PROBE)
@@ -538,6 +542,10 @@ def build_page(context):
                 reading = dict(id=uuid4().hex, probe_id=probe["id"], model_id=session.model_id, load_id=session.load_id,
                                token_ids=ids, texts=[session.decode([token]) for token in ids], first=first,
                                probabilities=probes.probabilities(probe, projections).tolist())
+        except ProjectionCancelled:
+            yield ((gr.skip(), gr.skip(), gr.skip(), "Stopped.", gr.skip())
+                   if runs.live(view, turn) else (gr.skip(),) * 5)
+            return
         except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise gr.Error(str(exc)) from exc
         finally:

@@ -31,6 +31,10 @@ from chatlab.tokenization import (
     score_token_limit,
 )
 
+class ProjectionCancelled(RuntimeError):
+    """A stopped projection; all model hooks are removed before it escapes."""
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -562,7 +566,7 @@ class InspectionMixin:
             return np.stack(self._example_readings(examples, use_chat_template, pool, blocks))
 
     @_guards_device_memory
-    def project_blocks(self, token_ids: Sequence[int], directions, *, load_id: str | None = None) -> np.ndarray:
+    def project_blocks(self, token_ids: Sequence[int], directions, *, load_id: str | None = None, cancelled=None) -> np.ndarray:
         """Every position's block output, read along one direction per block.
 
         ``directions`` holds one vector per decoder block, indexed as the
@@ -575,6 +579,11 @@ class InspectionMixin:
 
         import torch
 
+        def check_cancelled(*_args):
+            if cancelled and cancelled():
+                raise ProjectionCancelled("Stopped reading the probe.")
+
+        check_cancelled()
         ids = [int(value) for value in token_ids]
         if not ids:
             raise ValueError("There are no tokens to read.")
@@ -607,6 +616,7 @@ class InspectionMixin:
 
             def record(index: int):
                 def capture(_module, _inputs, output):
+                    check_cancelled()
                     hidden = output[0] if isinstance(output, tuple) else output
                     if not isinstance(hidden, torch.Tensor) or hidden.dim() != 3:
                         raise steering_vectors.SteeringError(
@@ -623,8 +633,12 @@ class InspectionMixin:
 
                 return capture
 
-            handles = [block.register_forward_hook(record(index)) for index, block in enumerate(blocks)]
+            handles = []
+            for index, block in enumerate(blocks):
+                handles.append(block.register_forward_pre_hook(check_cancelled))
+                handles.append(block.register_forward_hook(record(index)))
             try:
+                check_cancelled()
                 self.model(
                     input_ids=torch.tensor([ids], dtype=torch.long, device=device),
                     use_cache=False,
@@ -632,6 +646,7 @@ class InspectionMixin:
             finally:
                 for handle in handles:
                     handle.remove()
+            check_cancelled()
             if any(row is None for row in captured):
                 raise steering_vectors.SteeringError(
                     "Some of this model's decoder blocks did not run, so the "

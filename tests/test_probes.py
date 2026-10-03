@@ -221,6 +221,29 @@ class HostReadingTests(unittest.TestCase):
         np.testing.assert_allclose(projections[0], output.hidden_states[1][0].numpy() @ directions[0],
                                    rtol=1e-4, atol=1e-5)
 
+    def test_projection_stop_interrupts_layers_and_removes_hooks(self):
+        from chatlab.model_inspection import ProjectionCancelled
+        held = tiny_manager()
+        blocks = steering.decoder_layers(held.model)
+        with ModelService(lambda: held).open_session() as session:
+            ids = session.example_ids("Hello world")
+            stop = blocks[0].register_forward_hook(lambda *_args: session.cancel())
+            try:
+                with mock.patch.object(blocks[1], "forward", wraps=blocks[1].forward) as later:
+                    with self.assertRaises(ProjectionCancelled):
+                        session.project_layers(ids, np.zeros((2, 8)))
+                    later.assert_not_called()
+            finally:
+                stop.remove()
+            for block in blocks:
+                self.assertFalse(block._forward_hooks)
+                self.assertFalse(block._forward_pre_hooks)
+            with self.assertRaises(ProjectionCancelled):
+                session.project_layers(ids, np.zeros((2, 8)))
+        # The lease and hooks are reusable after stopping.
+        with ModelService(lambda: held).open_session() as session:
+            self.assertEqual(session.project_layers(ids, np.zeros((2, 8))).shape, (2, len(ids)))
+
     def test_bad_directions_a_stale_load_and_mlx_are_refused(self):
         held = tiny_manager()
         ids = held._example_ids("Hello world", False)
@@ -342,6 +365,12 @@ class PageTests(unittest.TestCase):
         self.assertNotEqual(painted, (gr.skip(), gr.skip()))
         note, _ = self.fn["inspect_token"](probe, reading, 1, "owner", SimpleNamespace(index=0))
         self.assertIn("Token 1", note)
+
+    def test_overlong_metadata_is_refused_before_model_work(self):
+        with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("must not read examples")):
+            for changes in ({"probe_name": "n" * 201}, {"looking_for": "p" * 61}, {"against": "n" * 61}):
+                with self.subTest(changes=changes), self.assertRaisesRegex(gr.Error, "200 characters.*60"):
+                    self.train(**changes)
 
     def test_invalid_l2_is_refused_before_model_work(self):
         with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("must not read examples")):
@@ -485,6 +514,17 @@ class PageTests(unittest.TestCase):
             with self.assertRaisesRegex(gr.Error, "displayed probe changed"):
                 self.read(old, READ, WANTED[0])
         self.assertIsNotNone(self.read(current, READ, WANTED[0])[-1][0])
+
+    def test_stopped_projection_reports_stop_and_releases_the_session(self):
+        probe = self.train()[0]
+        block = steering.decoder_layers(self.manager.model)[0]
+        stop = block.register_forward_hook(lambda *_args: self.fn["cancel"]("owner"))
+        try:
+            frames = self.read(probe, READ, WANTED[0])
+            self.assertEqual(frames[-1], (gr.skip(), gr.skip(), gr.skip(), "Stopped.", gr.skip()))
+        finally:
+            stop.remove()
+        self.assertIsNotNone(self.read(probe, READ, WANTED[0])[-1][0])
 
     def test_a_run_the_page_moved_on_from_publishes_nothing(self):
         probe = self.train()[0]
