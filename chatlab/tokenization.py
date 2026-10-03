@@ -673,6 +673,15 @@ class IncrementalDecoder:
             return self._settled + self._pending.rstrip(REPLACEMENT_CHARACTER)
         return self.text
 
+    def prefix_end(self, full_text: str) -> int | None:
+        """Boundary in the full decode of this stream, or None for an unfinished character.
+
+        The settled prefix is final; only the bounded pending suffix needs
+        comparison, so obtaining token boundaries never copies a growing reply.
+        """
+        start = len(self._settled)
+        return start + len(self._pending) if full_text.startswith(self._pending, start) else None
+
     def _decode(self, token_ids: list[int]) -> str:
         return self._tokenizer.decode(
             token_ids,

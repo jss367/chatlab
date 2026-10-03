@@ -15,6 +15,7 @@ which answer to the pane and the Chat page both.
 
 from __future__ import annotations
 
+
 import html
 import logging
 from dataclasses import dataclass
@@ -110,7 +111,14 @@ from chatlab.ui.settings_layout import (
     wire_settings_persistence,
 )
 from chatlab.ui.settings_page import refresh_hardware, update_sampling_label
-from chatlab.ui.steering import load_with_steering, steering_updates
+from chatlab.ui.steering import (
+    STEERING_LOCK,
+    reserve_steering,
+    apply_vector,
+    description as steering_description,
+    load_with_steering,
+    steering_updates,
+)
 from chatlab.ui.styles import (
     COLUMN_JS,
     CSS,
@@ -268,8 +276,8 @@ def build_app() -> gr.Blocks:
             # The three pages share the rest of the width; one is visible at a
             # time, chosen by the nav.
             chat_page = build_chat_page(saved, states)
-            extension_pages, extension_model_buttons = _build_extension_pages(
-                extensions, extension_errors
+            extension_pages, extension_model_buttons, extension_steering_buttons = (
+                _build_extension_pages(extensions, extension_errors)
             )
             images = build_images_page(saved)
             models = build_models_page(saved)
@@ -309,6 +317,7 @@ def build_app() -> gr.Blocks:
         wire_message_box(settings_page, chat_page.chat.prompt)
         wire_sampling(chat_page.sampling, states)
         wire_steering(chat_page.steering, states)
+        _wire_extension_steering(pages, chat_page, states, extension_steering_buttons)
         settings_inputs, chat_inputs = _request_inputs(chat_page, settings_page, states)
         wire_settings_persistence(
             demo, saved, theme_style, settings_page, models, chat_page.sampling,
@@ -511,19 +520,22 @@ def _build_conversation_pane() -> ConversationPane:
     )
 
 
-def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tuple[list, list]:
+def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tuple[list, list, list]:
     """A hidden column per enabled extension, each built by the extension itself.
 
     An extension whose page fails to build has its error added to
     ``extension_errors``, which the Settings page lists, and a note drawn in
-    its place. Returns the ``(label, column)`` pairs, and the ``(button,
-    model ID)`` pairs the pages asked to have open the Models page.
+    its place. Returns the ``(label, column)`` pairs, the ``(button, model
+    ID)`` pairs the pages asked to have open the Models page, and the
+    ``(button, vector, inputs)`` triples they asked to have steer Chat.
     """
 
     extension_pages = []
     extension_model_buttons = []
+    extension_steering_buttons = []
     navigation = NavigationService(
-        lambda button, model_id: extension_model_buttons.append((button, model_id)))
+        lambda button, model_id: extension_model_buttons.append((button, model_id)),
+        lambda button, vector, inputs, prepare=None, commit=None: extension_steering_buttons.append((button, vector, inputs, prepare, commit)))
     for extension in extensions:
         with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
             context = ExtensionContext(
@@ -538,7 +550,78 @@ def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tup
                 extension_errors.append(message)
                 gr.Markdown("This extension could not open. " + html.escape(message))
         extension_pages.append((extension.spec.page_label, extension_page))
-    return extension_pages, extension_model_buttons
+    return extension_pages, extension_model_buttons, extension_steering_buttons
+
+
+def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, buttons: list) -> None:
+    """Each extension button that builds a steering vector, applied to the conversation and shown on Chat."""
+
+    page_outputs = [pages.nav, pages.conversations, pages.chat, pages.images, pages.models,
+                    pages.settings, *(page for _, page in pages.extensions)]
+    capture_lock = STEERING_LOCK
+    for entry in buttons:
+        button, vector, inputs = entry[:3]
+        prepare = entry[3] if len(entry) > 3 else None
+        commit = entry[4] if len(entry) > 4 else None
+        def steer(forks, *values, build=vector, guard=commit):
+            try:
+                value = build(*values)
+            except ValueError as error:
+                raise gr.Error(str(error)) from error
+            applied = (apply_vector(forks, value, commit=lambda: guard(*values))
+                       if guard is not None else apply_vector(forks, value))
+            gr.Info(steering_description(applied[1]))
+            return (*applied, CHAT_PAGE, *show_page(CHAT_PAGE),
+                    *(gr.update(visible=False) for _ in pages.extensions))
+        outputs = [states.forks, *chat_page.steering.outputs, *page_outputs]
+        captured = gr.Textbox(visible=False)
+        def capture_steering(forks, *values):
+            return reserve_steering(forks, values)
+        def captured_receipt(forks, ticket, prepared=False):
+            key = ticket + ":prepared" if prepared and isinstance(ticket, str) else ticket
+            receipt = forks.get("_steering_requests", {}).get(key) if isinstance(ticket, str) else None
+            if receipt is None:
+                raise gr.Error("Steering changed while this request was preparing. Keep the newer choice or try again.")
+            return receipt
+        def validate_receipt(forks, branch, identity, generation):
+            if ((forks or {}).get("active", MAIN_BRANCH) != branch
+                    or (forks or {}).get("_view_identity") != identity):
+                raise gr.Error("The active conversation changed while preparing steering. Try again on the intended conversation.")
+            if (forks.get("_steering_generation") or {}).get(branch) != generation:
+                raise gr.Error("Steering changed while this request was preparing. Keep the newer choice or try again.")
+        event = button.click(capture_steering, [states.forks, *inputs], captured, queue=False)
+        if prepare is None:
+            def apply_captured_steering(forks, receipt, apply=steer):
+                with capture_lock:
+                    values, branch, identity, generation = captured_receipt(forks, receipt)
+                    validate_receipt(forks, branch, identity, generation)
+                    return apply(forks, *values)
+            event.success(apply_captured_steering, [states.forks, captured], outputs,
+                          concurrency_id=CONVERSATION_PANE_QUEUE)
+        else:
+            prepared = gr.Textbox(visible=False)
+            def prepare_steering(forks, ticket, build=prepare):
+                with capture_lock:
+                    receipt = captured_receipt(forks, ticket)
+                    values, branch, identity, generation = receipt
+                    validate_receipt(forks, branch, identity, generation)
+                try:
+                    value = build(*values)
+                except ValueError as error:
+                    raise gr.Error(str(error)) from error
+                with capture_lock:
+                    validate_receipt(forks, branch, identity, generation)
+                    forks["_steering_requests"][ticket + ":prepared"] = (value, *receipt)
+                return ticket
+            def apply_prepared_steering(forks, ticket, apply=steer):
+                with capture_lock:
+                    value, values, branch, identity, generation = captured_receipt(forks, ticket, prepared=True)
+                    validate_receipt(forks, branch, identity, generation)
+                    return apply(forks, value, *values)
+            prepared_event = event.success(prepare_steering, [states.forks, captured], prepared,
+                                           concurrency_id="extension-steering-prepare")
+            prepared_event.success(apply_prepared_steering, [states.forks, prepared], outputs,
+                                   concurrency_id=CONVERSATION_PANE_QUEUE)
 
 
 def _wire_pages(

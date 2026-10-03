@@ -98,6 +98,7 @@ from chatlab.ui.steering import (
     EXTRACT_EMPTY,
     EXTRACT_HEADERS,
     POOL_CHOICES,
+    apply_reserved_steering,
     choose_layer,
     describe_layer,
     download_extracted,
@@ -105,6 +106,7 @@ from chatlab.ui.steering import (
     import_vector,
     remember_steering,
     remove_vector,
+    reserve_steering,
     use_extracted,
 )
 from chatlab.ui.styles import pane_handle, message_box_settings
@@ -1582,14 +1584,22 @@ def wire_sampling(sampling: Sampling, states: SharedState) -> None:
 def wire_steering(steering: Steering, states: SharedState) -> None:
     """Importing, extracting and adjusting the steering vector."""
 
-    steering.upload.upload(
-        import_vector, [steering.upload, states.forks], [states.forks, *steering.outputs],
-        concurrency_id=CONVERSATION_PANE_QUEUE,
-    )
-    steering.remove.click(
-        remove_vector, states.forks, [states.forks, *steering.outputs],
-        concurrency_id=CONVERSATION_PANE_QUEUE,
-    )
+    def manual(trigger, handler, inputs, outputs, *, reverse=False, **options):
+        ticket = gr.Textbox(visible=False)
+        def capture(forks, *values):
+            return reserve_steering(forks, values)
+        capture.__name__ = "capture_" + handler.__name__
+        def apply(forks, request):
+            return apply_reserved_steering(forks, request, handler, len(outputs), reverse)
+        apply.__name__ = handler.__name__
+        trigger(capture, [states.forks, *inputs], ticket, queue=False, **options).success(
+            apply, [states.forks, ticket], outputs, concurrency_id=CONVERSATION_PANE_QUEUE,
+            show_progress="hidden",
+        )
+
+    manual(steering.upload.upload, import_vector, [steering.upload],
+           [states.forks, *steering.outputs], reverse=True)
+    manual(steering.remove.click, remove_vector, [], [states.forks, *steering.outputs])
     steering.extract_button.click(
         extract_vector,
         [steering.extract_positive, steering.extract_negative, steering.extract_chat, steering.extract_pool],
@@ -1607,20 +1617,13 @@ def wire_steering(steering: Steering, states: SharedState) -> None:
         steering.extract_status,
         show_progress="hidden",
     )
-    steering.extract_apply.click(
-        use_extracted,
-        [states.forks, states.extract, steering.extract_layer],
-        [states.forks, *steering.outputs],
-        concurrency_id=CONVERSATION_PANE_QUEUE,
-    )
+    manual(steering.extract_apply.click, use_extracted, [states.extract, steering.extract_layer],
+           [states.forks, *steering.outputs])
     for control in (steering.enabled, steering.strength, steering.layer):
-        control.input(
-            remember_steering,
-            [states.forks, states.steering, steering.enabled, steering.strength, steering.layer],
-            [states.forks, states.steering, steering.status],
-            trigger_mode="always_last", show_progress="hidden",
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-        )
+        manual(control.input, remember_steering,
+               [states.steering, steering.enabled, steering.strength, steering.layer],
+               [states.forks, states.steering, steering.status],
+               trigger_mode="always_last", show_progress="hidden")
 
 
 def wire_score_and_batch(

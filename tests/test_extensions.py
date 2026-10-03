@@ -305,6 +305,299 @@ class RegistryTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_slow_capture_copy_does_not_reverse_steering_order(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from chatlab.conversation import new_forks, branch_sampling
+        from chatlab.ui import steering as controls_module
+        def build(context):
+            context.navigation.steer_chat(gr.Button("Steer"), lambda value: value,
+                                          [gr.State(None)])
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch("chatlab.ui.layout.load_enabled", return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            for manual in (False, True):
+                entered, release = Event(), Event()
+                class SlowValue(dict):
+                    def __deepcopy__(self, memo):
+                        entered.set()
+                        if not release.wait(2):
+                            raise AssertionError("copy was not released")
+                        return dict(self)
+                old = SlowValue(format="chatlab-steering-1", model_id="org/model", layer=0,
+                                vector=[1., 0.], strength=1.)
+                new = dict(old, strength=2.)
+                forks = new_forks()
+                if manual:
+                    capture = lambda value: controls_module.reserve_steering(forks, (value, True, value["strength"], 0))
+                    apply = lambda ticket: controls_module.apply_reserved_steering(
+                        forks, ticket, controls_module.remember_steering, 3)
+                else:
+                    capture = lambda value: listener_named(demo, "capture_steering").fn(forks, value)
+                    apply = lambda receipt: listener_named(demo, "apply_captured_steering").fn(forks, receipt)
+                with self.subTest(manual=manual), ThreadPoolExecutor(max_workers=2) as pool:
+                    older = pool.submit(capture, old)
+                    self.assertTrue(entered.wait(1))
+                    try:
+                        newer = pool.submit(capture, new).result(timeout=1)
+                    finally:
+                        release.set()
+                    older = older.result(timeout=2)
+                    if manual:
+                        self.assertTrue(all(item == gr.skip() for item in apply(older)))
+                    else:
+                        with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                            apply(older)
+                    result = apply(newer)
+                    self.assertEqual(branch_sampling(result[0], result[0]["active"])["steering"]["strength"], 2.)
+        finally:
+            demo.close()
+
+    def test_queued_manual_edits_do_not_invalidate_later_extension_clicks(self):
+        from chatlab.conversation import branch_sampling, copy_forks, new_forks
+        buttons = []
+        def build(context):
+            button = gr.Button("Steer")
+            def value():
+                return {"format": "chatlab-steering-1", "model_id": "org/model", "layer": 0,
+                        "vector": [1., 0.], "strength": 2.}
+            context.navigation.steer_chat(button, value)
+            buttons.append(button)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch("chatlab.ui.layout.load_enabled", return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            capture = listener_named(demo, "capture_steering")
+            self.assertIsInstance(capture.outputs[0], gr.Textbox)
+            apply = listener_named(demo, "apply_captured_steering")
+            for name, values in (("remove_vector", ()), ("import_vector", ("not-read.json",)),
+                                 ("use_extracted", (None, 0)), ("remember_steering", (None, False, 1., 0))):
+                manual_capture = listener_named(demo, "capture_" + name)
+                manual_apply = listener_named(demo, name)
+                self.assertFalse(manual_capture.queue)
+                self.assertEqual(manual_apply.concurrency_id, apply.concurrency_id)
+                forks = new_forks()
+                ticket = manual_capture.fn(forks, *values)
+                queued = copy_forks(forks)
+                receipt = capture.fn(forks)
+                generation = forks["_steering_generation"][forks["active"]]
+                with self.subTest(manual=name):
+                    self.assertTrue(all(item == gr.skip() for item in manual_apply.fn(queued, ticket)))
+                    self.assertEqual(forks["_steering_generation"][forks["active"]], generation)
+                    result = apply.fn(queued, receipt)
+                    self.assertEqual(branch_sampling(result[0], result[0]["active"])["steering"]["strength"], 2.)
+            # Reversing click order gives the newer manual Remove precedence.
+            forks = new_forks()
+            receipt = capture.fn(forks)
+            ticket = listener_named(demo, "capture_remove_vector").fn(forks)
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                apply.fn(forks, receipt)
+            result = listener_named(demo, "remove_vector").fn(forks, ticket)
+            self.assertIsNone(branch_sampling(result[0], result[0]["active"]).get("steering"))
+        finally:
+            demo.close()
+
+    def test_extension_steering_button_steers_the_conversation_and_opens_chat(self):
+        from chatlab.conversation import MAIN_BRANCH, branch_sampling, new_forks
+
+        buttons = []
+        def build(context):
+            button = gr.Button("Steer")
+            strength = gr.State({"strength": 2.0})
+            def vector(amount):
+                if amount is None:
+                    raise ValueError("Pick a feature first.")
+                return {"format": "chatlab-steering-1", "model_id": "org/model", "layer": 3,
+                        "vector": [1.0, 0.0], "strength": amount["strength"]}
+            context.navigation.steer_chat(button, vector, [strength])
+            buttons.append(button)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            listener = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            self.assertFalse(listener.queue)
+            application = next(fn for fn in demo.fns.values()
+                               if fn.fn and fn.fn.__name__ == "apply_captured_steering")
+            self.assertEqual(application.concurrency_id, 'conversation-pane')
+            forks = new_forks()
+            selected = {"strength": 2.0}
+            receipt = listener.fn(forks, selected)
+            selected["strength"] = 9.0
+            with mock.patch('gradio.Info') as info:
+                updates = application.fn(forks, receipt)
+            self.assertIn("layer 3", info.call_args.args[0])
+            forks = updates[0]
+            held = branch_sampling(forks, MAIN_BRANCH)["steering"]
+            self.assertEqual((held["model_id"], held["layer"], held["strength"]), ("org/model", 3, 2.0))
+            self.assertEqual(held["format"], "chatlab-steering-reference-1")
+            labelled = dict(zip(application.outputs, updates, strict=True))
+            nav = next(b for b in labelled if getattr(b, 'elem_id', None) == 'nav')
+            self.assertEqual(labelled[nav], 'Chat')
+            chat = next(b for b in labelled if getattr(b, 'elem_id', None) == 'chat-page')
+            self.assertTrue(labelled[chat]['visible'])
+            self.assertFalse(labelled[application.outputs[-1]]['visible'])
+            enabled = next(b for b in labelled if getattr(b, 'label', None) == 'Enable steering')
+            self.assertEqual(labelled[enabled]['value'], True)
+            with self.assertRaisesRegex(gr.Error, "Pick a feature"):
+                empty = new_forks()
+                application.fn(empty, listener.fn(empty, None))
+        finally:
+            demo.close()
+
+    def test_expensive_steering_preparation_runs_outside_conversation_queue(self):
+        from chatlab.conversation import new_forks
+        prepare = mock.Mock(return_value={"format": "chatlab-steering-1", "model_id": "org/model", "layer": 3,
+                                         "vector": [1.0, 0.0], "strength": 2.0})
+        valid = [True]
+        buttons = []
+        def build(context):
+            button = gr.Button("Prepared steering")
+            def validate(value, selected=None):
+                if not valid[0]:
+                    raise ValueError("Selection changed")
+                return value
+            context.navigation.steer_chat(button, validate, prepare=prepare)
+            buttons.append(button)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            capture = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            preparation = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "prepare_steering")
+            application = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "apply_prepared_steering")
+            self.assertFalse(capture.queue)
+            self.assertNotEqual(preparation.concurrency_id, "conversation-pane")
+            self.assertEqual(application.concurrency_id, "conversation-pane")
+            forks = new_forks()
+            selected = {"feature": "A"}
+            receipt = capture.fn(forks, selected)
+            selected["feature"] = "B"
+            self.assertEqual(forks["_steering_requests"][receipt][0], ({"feature": "A"},))
+            payload = preparation.fn(forks, receipt)
+            application.fn(forks, payload)
+            prepare.assert_called_once()
+            with self.assertRaisesRegex(gr.Error, "active conversation changed|Steering changed"):
+                application.fn({**forks, "active": "Different chat"}, payload)
+            # Clear all creates fresh forks with the same Main label.
+            with self.assertRaisesRegex(gr.Error, "active conversation changed|Steering changed"):
+                application.fn(new_forks(), payload)
+            from chatlab.conversation import copy_forks
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(copy_forks(forks), payload)
+            from chatlab.ui.steering import store
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(store(forks, None), payload)
+            newer_receipt = capture.fn(forks, selected)
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(forks, payload)
+            payload = preparation.fn(forks, newer_receipt)
+            valid[0] = False
+            with self.assertRaisesRegex(gr.Error, "Selection changed"):
+                application.fn(forks, payload)
+            self.assertEqual(prepare.call_count, 2)
+            from concurrent.futures import ThreadPoolExecutor
+            import time
+            class SlowGenerations(dict):
+                def get(self, key, default=None):
+                    value = super().get(key, default)
+                    time.sleep(0.01)
+                    return value
+            forks["_steering_generation"] = SlowGenerations(forks["_steering_generation"])
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                receipts = list(pool.map(lambda _: capture.fn(forks), range(8)))
+            self.assertEqual(len(set(receipts)), 8)
+            # Copies returned before State publication retain the live reservation ledger.
+            copied = copy_forks(forks)
+            before = copied["_steering_generation"][forks["active"]]
+            capture.fn(forks)
+            self.assertGreater(copied["_steering_generation"][forks["active"]], before)
+            from threading import Event
+            from chatlab.ui import layout as layout_module
+            entered, release, capture_started, captured_next = Event(), Event(), Event(), Event()
+            valid[0] = True
+            current_receipt = capture.fn(forks, selected)
+            current_payload = preparation.fn(forks, current_receipt)
+            original_apply = layout_module.apply_vector
+            def paused_apply(*args):
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError("application was not released")
+                return original_apply(*args)
+            def later_capture():
+                capture_started.set()
+                receipt = capture.fn(forks, selected)
+                captured_next.set()
+                return receipt
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                with mock.patch.object(layout_module, "apply_vector", side_effect=paused_apply):
+                    applying = pool.submit(application.fn, forks, current_payload)
+                    self.assertTrue(entered.wait(1))
+                    newer = pool.submit(later_capture)
+                    self.assertTrue(capture_started.wait(1))
+                    try:
+                        self.assertFalse(captured_next.wait(0.05))
+                    finally:
+                        release.set()
+                    applied = applying.result(timeout=2)
+                    next_receipt = newer.result(timeout=2)
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(applied[0], current_payload)
+            application.fn(applied[0], preparation.fn(applied[0], next_receipt))
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(forks, payload)
+        finally:
+            demo.close()
+
+    def test_prepared_selection_is_rechecked_after_vector_compaction(self):
+        from contextlib import contextmanager
+        from chatlab.conversation import new_forks, branch_sampling, MAIN_BRANCH
+        from chatlab.ui import steering as steering_ui
+        selected = [True]
+        buttons = []
+        value = {"format": "chatlab-steering-1", "model_id": "org/model", "layer": 0,
+                 "vector": [1., 0.], "strength": 1.}
+        def build(context):
+            button = gr.Button("Guarded steering")
+            buttons.append(button)
+            def validate(prepared):
+                if not selected[0]:
+                    raise ValueError("Selection changed")
+                return prepared
+            @contextmanager
+            def commit(prepared):
+                validate(prepared)
+                yield
+            context.navigation.steer_chat(button, validate, prepare=lambda: value, commit=commit)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            capture = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            prepare = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "prepare_steering")
+            apply = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "apply_prepared_steering")
+            forks = new_forks()
+            ticket = prepare.fn(forks, capture.fn(forks))
+            generation = dict(forks["_steering_generation"])
+            compact = steering_ui.compact
+            def changed(value):
+                result = compact(value)
+                selected[0] = False
+                return result
+            with mock.patch.object(steering_ui, "compact", side_effect=changed), self.assertRaisesRegex(gr.Error, "Selection changed"):
+                apply.fn(forks, ticket)
+            self.assertEqual(forks["_steering_generation"], generation)
+            self.assertIsNone(branch_sampling(forks, MAIN_BRANCH).get("steering"))
+            selected[0] = True
+            self.assertIsNotNone(branch_sampling(apply.fn(forks, ticket)[0], MAIN_BRANCH)["steering"])
+        finally:
+            demo.close()
+
+    def test_a_host_without_steering_refuses_the_button(self):
+        with self.assertRaisesRegex(ValueError, "cannot hand"):
+            NavigationService(lambda *args: None).steer_chat(object(), lambda: None)
+
     def test_extension_tiles_sit_under_the_built_in_pages_behind_a_rule(self):
         specs = [
             ExtensionSpec('one', 'One', '', 'One', 'one_module'),
