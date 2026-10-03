@@ -313,6 +313,27 @@ class TrialTests(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, f"Trial 't1': .*{message}"):
                 read_trials(self.write([trial], **extra))
 
+    def test_disabled_control_can_walk_past_a_steering_cell(self):
+        for changes in ({"enabled": False}, {"strength": 0}):
+            trial = self.trial(supplied_moves=2, steering=VECTOR | changes, steer_when={"cell": [0, 1]})
+            episode = prepare_trial(read_trials(self.write([trial])), "t1")
+            self.assertFalse(episode.steers_next())
+
+    def test_a_trial_whose_supplied_moves_pass_its_steering_cell_is_refused(self):
+        # ROOM's route runs along the top row, so two supplied moves stand on
+        # (0, 1) and leave it, and one leaves the start.
+        for supplied, cell in ((2, [0, 1]), (1, [0, 0]), (2, [0, 0])):
+            with self.subTest(supplied=supplied, cell=cell):
+                trial = self.trial(supplied_moves=supplied, steering=VECTOR, steer_when={"cell": cell})
+                with self.assertRaisesRegex(ValueError, "Trial 't1': The supplied starting moves pass the steering cell"):
+                    read_trials(self.write([trial]))
+        # Moves that end on the cell, or none at all on the start, leave the
+        # first response standing there, which steers it.
+        for supplied, cell in ((2, [0, 2]), (0, [0, 0])):
+            with self.subTest(supplied=supplied, cell=cell):
+                trial = self.trial(supplied_moves=supplied, steering=VECTOR, steer_when={"cell": cell})
+                self.assertTrue(prepare_trial(read_trials(self.write([trial])), "t1").steers_next())
+
 
 class PageTests(unittest.TestCase):
     def build(self, manager=None):
@@ -375,6 +396,19 @@ class PageTests(unittest.TestCase):
         start = next(i for i, block in enumerate(outputs) if getattr(block, "elem_id", None) == "maze-waypoint")
         self.assertEqual(loaded[start:start + 8], ("1, 1", VECTOR, 4.0, 3, "cell", "1, 1", 3, 2))
         self.assertIn("layer 3", loaded[start + 8])
+
+    def test_supplied_moves_that_leave_a_steering_cell_on_the_start_are_refused(self):
+        prepare = self.build()["prepare_episode"]
+        values = [5, 20260911, 10, .7, 2, 3, "", 8, .7, 1, 200, 4000, 20, 1024, 4,
+                  "coordinates", "", "sys", "Go.", False]
+        start = cell_text(list(generate(*values[:4]).start))
+        episode = Episode(ROOM, BASE)
+        with self.assertRaisesRegex(gr.Error, "pass the steering cell"):
+            prepare.fn(episode, False, "s", None, *values, "", VECTOR, 6, 1, "cell", start, 3, 2)
+        # With none supplied the first response stands on the start, which steers it.
+        values[4] = 0
+        new = prepare.fn(episode, False, "s", None, *values, "", VECTOR, 6, 1, "cell", start, 3, 2)[0]
+        self.assertTrue(new.steers_next())
 
     def test_a_vector_carried_switched_off_fills_steer_as_off(self):
         values = checkpoint_values(Episode(ROOM, checkpoint(steering=dict(VECTOR, enabled=False))))

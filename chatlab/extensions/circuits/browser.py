@@ -1,0 +1,292 @@
+"""The feature browser: page through a transcoder set's features and steer Chat by one.
+
+Listing needs no model and no weights in memory. Each feature's record (its
+top-activating examples and top output tokens) is read from the Hub by byte
+range, as the graph's feature card reads it. Steering reads the one decoder
+row it needs from that layer's file, and hands Chat a vector it adds to that
+layer's residual output at every position: the feature switched on
+everywhere, at a multiple of its highest recorded activation.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from uuid import uuid4
+
+import gradio as gr
+
+from chatlab import steering
+from chatlab.ui.token_menu import MENU_BRIDGE_CLASS
+
+from . import render, transcoders
+
+PAGE_SIZE = 20
+FETCHERS = 8
+DEFAULT_STRENGTH = 3.0
+DEFAULT_SET = "gemma-3-1b-it"
+NOTHING_SHOWN = ('<div class="cg-root viz-root cg-empty">Choose a layer and press <b>Show</b>. '
+                 'No model has to be loaded to browse.</div>')
+
+
+def spec_named(key):
+    spec = next((s for s in transcoders.CATALOGUE if s.key == key), None)
+    if spec is None:
+        raise ValueError("Choose a transcoder set.")
+    return spec
+
+
+def page_start(spec, start):
+    """The first feature of the page holding ``start``, inside the layer."""
+    start = int(start or 0)
+    return max(0, min(start, spec.width - PAGE_SIZE))
+
+
+def fetch_page(records, layer, start, count=PAGE_SIZE):
+    """``(feature, record, error)`` for ``count`` features from ``start``, fetched side by side."""
+    def one(feature):
+        try:
+            return feature, records.get(layer, feature), None
+        except OSError as exc:
+            return feature, None, str(exc)
+
+    with ThreadPoolExecutor(FETCHERS) as pool:
+        return list(pool.map(one, range(start, start + count)))
+
+
+def steering_model_id(spec, loaded_id):
+    """The model the vector names: the loaded one when the set reads it, else the set's own."""
+    if loaded_id and loaded_id.lower() in (m.lower() for m in spec.model_ids):
+        return loaded_id
+    return spec.model_ids[0]
+
+
+def feature_vector(spec, layer, feature, record, strength, loaded_id):
+    """The feature's decoder row at its highest recorded activation, as a steering vector.
+
+    Strength 1 adds what the feature writes at its strongest. The row is
+    used as published, not normalized, so the record's activations apply to it.
+    """
+    revision = (record or {}).get("_transcoder_revision")
+    row = (transcoders.decoder_row(spec, layer, feature, revision=revision) if revision
+           else transcoders.decoder_row(spec, layer, feature))
+    peak = (record or {}).get("act_max")
+    peak = 1.0 if peak is None else peak
+    return steering.vector_from(steering_model_id(spec, loaded_id), layer, [peak * value for value in row],
+                                strength=strength)
+
+
+def build_browser(context, bench):
+    pages, page_sequences, page_lock = {}, {}, threading.Lock()
+
+    def forget(view):
+        with page_lock:
+            pages.pop(view, None)
+            page_sequences.pop(view, None)
+
+    owner = gr.State(value=lambda: uuid4().hex, delete_callback=forget)
+    request = gr.Textbox(visible=False)
+    page_sequence = gr.Number(value=0, precision=0, visible=False)
+    next_page_sequence = "(window.chatlabFeaturePageSequence = (window.chatlabFeaturePageSequence || 0) + 1)"
+    pick_request = gr.Textbox(visible=False)
+
+    def current(view, stamp, ready=False):
+        with page_lock:
+            state = pages.get(view)
+            return state is not None and state["stamp"] == stamp and (not ready or state["ready"])
+
+    def selection_current(view, selected):
+        with page_lock:
+            state = pages.get(view)
+            return bool(selected and state and state["stamp"] == selected.get("stamp")
+                        and state.get("selection_ready")
+                        and state.get("selection_stamp") == selected.get("selection_stamp"))
+
+    loaded = transcoders.spec_for(context.models.loaded_model_id())
+    first = loaded or spec_named(DEFAULT_SET)
+    gr.Markdown("Every feature of a transcoder set, a page at a time, with the tokens it fires hardest on in "
+                "the transcoder's training data and the tokens it writes. **Steer by this feature** adds the "
+                "feature at every position of a Chat conversation.")
+    with gr.Row():
+        set_choice = gr.Dropdown([(f"{s.model_ids[0]} · {s.title}", s.key) for s in transcoders.CATALOGUE],
+                                 value=first.key, label="Transcoders", scale=3)
+        layer = gr.Slider(0, first.layers - 1, value=first.layers // 2, step=1, label="Layer", scale=3)
+        start = gr.Number(value=0, precision=0, minimum=0, label="First feature", scale=1)
+    with gr.Row():
+        previous = gr.Button("Previous", size="sm", scale=0)
+        show = gr.Button("Show", variant="primary", size="sm", scale=0)
+        following = gr.Button("Next", size="sm", scale=0)
+    with gr.Row(equal_height=False):
+        with gr.Column(scale=3):
+            listing = gr.HTML(NOTHING_SHOWN, elem_id="circuits-feature-list")
+        with gr.Column(scale=2, min_width=340):
+            strength = gr.Number(
+                value=DEFAULT_STRENGTH, minimum=-100, maximum=100, label="Strength",
+                info="Multiples of the feature's highest recorded activation. Negative steers away from it.")
+            steer = gr.Button("Steer by this feature", variant="primary")
+            detail = gr.HTML(render.feature_detail())
+    chosen = gr.State(None)
+    shown = gr.State(None)
+    pick = gr.Textbox(elem_id="circuits-feature-pick", elem_classes=[MENU_BRIDGE_CLASS])
+
+    def choose_set(key, view, sequence=None):
+        spec = spec_named(key)
+        stamp, accepted = reserve_page(view, None, sequence)
+        if not accepted:
+            return (gr.skip(),) * 6
+        return (gr.update(maximum=spec.layers - 1, value=min(spec.layers // 2, spec.layers - 1)),
+                0, stamp, None, render.feature_detail(), gr.update(interactive=False))
+
+    set_choice.input(choose_set, [set_choice, owner, page_sequence],
+                     [layer, start, request, chosen, detail, steer], queue=False,
+                     js="(key, view, _) => [key, view, " + next_page_sequence + "]")
+
+    def reserve_page(view, selected, sequence):
+        stamp = uuid4().hex
+        with page_lock:
+            previous = page_sequences.get(view, 0)
+            sequence = previous + 1 if sequence is None else sequence
+            if type(sequence) is not int or not previous < sequence < 2**53:
+                return stamp, False
+            page_sequences[view] = sequence
+            pages[view] = {"stamp": stamp, "ready": False, "previous": dict(selected) if selected else None}
+        return stamp, True
+
+    def begin_page(view, sequence=None):
+        stamp, accepted = reserve_page(view, None, sequence)
+        if not accepted:
+            return stamp, gr.skip(), gr.skip(), gr.skip()
+        return stamp, None, render.feature_detail(), gr.update(interactive=False)
+
+    for control in (layer, start):
+        control.input(begin_page, [owner, page_sequence], [request, chosen, detail, steer], queue=False,
+                      js="(view, _) => [view, " + next_page_sequence + "]")
+
+    def begin_refresh(view, selected, sequence=None):
+        stamp, accepted = reserve_page(view, selected, sequence)
+        if not accepted:
+            return stamp, gr.skip(), gr.skip(), gr.skip()
+        return stamp, None, gr.skip(), gr.update(interactive=False)
+
+    def list_page(key, layer_value, start_value, selected, view, stamp, step=0):
+        with page_lock:
+            state = pages.get(view)
+            if state is None or state["stamp"] != stamp:
+                return (gr.skip(),) * 6
+            selected = selected or state.get("previous")
+        try:
+            spec = spec_named(key)
+            first_feature = page_start(spec, int(start_value or 0) + step * PAGE_SIZE)
+            records = bench.records(spec)
+            rows = fetch_page(records, int(layer_value), first_feature)
+        except (ValueError, OSError) as exc:
+            raise gr.Error(str(exc)) from exc
+        page = {"set": spec.key, "layer": int(layer_value), "start": first_feature, "count": len(rows),
+                "stamp": stamp}
+        same_page = (selected and selected["set"] == page["set"] and selected["layer"] == page["layer"]
+                     and first_feature <= selected["feature"] < first_feature + len(rows))
+        mark = selected["feature"] if same_page else None
+        with page_lock:
+            state = pages.get(view)
+            if state is None or state["stamp"] != stamp:
+                return (gr.skip(),) * 6
+            state["ready"] = True
+            selection_stamp = uuid4().hex
+            state.update(selection_stamp=selection_stamp, selection_ready=bool(same_page))
+        frame = (render.feature_list(int(layer_value), first_feature, spec.width, rows, mark, page["stamp"]),
+                 first_feature, page, {**page, "feature": mark, "selection_stamp": selection_stamp} if same_page else None,
+                 gr.skip() if same_page else render.feature_detail(), gr.update(interactive=True))
+        return frame if current(view, stamp, ready=True) else (gr.skip(),) * 6
+
+    for button, step in ((show, 0), (previous, -1), (following, 1)):
+        event = button.click(begin_refresh, [owner, chosen, page_sequence], [request, chosen, detail, steer],
+                             queue=False, js="(view, selected, _) => [view, selected, " + next_page_sequence + "]")
+        event.then(partial(list_page, step=step),
+                   [set_choice, layer, start, chosen, owner, request],
+                   [listing, start, shown, chosen, detail, steer], concurrency_id="circuits-browse")
+
+    def begin_pick(page, raw, view):
+        try:
+            payload = json.loads(raw)
+            feature = payload["feature"]
+            nonce = payload.get("nonce")
+            if (type(nonce) is not int or not 0 < nonce < 2**53 or not page or payload.get("page_id") != page["stamp"] or type(feature) is not int
+                    or not page["start"] <= feature < page["start"] + page["count"]):
+                return (gr.skip(),) * 3
+        except (TypeError, ValueError, KeyError):
+            return (gr.skip(),) * 3
+        with page_lock:
+            state = pages.get(view)
+            if not state or state["stamp"] != page["stamp"] or not state["ready"]:
+                return (gr.skip(),) * 3
+            if nonce <= state.get("selection_nonce", 0):
+                return (gr.skip(),) * 3
+            stamp = uuid4().hex
+            state.update(selection_stamp=stamp, selection_ready=False, selection_nonce=nonce)
+        return stamp, None, gr.update(interactive=False)
+
+    def picked(page, raw, view, stamp):
+        try:
+            payload = json.loads(raw)
+            feature = payload["feature"]
+            nonce = payload.get("nonce")
+            if (type(nonce) is not int or not 0 < nonce < 2**53 or not page or not current(view, page["stamp"], ready=True)
+                    or payload.get("page_id") != page["stamp"] or type(feature) is not int
+                    or not page["start"] <= feature < page["start"] + page["count"]):
+                return (gr.skip(),) * 3
+        except (TypeError, ValueError, KeyError):
+            return (gr.skip(),) * 3
+        with page_lock:
+            state = pages.get(view)
+            if not state or state.get("selection_stamp") != stamp or state.get("selection_nonce") != nonce:
+                return (gr.skip(),) * 3
+        try:
+            record, error = bench.records(spec_named(page["set"])).get(page["layer"], feature), None
+        except OSError as exc:
+            record, error = None, str(exc)
+        selected = {**page, "feature": feature, "selection_stamp": stamp}
+        detail_frame = render.feature_detail(page["layer"], feature, record, error)
+        with page_lock:
+            state = pages.get(view)
+            if (not state or state["stamp"] != page["stamp"] or state.get("selection_stamp") != stamp
+                    or state.get("selection_nonce") != nonce):
+                return (gr.skip(),) * 3
+            state["selection_ready"] = True
+        return detail_frame, selected, gr.update(interactive=True)
+
+    pick_event = pick.input(begin_pick, [shown, pick, owner], [pick_request, chosen, steer], queue=False)
+    pick_event.then(picked, [shown, pick, owner, pick_request], [detail, chosen, steer],
+                    concurrency_id="circuits-browse", trigger_mode="always_last", show_progress="hidden")
+
+    def vector(selected, amount, view):
+        if not selected or not current(view, selected.get("stamp"), ready=True) or not selection_current(view, selected):
+            raise ValueError("Wait for the feature page, then click a feature in the list first.")
+        spec = spec_named(selected["set"])
+        records = bench.records(spec)
+        try:
+            record = records.get(selected["layer"], selected["feature"])
+        except OSError:
+            record = None
+        if record is None:
+            revision = records.revision
+            if not revision:
+                raise ValueError("Could not resolve the feature set snapshot; retry the feature page.")
+            record = {"_transcoder_revision": revision}
+        try:
+            result = feature_vector(spec, selected["layer"], selected["feature"], record,
+                                  float(amount if amount is not None else DEFAULT_STRENGTH),
+                                  context.models.loaded_model_id())
+        except OSError as exc:
+            raise ValueError(f"Could not read the feature's decoder row: {exc}") from exc
+        if not current(view, selected["stamp"], ready=True) or not selection_current(view, selected):
+            raise ValueError("The feature page changed; click a feature again.")
+        return result
+
+    def apply_prepared(value, selected, amount, view):
+        if not selected or not current(view, selected.get("stamp"), ready=True) or not selection_current(view, selected):
+            raise ValueError("The selected feature changed; click it again before steering.")
+        return value
+
+    context.navigation.steer_chat(steer, apply_prepared, [chosen, strength, owner], prepare=vector)

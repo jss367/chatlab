@@ -324,6 +324,7 @@ class ConversationTests(unittest.TestCase):
 
         demo = build_app().queue(default_concurrency_limit=1)
         remember = listener_named(demo, "remember_steering")
+        capture = listener_named(demo, "capture_remember_steering")
 
         async def run_pane_action(action):
             pane = listener_named(demo, action)
@@ -340,7 +341,7 @@ class ConversationTests(unittest.TestCase):
             old = steering.compact(vector())
             forks = controls.store(forks, old)
             session[remember.inputs[0]._id] = forks
-            session[remember.inputs[1]._id] = old
+            session[capture.inputs[1]._id] = old
             # Construct the later request *before* persistence finishes, with
             # stale state in its payload. Gradio must ignore client-supplied
             # State values and read the updated server session at execution.
@@ -350,7 +351,8 @@ class ConversationTests(unittest.TestCase):
                     queued[index] = conversation.copy_forks(forks)
             if action == "switch_fork":
                 queued[0] = conversation.MAIN_BRANCH
-            await demo.process_api(remember, [forks, old, False, -2, 1], state=session)
+            ticket = capture.fn(forks, old, False, -2, 1)
+            await demo.process_api(remember, [forks, ticket], state=session)
             expected = dict(old, enabled=False, strength=-2.0, layer=1)
             await demo.process_api(pane, queued, state=session)
             result = session[remember.inputs[0]._id]
@@ -544,13 +546,16 @@ class ConversationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "conversation.json"
             path.write_text(conversation.to_json(turns, steering=vector()))
-            loaded = controls.load_with_steering(str(path), [], "Raw rank", conversation.new_forks())
+            loaded = controls.load_with_steering(str(path), [], "Raw rank", {**conversation.new_forks(), "_view_identity": "before-load"})
+            self.assertNotEqual(loaded["forks"]["_view_identity"], "before-load")
             self.assertEqual(conversation.turn_entries(loaded["turns"]), conversation.turn_entries(turns))
             self.assertEqual(steering.expand(loaded["steering_state"]), vector())
             self.assertEqual(steering.expand(controls.steering_updates(loaded["forks"])[0]), vector())
             path.write_text(conversation.to_json(turns))
+            previous_identity = loaded["forks"]["_view_identity"]
             loaded = controls.load_with_steering(str(path), turns, "Raw rank", loaded["forks"])
             self.assertIsNone(loaded["steering_state"])
+            self.assertNotEqual(loaded["forks"]["_view_identity"], previous_identity)
             path.write_text(json.dumps({"format": conversation.SAVE_FORMAT, "turns": [], "steering": {}}))
             refused = controls.load_with_steering(str(path), turns, "Raw rank", loaded["forks"])
             self.assertEqual(conversation.turn_entries(refused["turns"]), conversation.turn_entries(turns))

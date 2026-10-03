@@ -17,6 +17,7 @@ from transformers import (
 
 from chatlab import charts
 from chatlab import jacobian_lens
+from chatlab import model_loading
 from chatlab.jacobian_lens import FittedLens
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
@@ -249,8 +250,43 @@ class JacobianLensTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "withheld"):
                 self.inspect(1, imported)
 
+    def test_a_checkpoint_read_from_a_snapshot_has_that_snapshots_revision(self):
+        # Read through the loader rather than built in memory, so the revision
+        # is the one ChatLab itself resolves. Transformers 5.18 drops the
+        # config's _commit_hash, which this used to come from, so there every
+        # revision read None and every lens that recorded one was refused. It
+        # is cleared below, so the check means the same on any version.
+        commit, other = "0123456789abcdef0123456789abcdef01234567", "f" * 40
+        snapshot = Path(self.directory.name) / "models--test--tiny-decoder" / "snapshots" / commit
+        self.manager.model.save_pretrained(snapshot)
+        self.manager.tokenizer.save_pretrained(snapshot)
+        self.manager.model, self.manager.tokenizer, _pipeline, _device = (
+            model_loading._read_text_model(snapshot, torch, "cpu", torch.float32, None, "full")
+        )
+        self.manager.model.config._commit_hash = None
+        self.assertEqual(self.manager.model_revision(), commit)
+
+        self.data["model_revision"] = commit
+        self.save()
+        self.assertEqual(self.import_lens()["model_revision"], commit)
+        replacement = self.path.with_suffix(".new")
+        torch.save(self.data | {"model_revision": other}, replacement)
+        replacement.replace(self.path)
+        with self.assertRaisesRegex(ValueError, "revision"):
+            self.import_lens()
+
+        # A folder outside the cache records no revision, rather than its name.
+        loose = Path(self.directory.name) / commit
+        shutil.copytree(snapshot, loose)
+        model, _tokenizer, _pipeline, _device = model_loading._read_text_model(
+            loose, torch, "cpu", torch.float32, None, "full"
+        )
+        self.assertIsNone(model_loading.checkpoint_revision(model))
+
     def test_hooks_removed_after_forward_failure(self):
-        lens = FittedLens.load(self.path, self.manager._engine(), self.manager.model_id, self.manager.model_id)
+        lens = FittedLens.load(
+            self.path, self.manager._engine(), self.manager.model_id, self.manager.model_id, None
+        )
         with self.assertRaisesRegex(RuntimeError, "failed"):
             with lens.record(self.manager._engine()):
                 raise RuntimeError("failed")
@@ -311,7 +347,7 @@ class JacobianLensTests(unittest.TestCase):
                 (7, metrics), (7, prompt), (7, self.ids[:2], self.manager.load_id), 0,
             )
 
-        self.manager.model.config._commit_hash = "abc"
+        self.manager.model.chatlab_revision = "abc"
         with mock.patch.object(jacobian_lens, "store_path", return_value=store), mock.patch.object(
             runtime, "MANAGER", self.manager,
         ), mock.patch.object(inspection, "current_strip_generation", return_value=7):
@@ -346,12 +382,12 @@ class JacobianLensTests(unittest.TestCase):
             # The same ID at another revision is other weights: the record is
             # left alone and the message says why.
             self.manager.load_count += 1
-            self.manager.model.config._commit_hash = "def"
+            self.manager.model.chatlab_revision = "def"
             result = list(inspection.inspect_layers(*args(), lens_mode="Jacobian", imported_lens=None))[-1]
             self.assertIn("Import a Jacobian", result[4])
             self.assertIn("another revision", result[4])
             self.assertIsNone(self.manager.jacobian_lens_import())
-            self.manager.model.config._commit_hash = "abc"
+            self.manager.model.chatlab_revision = "abc"
 
             # A record whose file is gone leaves the usual message.
             self.manager.load_count += 1

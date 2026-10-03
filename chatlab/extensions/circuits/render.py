@@ -320,6 +320,76 @@ def _examples(record, limit=8, window=24):
     return "".join(out) or '<p class="cg-muted">No examples recorded.</p>'
 
 
+# The feature browser ---------------------------------------------------------
+
+def top_tokens(record, limit=6):
+    """The tokens a feature fires hardest on: each top example's peak token, most common first."""
+    counts = {}
+    for quantile in record.get("examples_quantiles") or []:
+        for example in quantile.get("examples") or []:
+            tokens = example.get("tokens") or []
+            acts = example.get("tokens_acts_list") or []
+            if tokens and len(acts) == len(tokens):
+                peak = tokens[max(range(len(acts)), key=lambda i: acts[i])]
+                counts[peak] = counts.get(peak, 0) + 1
+        break
+    return sorted(counts.items(), key=lambda item: -item[1])[:limit]
+
+
+def feature_list(layer, start, width, rows, selected=None, page_id=""):
+    """One page of a layer's features, each with the tokens it fires on and the tokens it writes.
+
+    ``rows`` holds ``(feature, record, error)`` for each feature on the page.
+    """
+    end = start + len(rows) - 1
+    out = [f'<div class="cg-root viz-root cf-list" data-page="{_esc(page_id)}"><p class="cg-muted">Layer {layer} · features '
+           f'{start:,}–{end:,} of {width:,}. Click one to read it and steer by it.</p>',
+           '<table><thead><tr><th>feature</th><th>fires on</th><th>promotes</th><th>freq.</th></tr></thead><tbody>']
+    for feature, record, error in rows:
+        cls = ' class="sel"' if feature == selected else ""
+        if record is None:
+            out.append(f'<tr data-feature="{feature}"{cls}><td>{feature:,}</td>'
+                       f'<td colspan="3" class="cg-muted">{_esc(error or "no record")}</td></tr>')
+            continue
+        fires = "".join(f"<span>{_esc(token_text(t))}<em>×{n}</em></span>" for t, n in top_tokens(record))
+        promotes = "".join(f"<span>{_esc(token_text(t))}</span>" for t in (record.get("top_logits") or [])[:4])
+        frequency = record.get("activation_frequency")
+        frequency = "–" if frequency is None else f"{100 * frequency:.3f}%"
+        out.append(f'<tr data-feature="{feature}"{cls}><td>{feature:,}</td>'
+                   f'<td><div class="cg-chips">{fires or "–"}</div></td>'
+                   f'<td><div class="cg-chips">{promotes or "–"}</div></td><td>{frequency}</td></tr>')
+    out.append("</tbody></table></div>")
+    return "".join(out)
+
+
+def feature_detail(layer=None, feature=None, record=None, error=None):
+    """A feature picked in the browser: what it fires on, what it writes, and how strongly."""
+    if feature is None:
+        return '<div class="cg-root viz-root cg-card cg-empty">Click a feature in the list to read it here.</div>'
+    body = [f'<h4>Layer {layer} · feature {feature:,}</h4>']
+    if record is None:
+        body.append(f'<p class="cg-muted">Examples unavailable: {_esc(error or "no record")}</p>')
+        return f'<div class="cg-root viz-root cg-card">{"".join(body)}</div>'
+    rows = []
+    if record.get("act_max") is not None:
+        rows.append(("highest activation", f'{record["act_max"]:.4g}'))
+    if record.get("activation_frequency") is not None:
+        rows.append(("activation freq.", f'{100 * record["activation_frequency"]:.3f}%'))
+    body.append(_table(rows))
+    fires = top_tokens(record, limit=12)
+    if fires:
+        body.append('<h5>fires on <span class="cg-muted">(peak token of each top example)</span></h5>'
+                    + '<div class="cg-chips">' + "".join(
+                        f"<span>{_esc(token_text(t))}<em>×{n}</em></span>" for t, n in fires) + "</div>")
+    if record.get("top_logits"):
+        body.append('<h5>promotes (top output logits)</h5>' + _chips(record["top_logits"][:8]))
+    if record.get("bottom_logits"):
+        body.append('<h5>suppresses</h5>' + _chips(record["bottom_logits"][:8]))
+    body.append('<h5>top-activating contexts <span class="cg-muted">(highlight = strongest token)</span></h5>')
+    body.append(_examples(record))
+    return f'<div class="cg-root viz-root cg-card">{"".join(body)}</div>'
+
+
 # The grouped view ---------------------------------------------------------
 
 def _ratio(after, before):
@@ -596,6 +666,16 @@ CSS = """
 #circuits-page .cg-example { font-family:ui-monospace,monospace; font-size:12px; line-height:1.55; border:1px solid var(--viz-grid); border-radius:6px; padding:6px 8px; margin:6px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
 #circuits-page .cg-example .act { background:color-mix(in srgb, #fab219 calc(var(--cg-heat) * 45%), transparent); }
 #circuits-page .cg-example .peak { background:color-mix(in srgb, #fab219 60%, transparent); font-weight:600; }
+#circuits-page .cg-chips em { font-style:normal; color:var(--body-text-color-subdued); margin-left:3px; }
+#circuits-page .cf-list { border:1px solid var(--viz-grid); border-radius:8px; padding:8px 10px; background:var(--block-background-fill); }
+#circuits-page .cf-list table { width:100%; border-collapse:collapse; margin:0; border:none !important; }
+#circuits-page .cf-list thead, #circuits-page .cf-list tbody, #circuits-page .cf-list tr { border:none !important; }
+#circuits-page .cf-list th, #circuits-page .cf-list td { border:none !important; border-top:1px solid var(--viz-grid) !important; background:none !important; padding:5px 8px 5px 4px; font-size:13px; text-align:left; vertical-align:top; }
+#circuits-page .cf-list th { font-weight:400; color:var(--body-text-color-subdued); }
+#circuits-page .cf-list td:first-child, #circuits-page .cf-list td:last-child { font-variant-numeric:tabular-nums; white-space:nowrap; }
+#circuits-page .cf-list tbody tr { cursor:pointer; }
+#circuits-page .cf-list tbody tr:hover td { background:color-mix(in srgb, var(--viz-grid) 35%, transparent) !important; }
+#circuits-page .cf-list tbody tr.sel td { background:color-mix(in srgb, var(--cg-pos) 14%, transparent) !important; }
 #circuits-page .cg-group rect { fill:var(--block-background-fill); stroke:var(--cg-mid); stroke-width:1.6; cursor:pointer; }
 #circuits-page .cg-group.promotes rect { stroke:var(--cg-pos); }
 #circuits-page .cg-group.suppresses rect { stroke:var(--cg-neg); }

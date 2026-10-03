@@ -14,8 +14,9 @@ from .dynamic_maze import ChangingMaze, changing, maze_at_turn
 from .inserts import CHANNELS
 from .maze import DIRECTIONS, GOAL_MODES, PASSAGES, SYSTEM, default_instruction, generate, unavoidable_cells
 from .batch import BatchControl, cut_short, downloads, run_trials
-from .runner import (RECOVERY_DEFAULTS, TERMINAL, Episode, context_messages, fork_token_edit, from_payload,
-                     insert_outcome, stream_episode)
+from .runner import (RECOVERY_DEFAULTS, TERMINAL, Episode, check_interruption_text, check_supplied_steering,
+                     context_messages, fork_token_edit, from_payload, insert_outcome, past_load_limit, read_run_file,
+                     stream_episode)
 from .team import MAX_AGENTS, TEAM_GOALS, format_agents, parse_agents
 from .team_views import (HEADERS as TEAM_HEADERS, MARKDOWN, insert_mark, mail_text, response_line, team_board,
                          team_history_rows, team_status, team_timeline)
@@ -104,13 +105,20 @@ def runs_dir(context):
     return Path(os.environ.get("CHATLAB_MAZE_RUNS_PATH", str(context.data_dir))).expanduser()
 
 
+def unregenerated_fork(ep):
+    """Whether ``ep`` is a fork whose edited response has not been generated yet.
+
+    A fork holds what its edited response is about to read until that
+    response is generated, and a file written in between would record a
+    message no prompt read, or a round that never resolved.
+    """
+    return ep.edit_insert is not None or ep.open_round is not None
+
+
 def export_run(ep, directory):
     if ep.busy:
         raise gr.Error("Pause or stop the episode before exporting. Completed responses are also autosaved.")
-    # A fork holds what its edited response is about to read until that
-    # response is generated, and a file written in between would record a
-    # message no prompt read, or a round that never resolved.
-    if ep.edit_insert is not None or ep.open_round is not None:
+    if unregenerated_fork(ep):
         raise gr.Error("Generate the edited response before exporting this fork. Stopping it discards the edit.")
     if not ep.replay_only:
         try:
@@ -118,9 +126,14 @@ def export_run(ep, directory):
         except OSError as error:
             logger.warning("Could not write run %s to the archive %s: %s", ep.run_id, directory, error)
             gr.Warning("The run archive could not be written. Providing a temporary download instead.")
-    path = str(ep.export())
+    path = ep.export()
+    # Exporting is the moment a run is kept to be opened later, so a file
+    # that will not open is said here and not only in the status line.
+    note = past_load_limit(path.stat().st_size)
+    if note:
+        gr.Warning(note)
     logger.info("Exported run %s to %s", ep.run_id, path)
-    return path
+    return str(path)
 
 
 def board(ep, index=None, reveal=False, animate=False, map_round=None):
@@ -1262,15 +1275,10 @@ def _build_page(context):
                         config[key] = chosen_agents
             new = Episode(changing(drawn) if map_changes else drawn, config)
             # Refused here rather than in the episode, which reads back runs
-            # saved before anyone checked: a trigger the supplied moves walk
-            # past is one no response ever stands on, so the run would read as
-            # steered while nothing steered it. Moves that end on it leave the
-            # first response standing there, which steers it.
-            cell = (new.config.get("steer_when") or {}).get("cell")
-            walked = any(e["source"] == "supplied" and list(e["after"]) == list(cell or ()) for e in new.events)
-            if cell is not None and walked and list(new.agents[0]["position"]) != list(cell):
-                raise ValueError("The supplied starting moves pass the steering cell, so steering there would never "
-                                 "start. Supply fewer moves, or steer at another cell.")
+            # saved before anyone checked, and before any response is generated
+            # rather than where the interruption lands.
+            check_supplied_steering(new.config, new.maze)
+            check_interruption_text(new.config.get("interruption_text", ""))
         except (ValueError, TypeError) as exc:
             logger.warning("Refused the scenario settings for a new episode: %s", exc)
             raise gr.Error(str(exc)) from exc
@@ -1562,9 +1570,7 @@ def _build_page(context):
             return (gr.skip(),) * (len(outputs) + len(checkpoint_controls) + len(controls) + 7 + len(team_controls)
                                    + len(run_panes))
         try:
-            if Path(path).stat().st_size > 50_000_000:
-                raise ValueError("Run files must be smaller than 50 MB.")
-            replay = from_payload(json.loads(Path(path).read_text()),
+            replay = from_payload(read_run_file(path),
                                   read_prompt=lambda run, turn, messages: prompt_reading(run, turn, messages, context.models))
             # Before the first frame: recovering the open-cell probability writes
             # it onto the run, and Run details reports whichever way that went.
@@ -1628,9 +1634,12 @@ def _build_page(context):
             with context.models.open_session() as manager:
                 new = fork_token_edit(ep, turn_index, token_index, text_value, manager,
                                       candidate_id=None if candidate_value == "text" else int(candidate_value))
-            if not ep.replay_only:
-                # A saved run's snapshot must never overwrite a newer archive
-                # holding the same run_id. The uploaded file is the parent copy.
+            # A saved run's snapshot must never overwrite a newer archive
+            # holding the same run_id. The uploaded file is the parent copy.
+            # A fork whose own edit never regenerated, because its play did
+            # not start, is left unwritten as Export leaves it: this edit
+            # discards that one, as stopping it would have.
+            if not ep.replay_only and not unregenerated_fork(ep):
                 ep.save(runs_dir(context))
         except (ValueError, OSError) as exc:
             logger.warning("Run %s: the token edit was refused: %s", ep.run_id, exc)

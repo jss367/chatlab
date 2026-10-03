@@ -13,9 +13,8 @@ gradio>=5.20,<6
 # on anything older.
 huggingface-hub>=1.1
 # Fetches the Metal kernels the 8-bit and 4-bit weight precisions run on.
-# Transformers refuses anything from 0.17 up, and then reports that no
-# kernels are available at all, so the ceiling belongs here too.
-kernels>=0.16,<0.17
+# Transformers 5.18 requires kernels 0.17; retain a compatible bounded pair.
+kernels>=0.17,<0.18
 # Inspect chat templates for native thinking controls.
 jinja2>=3.1
 # Runs the MLX-quantized checkpoints mlx-community publishes, on Apple
@@ -53,5 +52,7 @@ torch>=2.5
 torchvision>=0.20
 # 5.3 is the first release with the Metal quantizer behind the 8-bit and
 # 4-bit weight precisions; everything else runs on 4.57, so that stays the
-# floor and an older install is told which version it needs.
-transformers>=4.57,<6
+# floor and an older install is told which version it needs. 5.18 is the
+# ceiling because it accepts only kernels 0.17, which the pin above
+# excludes, and so refuses the 8-bit and 4-bit loads.
+transformers>=5.18,<5.19

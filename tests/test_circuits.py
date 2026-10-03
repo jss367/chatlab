@@ -13,7 +13,8 @@ from unittest import mock
 import torch
 
 from chatlab.extension_api import ModelService
-from chatlab.extensions.circuits import architecture, attribution, interventions, render, transcoders, workbench
+from chatlab.extensions.circuits import (architecture, attribution, browser, interventions, render, transcoders,
+                                        workbench)
 from chatlab.extensions.registry import load_enabled
 from fakes import FakeManager
 
@@ -903,7 +904,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1497,7 +1498,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 page.build_page(context)
             try:
@@ -1539,7 +1540,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1579,7 +1580,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1619,7 +1620,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1659,7 +1660,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1687,7 +1688,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1729,7 +1730,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1755,7 +1756,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1790,7 +1791,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 page.build_page(context)
             try:
@@ -1834,7 +1835,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1880,7 +1881,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 page.build_page(context)
             try:
@@ -1932,7 +1933,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1970,7 +1971,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -1997,7 +1998,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -2031,7 +2032,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -2070,7 +2071,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -2093,7 +2094,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -2117,7 +2118,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -2143,7 +2144,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -2211,7 +2212,7 @@ class WorkbenchTests(unittest.TestCase):
         from ui_support import handlers_by_name
         with tempfile.TemporaryDirectory() as directory:
             context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
-                                       NavigationService(lambda *args: None))
+                                       NavigationService(lambda *args: None, lambda *args: None))
             with gr.Blocks() as demo:
                 build_page(context)
             try:
@@ -2327,6 +2328,367 @@ class TranscoderTests(unittest.TestCase):
                     records.get(3, 7)
 
 
+class BrowserTests(unittest.TestCase):
+    record = {"act_max": 40.0, "activation_frequency": 0.002, "top_logits": [" Paris", "<b>"],
+              "bottom_logits": [" x"],
+              "examples_quantiles": [{"examples": [
+                  {"tokens": ["in", " France", "."], "tokens_acts_list": [0.0, 9.0, 1.0]},
+                  {"tokens": [" France", " is"], "tokens_acts_list": [5.0, 0.0]},
+                  {"tokens": ["<y>", "z"], "tokens_acts_list": [2.0, 0.0]},
+                  {"tokens": ["bad"], "tokens_acts_list": []},
+              ]}, {"examples": [{"tokens": ["later"], "tokens_acts_list": [1.0]}]}]}
+
+    def test_top_tokens_count_each_top_examples_peak(self):
+        self.assertEqual(render.top_tokens(self.record), [(" France", 2), ("<y>", 1)])
+        self.assertEqual(render.top_tokens({}), [])
+
+    def test_the_list_shows_each_feature_and_marks_the_chosen_one(self):
+        rows = [(100, self.record, None), (101, None, "The Hub answered 404.")]
+        html = render.feature_list(5, 100, 16384, rows, selected=100)
+        self.assertIn("features 100–101 of 16,384", html)
+        self.assertIn('<tr data-feature="100" class="sel">', html)
+        self.assertIn("×2", html)
+        self.assertIn("&lt;b&gt;", html)
+        self.assertIn("0.200%", html)
+        self.assertIn("The Hub answered 404.", html)
+        detail = render.feature_detail(5, 100, self.record)
+        self.assertIn("feature 100", detail)
+        self.assertIn("40", detail)
+        self.assertIn('class="peak"', detail)
+        self.assertIn("unavailable", render.feature_detail(5, 101, None, "gone"))
+        self.assertIn("cg-empty", render.feature_detail())
+
+    def test_pages_stay_inside_the_layer_and_failed_records_are_kept(self):
+        spec = transcoders.spec_for("google/gemma-3-1b-it")
+        self.assertEqual(browser.page_start(spec, -5), 0)
+        self.assertEqual(browser.page_start(spec, 10 ** 9), spec.width - browser.PAGE_SIZE)
+
+        class Records:
+            def get(self, layer, feature):
+                if feature == 2:
+                    raise OSError("no record")
+                return {"layer": layer, "index": feature}
+
+        rows = browser.fetch_page(Records(), 3, 0, count=4)
+        self.assertEqual([r[0] for r in rows], [0, 1, 2, 3])
+        self.assertEqual(rows[2], (2, None, "no record"))
+        self.assertEqual(rows[3][1], {"layer": 3, "index": 3})
+
+    def test_showing_another_page_clears_the_selected_feature_and_card(self):
+        import gradio as gr
+        from functools import partial
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda *args, **kwargs: None))
+        records = SimpleNamespace(get=lambda layer, feature: self.record)
+        bench = SimpleNamespace(records=lambda spec: records)
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            fn = next(listener.fn for listener in demo.fns.values()
+                      if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            selected = {"set": browser.DEFAULT_SET, "layer": 3, "feature": 2}
+            begin = next(listener.fn for listener in demo.fns.values()
+                         if getattr(listener.fn, "__name__", None) == "begin_page")
+            raw_fn = fn
+            fn = lambda key, layer, start, selected: raw_fn(key, layer, start, selected, "view", begin("view")[0])
+            same = fn(browser.DEFAULT_SET, 3, 0, selected)
+            self.assertEqual(same[3]["feature"], 2)
+            for key, layer, start in ((browser.DEFAULT_SET, 4, 0),
+                                      (browser.DEFAULT_SET, 3, browser.PAGE_SIZE),
+                                      ("gemma-2-2b", 3, 0)):
+                cleared = fn(key, layer, start, selected)
+                self.assertIsNone(cleared[3])
+                self.assertIn("cg-empty", cleared[4])
+        finally:
+            demo.close()
+
+    def test_page_reservations_obey_click_order_before_queueing(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda *args, **kwargs: None))
+        records = mock.Mock()
+        records.get.return_value = self.record
+        with gr.Blocks() as demo:
+            browser.build_browser(context, SimpleNamespace(records=lambda spec: records))
+        try:
+            handlers = handlers_by_name(demo)
+            refresh = handlers["begin_refresh"]
+            entered, release = threading.Event(), threading.Event()
+            old = []
+            def delayed_stamp():
+                if threading.current_thread().name == "old-page":
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError("new click did not reserve")
+                return SimpleNamespace(hex=threading.current_thread().name)
+            with mock.patch.object(browser, "uuid4", side_effect=delayed_stamp):
+                thread = threading.Thread(target=lambda: old.append(refresh("view", None, 1)), name="old-page")
+                thread.start()
+                self.assertTrue(entered.wait(5))
+                newest = refresh("view", None, 2)
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(old[0][1:], (gr.skip(),) * 3)
+            callbacks = {fn.fn.keywords["step"]: fn.fn for fn in demo.fns.values()
+                         if isinstance(fn.fn, partial) and fn.fn.func.__name__ == "list_page"}
+            stale = callbacks[1](browser.DEFAULT_SET, 3, 20, None, "view", old[0][0])
+            self.assertEqual(stale, (gr.skip(),) * 6)
+            records.get.assert_not_called()
+            current = callbacks[-1](browser.DEFAULT_SET, 3, 20, None, "view", newest[0])
+            self.assertEqual(current[1], 0)
+            self.assertEqual(handlers["begin_page"]("view", 1)[1:], (gr.skip(),) * 3)
+            self.assertEqual(handlers["choose_set"]("gemma-2-2b", "view", 1), (gr.skip(),) * 6)
+            event = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", None) == "begin_refresh")
+            self.assertIsInstance(event.outputs[0], gr.Textbox)
+        finally:
+            demo.close()
+
+    def test_refresh_captures_selection_before_state_is_cleared(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda *args, **kwargs: None))
+        bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda layer, feature: self.record))
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            handlers = handlers_by_name(demo)
+            refresh = handlers["begin_refresh"]
+            selected = {"set": browser.DEFAULT_SET, "layer": 3, "feature": 2}
+            for step in (0, -1, 1):
+                callback = next(fn.fn for fn in demo.fns.values() if isinstance(fn.fn, partial)
+                                and fn.fn.func.__name__ == "list_page" and fn.fn.keywords["step"] == step)
+                # Previous clamps at zero. Next preserves the selection when
+                # clamped at the last page; use that page's first feature.
+                start = 0 if step != 1 else browser.page_start(browser.spec_named(browser.DEFAULT_SET), 10**9)
+                chosen = dict(selected, feature=start + 2)
+                stamp, cleared, detail, _ = refresh("view", chosen)
+                self.assertIsNone(cleared)
+                self.assertEqual(detail, gr.skip())
+                frame = callback(browser.DEFAULT_SET, 3, start, cleared, "view", stamp)
+                self.assertEqual(frame[3]["feature"], chosen["feature"])
+                self.assertEqual(frame[4], gr.skip())
+                moved = handlers["begin_page"]("view")[0]
+                changed = callback(browser.DEFAULT_SET, 4, start, None, "view", moved)
+                self.assertIsNone(changed[3])
+        finally:
+            demo.close()
+
+    def test_a_click_from_the_previous_page_is_refused(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda *args, **kwargs: None))
+        records = mock.Mock()
+        records.get.return_value = self.record
+        bench = SimpleNamespace(records=lambda spec: records)
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            begin = handlers_by_name(demo)["begin_page"]
+            raw_show = show
+            show = lambda key, layer, start, selected: raw_show(key, layer, start, selected, "view", begin("view")[0])
+            raw_pick = handlers_by_name(demo)["picked"]
+            pick = lambda page, raw: raw_pick(page, raw, "view",
+                                             handlers_by_name(demo)["begin_pick"](page, raw, "view")[0])
+            old = show(browser.DEFAULT_SET, 3, 0, None)[2]
+            new = show(browser.DEFAULT_SET, 4, 0, None)[2]
+            records.get.reset_mock()
+            self.assertEqual(pick(new, json.dumps(dict(feature=2, page_id=old["stamp"], nonce=1))), (gr.skip(),) * 3)
+            self.assertEqual(pick(new, json.dumps(dict(feature=99, page_id=new["stamp"], nonce=2))), (gr.skip(),) * 3)
+            records.get.assert_not_called()
+            card, selected, _ = pick(new, json.dumps(dict(feature=2, page_id=new["stamp"], nonce=3)))
+            self.assertEqual((selected["layer"], selected["feature"]), (4, 2))
+            self.assertIn("feature 2", card)
+            html = show(browser.DEFAULT_SET, 4, 0, None)[0]
+            self.assertIn('data-page="', html)
+        finally:
+            demo.close()
+
+    def test_failed_feature_range_retains_the_decoder_snapshot(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        vectors = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None:
+                                                             vectors.append(prepare or fn)))
+        records = SimpleNamespace(get=mock.Mock(return_value=self.record), revision="b" * 40)
+        bench = SimpleNamespace(records=lambda spec: records)
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            callbacks = handlers_by_name(demo)
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", callbacks["begin_page"]("view")[0])[2]
+            raw = json.dumps(dict(feature=2, page_id=page["stamp"], nonce=1))
+            selected = callbacks["picked"](page, raw, "view", callbacks["begin_pick"](page, raw, "view")[0])[1]
+            records.get.side_effect = OSError("range unavailable")
+            with mock.patch.object(transcoders, "decoder_row", return_value=[0.5, -1.0]) as row:
+                vectors[0](selected, 1, "view")
+            row.assert_called_once_with(browser.spec_named(browser.DEFAULT_SET), 3, 2, revision="b" * 40)
+        finally:
+            demo.close()
+
+    def test_steering_is_refused_as_soon_as_page_loading_begins(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        vectors = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
+        bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            begin = handlers_by_name(demo)["begin_page"]
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            stamp = begin("view")[0]
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", stamp)[2]
+            selected = {**page, "feature": 2}
+            next_stamp, cleared, card, disabled = begin("view")
+            self.assertIsNone(cleared)
+            self.assertFalse(disabled["interactive"])
+            with mock.patch.object(browser, "feature_vector") as build:
+                with self.assertRaisesRegex(ValueError, "Wait for the feature page"):
+                    vectors[0](selected, 3, "view")
+                build.assert_not_called()
+            stale = show(browser.DEFAULT_SET, 3, 0, None, "view", stamp)
+            self.assertEqual(stale, (gr.skip(),) * 6)
+            self.assertNotEqual(stamp, next_stamp)
+            # Changing controls while the old set is still fetching invalidates its request.
+            switched = handlers_by_name(demo)["choose_set"]("gemma-2-2b", "view")
+            self.assertFalse(switched[-1]["interactive"])
+            self.assertEqual(show(browser.DEFAULT_SET, 3, 0, None, "view", next_stamp), (gr.skip(),) * 6)
+        finally:
+            demo.close()
+
+    def test_late_old_row_reservation_cannot_replace_newer_click(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        vectors = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
+        bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            handlers = handlers_by_name(demo)
+            show = next(fn.fn for fn in demo.fns.values() if isinstance(fn.fn, partial) and fn.fn.func.__name__ == "list_page")
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", handlers["begin_page"]("view")[0])[2]
+            older = json.dumps(dict(feature=1, page_id=page["stamp"], nonce=1))
+            newer = json.dumps(dict(feature=2, page_id=page["stamp"], nonce=2))
+            entered, release = Event(), Event()
+            parse = json.loads
+            def delayed(raw):
+                if raw == older:
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("old selection was not released")
+                return parse(raw)
+            with mock.patch.object(browser.json, "loads", side_effect=delayed), ThreadPoolExecutor(max_workers=2) as pool:
+                old = pool.submit(handlers["begin_pick"], page, older, "view")
+                self.assertTrue(entered.wait(1))
+                try:
+                    ticket = handlers["begin_pick"](page, newer, "view")[0]
+                finally:
+                    release.set()
+                self.assertEqual(old.result(timeout=2), (gr.skip(),) * 3)
+            self.assertEqual(handlers["picked"](page, older, "view", ticket), (gr.skip(),) * 3)
+            selected = handlers["picked"](page, newer, "view", ticket)[1]
+            self.assertEqual(selected["feature"], 2)
+            listener = next(fn for fn in demo.fns.values() if fn.name == "begin_pick")
+            self.assertIsInstance(listener.outputs[0], gr.Textbox)
+            self.assertFalse(listener.queue)
+        finally:
+            demo.close()
+
+    def test_steering_is_refused_when_another_row_is_picked(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        vectors = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
+        bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            handlers = handlers_by_name(demo)
+            begin = handlers["begin_page"]
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", begin("view")[0])[2]
+            raw = lambda feature: json.dumps(dict(feature=feature, page_id=page["stamp"], nonce=feature))
+            stamp = handlers["begin_pick"](page, raw(1), "view")[0]
+            selected = handlers["picked"](page, raw(1), "view", stamp)[1]
+            changed = handlers["begin_pick"](page, raw(2), "view")
+            self.assertIsNone(changed[1])
+            self.assertFalse(changed[2]["interactive"])
+            with self.assertRaisesRegex(ValueError, "Wait for"):
+                vectors[0](selected, 3, "view")
+            selected = handlers["picked"](page, raw(2), "view", changed[0])[1]
+
+            def switched_during_download(*args):
+                handlers["begin_pick"](page, raw(3), "view")
+                return {"vector": [1.0]}
+
+            with mock.patch.object(browser, "feature_vector", side_effect=switched_during_download):
+                with self.assertRaisesRegex(ValueError, "changed"):
+                    vectors[0](selected, 3, "view")
+        finally:
+            demo.close()
+
+    def test_the_vector_is_the_decoder_row_at_the_peak_activation(self):
+        spec = transcoders.spec_for("google/gemma-3-1b-it")
+        with mock.patch.object(transcoders, "decoder_row", return_value=[0.5, -1.0]) as row:
+            vector = browser.feature_vector(spec, 7, 11, self.record, 3.0, "Google/Gemma-3-1B-IT")
+            row.assert_called_once_with(spec, 7, 11)
+            self.assertEqual(vector["vector"], [20.0, -40.0])
+            self.assertEqual((vector["layer"], vector["strength"], vector["enabled"]), (7, 3.0, True))
+            self.assertEqual(vector["model_id"], "Google/Gemma-3-1B-IT")
+            inactive = browser.feature_vector(spec, 7, 11, {"act_max": 0}, 3.0, "Google/Gemma-3-1B-IT")
+            self.assertEqual(inactive["vector"], [0.0, 0.0])
+            browser.feature_vector(spec, 7, 11, self.record | {"_transcoder_revision": "a" * 40}, 3.0, None)
+            row.assert_called_with(spec, 7, 11, revision="a" * 40)
+            # No record: the row as published. Another model loaded: the set's own.
+            vector = browser.feature_vector(spec, 7, 11, None, 1.0, "Qwen/Qwen3-0.6B")
+            self.assertEqual(vector["vector"], [0.5, -1.0])
+            self.assertEqual(vector["model_id"], "google/gemma-3-1b-it")
+
+    def test_one_decoder_row_is_read_from_the_layer_file(self):
+        from safetensors.torch import save_file
+
+        spec = transcoders.TranscoderSpec("tiny", "Tiny", ("org/tiny",), "org/tiny-tc", "", layers=2, width=3,
+                                          d_model=2, weights_gb=0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layer_1.safetensors"
+            save_file({"W_dec": torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])}, str(path))
+            with mock.patch("huggingface_hub.hf_hub_download", return_value=str(path)) as download:
+                self.assertEqual(transcoders.decoder_row(spec, 1, 2), [5.0, 6.0])
+                self.assertEqual(download.call_args.args, ("org/tiny-tc", "layer_1.safetensors"))
+                with self.assertRaisesRegex(ValueError, "features 0–2"):
+                    transcoders.decoder_row(spec, 1, 3)
+                with self.assertRaisesRegex(ValueError, "layers 0–1"):
+                    transcoders.decoder_row(spec, 2, 0)
+            save_file({"W_dec": torch.zeros(3, 5)}, str(path))
+            with mock.patch("huggingface_hub.hf_hub_download", return_value=str(path)):
+                with self.assertRaisesRegex(ValueError, "shape"):
+                    transcoders.decoder_row(spec, 1, 0)
+
+
 class ModelAccessTests(unittest.TestCase):
     def manager(self, backend="torch", precision="full"):
         manager = FakeManager()
@@ -2400,6 +2762,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual([e.spec.id for e in loaded], ["circuits"])
         self.assertIn("circuits-pick", loaded[0].js)
+        self.assertIn("circuits-feature-pick", loaded[0].js)
 
 
 if __name__ == "__main__":

@@ -208,6 +208,29 @@ def download(spec, progress=None, cancelled=None, revision=None):
     return paths
 
 
+def decoder_row(spec, layer, feature, revision=None):
+    """One feature's decoder row, read from its layer's file without loading the set.
+
+    The row is what the feature writes into the residual stream per unit of
+    activation. Fetches that one layer's weights if they are not cached yet.
+    """
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+
+    if not 0 <= layer < spec.layers:
+        raise ValueError(f"{spec.title} has layers 0–{spec.layers - 1}.")
+    if not 0 <= feature < spec.width:
+        raise ValueError(f"Each layer has features 0–{spec.width - 1:,}.")
+    path = hf_hub_download(spec.repo, spec.path(f"layer_{layer}.safetensors"), revision=revision)
+    if revision is not None and snapshot_revision(path) != revision:
+        raise ValueError("The decoder row belongs to another transcoder snapshot.")
+    with safe_open(path, framework="pt") as handle:
+        weights = handle.get_slice("W_dec")
+        if tuple(weights.get_shape()) != (spec.width, spec.d_model):
+            raise ValueError(f"layer_{layer}.safetensors does not have the shape {spec.title} was published with.")
+        return [float(value) for value in weights[feature:feature + 1][0].float().tolist()]
+
+
 def loaded(spec, device, revision=None):
     """The set already in memory for this device, or ``None``."""
     with _LOAD_LOCK:

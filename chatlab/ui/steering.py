@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+import threading
 import time
+from uuid import uuid4
 
 import gradio as gr
 
@@ -11,6 +14,8 @@ from chatlab.steering import compact, from_controls, normalize, read_vector
 from chatlab.ui.conversations import load_conversation
 from chatlab.ui.outputs import STEERED_LOAD_OUTPUT_NAMES, STEERING_OUTPUT_NAMES, Frame, skipped
 
+
+STEERING_LOCK = threading.RLock()
 
 EMPTY_STATUS = "Import a JSON vector to steer this conversation. Layers count from 0."
 
@@ -43,12 +48,48 @@ def steering_updates(forks):
     return controls(normalize(held.get("steering")))
 
 
+def reserve_steering(forks, values):
+    """Reserve a manual edit when clicked, before the conversation queue."""
+    with STEERING_LOCK:
+        identity = forks.setdefault("_view_identity", uuid4().hex)
+        branch = forks.get("active", MAIN_BRANCH)
+        generations = forks.setdefault("_steering_generation", {})
+        generations[branch] = generations.get(branch, 0) + 1
+        ticket = uuid4().hex
+        pending = forks.setdefault("_steering_requests", {})
+        pending.clear()
+        generation = generations[branch]
+    values = deepcopy(values)
+    with STEERING_LOCK:
+        if (forks.get("active", MAIN_BRANCH) == branch and forks.get("_view_identity") == identity
+                and generations.get(branch) == generation):
+            pending[ticket] = (values, branch, identity, generation)
+    return ticket
+
+
+def apply_reserved_steering(forks, ticket, handler, output_count, reverse=False):
+    """Apply only the latest clicked edit, without advancing older requests."""
+    with STEERING_LOCK:
+        pending = forks.get("_steering_requests", {})
+        receipt = pending.pop(ticket, None) if isinstance(ticket, str) else None
+        if receipt is None:
+            return (gr.skip(),) * output_count
+        values, branch, identity, generation = receipt
+        if (forks.get("active", MAIN_BRANCH) != branch or forks.get("_view_identity") != identity
+                or forks.get("_steering_generation", {}).get(branch) != generation):
+            return (gr.skip(),) * output_count
+        return handler(*values, forks) if reverse else handler(forks, *values)
+
+
 def store(forks, value):
-    forks = copy_forks(forks)
-    held = branch_sampling(forks, forks["active"])
-    held["steering"] = compact(value)
-    put_branch_sampling(forks, forks["active"], held)
-    return forks
+    with STEERING_LOCK:
+        forks = copy_forks(forks)
+        held = branch_sampling(forks, forks["active"])
+        generations = forks.setdefault("_steering_generation", {})
+        generations[forks["active"]] = generations.get(forks["active"], 0) + 1
+        held["steering"] = compact(value)
+        put_branch_sampling(forks, forks["active"], held)
+        return forks
 
 
 def import_vector(path, forks):
@@ -56,6 +97,17 @@ def import_vector(path, forks):
         value = compact(read_vector(path))
     except (OSError, ValueError, TypeError) as error:
         raise gr.Error(str(error)) from error
+    return store(forks, value), *controls(value)
+
+
+def apply_vector(forks, value):
+    """Put a vector an extension built on the active conversation, as an import would."""
+    try:
+        value = compact(normalize(value))
+    except (OSError, ValueError, TypeError) as error:
+        raise gr.Error(str(error)) from error
+    if value is None:
+        raise gr.Error("There is no vector to steer with.")
     return store(forks, value), *controls(value)
 
 
@@ -80,6 +132,8 @@ def load_with_steering(path, turns, scale_name, forks):
     # leaves the system prompt.
     if skipped(value):
         return frame
+    forks = copy_forks(forks)
+    forks["_view_identity"] = uuid4().hex
     frame.update(
         dict(zip(STEERING_OUTPUT_NAMES, controls(value), strict=True)),
         forks=store(forks, value),

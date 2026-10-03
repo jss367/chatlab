@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import html
-import json
 import logging
 import re
 import tempfile
@@ -14,6 +13,7 @@ from .reasoning_check import (BUSY, FOLLOW_WINDOW, FRACTIONS, RESPONSE_HEADERS, 
                               TRUNCATION_SUMMARY_HEADERS, TruncationControl, condition_of, csv_text, load_run,
                               read_responses, response_rows, run_label, summary_rows, truncation_rows,
                               truncation_summary, truncation_test)
+from .runner import MAX_RUN_BYTES, megabytes, read_run_file
 
 logger = logging.getLogger(__name__)
 
@@ -139,18 +139,29 @@ def build_reasoning_page(context):
     def load_runs(paths, held, done_before):
         held = dict(held)
         replaced = set()
+        retained_bytes = sum(getattr(ep, "_reasoning_import_bytes", MAX_RUN_BYTES) for ep in held.values())
         for path in paths or ():
             try:
-                if Path(path).stat().st_size > 50_000_000:
-                    raise ValueError("Run files must be smaller than 50 MB.")
-                ep = load_run(json.loads(Path(path).read_text()))
+                size = Path(path).stat().st_size
+                data = read_run_file(path)
+                if not isinstance(data, dict):
+                    raise ValueError("The saved run must be a JSON object.")
+                previous = held.get(data.get("run_id"))
+                replaced_bytes = getattr(previous, "_reasoning_import_bytes", 0)
+                if retained_bytes - replaced_bytes + size > MAX_RUN_BYTES:
+                    raise ValueError(f"Loaded runs together are limited to {megabytes(MAX_RUN_BYTES)}; "
+                                     "clear the loaded runs before importing more.")
+                ep = load_run(data)
+                ep._reasoning_import_bytes = size
             except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
                 logger.warning("Reasoning check could not load %s: %s", path, exc)
                 gr.Warning(f"Could not load {Path(path).name}: {exc}")
                 continue
             if ep.run_id in held:
                 replaced.add(ep.run_id)
+            retained_bytes -= getattr(held.get(ep.run_id), "_reasoning_import_bytes", 0)
             held[ep.run_id] = ep
+            retained_bytes += size
             logger.info("Reasoning check loaded run %s (%s) from %s", ep.run_id, condition_of(ep), path)
         # A run loaded again may be a later export, so what was read from the
         # file it replaces no longer describes it.

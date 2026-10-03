@@ -26,6 +26,7 @@ drove.
 - A **Score text** tab for measuring text the model did not write
 - A **Prompts** tab that runs a list of prompts, each in a conversation of its own, and writes one trace per prompt plus a table of every token
 - A **Compare** tab holding two runs side by side — two models, two precisions, a vector on and off, two seeds — with the tokens aligned, colored by how far the two runs' measurements sat apart, and the settings that differed named
+- A **Reasoning check** tab that cuts a reply's reasoning short, plants a mistake in it, or paraphrases it, and says whether the answer changes; see [Checking whether the reasoning matters](#checking-whether-the-reasoning-matters)
 - **Activation patching** in Compare: transplant a residual activation between two runs and inspect a layer-by-token heatmap of how much of the source run's effect each patch recovers, measured as a logit difference or as the answer token's probability
 - Perplexity, mean surprise, and a surprise trace for each response
 - Full metric-trace export as JSON or CSV
@@ -41,7 +42,7 @@ drove.
 - A conversations pane listing every chat, tagged with the model that answered and the conversation's size in tokens
 - A draggable seam between the transcript and the panel beside it, remembered between sessions, and a draggable edge on every table column for text too long to fit
 - Every conversation kept between sessions in one JSON file, so a reload or a restart brings the pane back as it was
-- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, a run of prompts, or a comparison run, from anywhere on the Chat page
+- Enter sends a message and Shift+Enter starts a new line, with a setting to swap them, and Escape stops a response, a run of prompts, a comparison run, or a reasoning check, from anywhere on the Chat page
 - A setting for macOS's own inline text predictions, which grey in the rest of a sentence as you type, so the typing suggestions can be turned off inside ChatLab alone
 - Right-click a token to regenerate from it, choose an alternative, or type a custom replacement and continue the response
 - Right-click a prompt token to replace it and answer the message again from the edited prompt, template tokens included
@@ -906,6 +907,22 @@ API continue to use the model's default mode.
 
 By default that reasoning is **not** sent back to the model on the next turn. Think models are trained to produce a fresh reasoning block each time, so replaying old ones spends context and tends to degrade the next answer. Enable **Send previous reasoning back to the model** under *Prompting* if you want the older behavior.
 
+## Checking whether the reasoning matters
+
+A reasoning model's answer can follow from its reasoning, or the reasoning can be written around an answer already decided. The **Reasoning check** tab beside Compare tells the two apart the way Lanham et al. did in [*Measuring Faithfulness in Chain-of-Thought Reasoning*](https://arxiv.org/abs/2307.13702): change the reasoning and see whether the answer changes with it. It works on any reply in the conversation that has reasoning and was written in this session by the model still loaded. The reply's own recorded tokens are what is kept, as a branch keeps them, and only the text a check adds is encoded.
+
+**Reply** picks the reply; the newest is picked for you. **Answer pattern** says what counts as the same answer. Leave it blank to compare whole answers, with case and spacing ignored. Give a regular expression, such as `answer is (\w+)` or `\d+`, to compare its last match, or its first group if it has one. A long answer usually needs a pattern, since a reworded sentence around the same number is a different whole answer.
+
+- **Cut it short** keeps 0%, 25%, 50%, 75% and 100% of the reasoning's words, closes the reasoning there, and has the model answer. An answer that only arrives once most of the reasoning is kept depends on it. One already there with none kept does not.
+- **Plant a mistake** starts with the reply's reasoning in a box. Change one step, a number most simply. The reasoning is kept up to your change, the step you changed is fed to the end of its sentence or line, and the model reasons on from there and answers. An answer that follows the mistake was reading the reasoning.
+- **Paraphrase** replaces the whole reasoning with other words for it. Type one, or press **Write one with the loaded model** to have the model paraphrase it, with thinking off where the model can switch it off. The model answers straight after it. An answer that changes under a faithful paraphrase depended on the wording rather than the steps.
+
+Every answer is written greedily, at temperature 0, under the reply's own system prompt, thinking mode and steering vector, so two answers differ because of what the model was given. **Maximum new tokens** from the Chat controls bounds each one. The 100% cut is the control: it is the whole reasoning answered the same way, and where it disagrees with the reply, the reply's own answer came from sampling at a higher temperature.
+
+Each row of the results also gives the **original answer perplexity**: the reply's own answer fed straight after the changed reasoning, scored token by token. It is near 1 where the model would have written that answer anyway, and rises as the change makes it less likely, so it moves even where the greedy answer does not. Click a row to read the reasoning it was given and the answer in full. **Results CSV** holds every row, and the rows stay until **Clear results**, so several replies can be read into one table. **Stop** drops the answer being written and keeps the rows before it.
+
+A reply that was loaded from a file, typed, edited, or written before the model was reloaded has no recorded tokens to replay and is not offered. Nor is one that starts with an assistant prefill, which closes the reasoning before the model writes any.
+
 ## Reading the visualization
 
 - **Raw rank** is the generated token's position in the model's unmodified distribution. Rank 1 was the model's first choice.
@@ -1235,4 +1252,4 @@ The application deliberately leaves `trust_remote_code` disabled. Models that re
 
 ## Optional extensions
 
-Specialized tools can be enabled under **Settings → Extensions** and take effect after restarting ChatLab; the app offers **Restart ChatLab** beside the note, and asks before it quits. **Maze experiments** adds an interactive navigation workbench with interruptions, token inspection, saved-run replay and team runs, in which several agents share one maze with or without messaging each other. **OS-Harm results** adds a viewer for recorded safety judgments and desktop screenshots. **Computer-use safety benchmark** adds a Safety page for OSGuard case imports, local text-only action evaluation, token inspection, external prediction scoring and desktop execution-result review. **Hangman** has the model host a game and checks each reply against the ones before. **Linear probes** fits a probe at every layer from labelled examples and reads any reply with it, token by token. **Circuit tracing** adds a Circuits page that builds attribution graphs over published transcoders, for Gemma 3, Gemma 2 and Qwen 3 models, and ablates or boosts groups of features to test them. All are bundled and disabled by default. See [the extension guide](EXTENSIONS.md), [the circuit tracing guide](CIRCUITS.md), [the probes guide](PROBES.md), [the Maze workbench guide](MAZE_WORKBENCH.md), [the OS-Harm results guide](OS_HARM_RESULTS.md) and [the computer-use safety guide](COMPUTER_USE_SAFETY.md).
+Specialized tools can be enabled under **Settings → Extensions** and take effect after restarting ChatLab; the app offers **Restart ChatLab** beside the note, and asks before it quits. **Maze experiments** adds an interactive navigation workbench with interruptions, token inspection, saved-run replay and team runs, in which several agents share one maze with or without messaging each other. **OS-Harm results** adds a viewer for recorded safety judgments and desktop screenshots. **Computer-use safety benchmark** adds a Safety page for OSGuard case imports, local text-only action evaluation, token inspection, external prediction scoring and desktop execution-result review. **Hangman** has the model host a game and checks each reply against the ones before. **Linear probes** fits a probe at every layer from labelled examples and reads any reply with it, token by token. **Circuit tracing** adds a Circuits page that builds attribution graphs over published transcoders, for Gemma 3, Gemma 2 and Qwen 3 models, ablates or boosts groups of features to test them, and lists every feature with a button that steers Chat by it. All are bundled and disabled by default. See [the extension guide](EXTENSIONS.md), [the circuit tracing guide](CIRCUITS.md), [the probes guide](PROBES.md), [the Maze workbench guide](MAZE_WORKBENCH.md), [the OS-Harm results guide](OS_HARM_RESULTS.md) and [the computer-use safety guide](COMPUTER_USE_SAFETY.md).

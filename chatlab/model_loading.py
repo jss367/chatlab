@@ -197,6 +197,29 @@ class LoadedModel(NamedTuple):
 ReadWeights = tuple[Any, Any, Any, str]
 
 
+def snapshot_revision(path: Path) -> str | None:
+    """The commit a cache snapshot holds, or ``None`` for any other folder.
+
+    A snapshot is ``<cache>/models--org--name/snapshots/<commit>``, so the
+    folder's own name is the revision its files were downloaded at.
+    """
+
+    return path.name if path.parent.name == "snapshots" else None
+
+
+def checkpoint_revision(model) -> str | None:
+    """The revision :func:`_read_text_model` read ``model`` at, or ``None``.
+
+    Kept on the model as ``chatlab_revision``, an attribute ChatLab sets
+    and reads itself, rather than on the config as ``_commit_hash``:
+    Transformers 5.18 stopped keeping that field, so every model read
+    there would have had no revision at all.
+    """
+
+    revision = getattr(model, "chatlab_revision", None)
+    return revision if isinstance(revision, str) else None
+
+
 @contextlib.contextmanager
 def _capture_loading_report() -> Iterator[None]:
     """Keep Transformers' report when it raises an error referring to it.
@@ -332,21 +355,20 @@ def _read_text_model(
                 "LoRA adapters need the peft package: run `pip install peft` "
                 f"and load again. ({error})"
             ) from error
-        # The config came from the base, so its commit hash is the base's,
-        # and a new commit of the adapter over the same base would read as
-        # the same weights to everything that asks which weights these are:
-        # ModelManager.model_revision, and through it a remembered lens, and
-        # the revision a lens file itself records. So the revision becomes
-        # both commits, the base's and the adapter's, and either changing
-        # changes it. Rewritten on the config rather than kept beside it so
-        # there is still one place to read it from. Transformers only reads
-        # the field while it resolves files for a load, and the merged
-        # model's are all read by now. Unrecorded when either half is, since
-        # a half-known revision would vouch for weights it cannot tell apart.
-        base = getattr(model.config, "_commit_hash", None)
-        own = adapter.name if adapter.parent.name == "snapshots" else None
-        model.config._commit_hash = f"{base}+{own}" if base and own else None
         return model
+
+    # Which weights these are, for everything that asks:
+    # ModelManager.model_revision, and through it a remembered lens, and the
+    # revision a lens file itself records. The base's snapshot alone would let a new
+    # commit of the adapter over the same base read as the same weights, so
+    # a merged model's revision is both commits, the base's and the
+    # adapter's, and either changing changes it. Unrecorded when either half
+    # is, since a half-known revision would vouch for weights it cannot tell
+    # apart.
+    revision = snapshot_revision(local_path)
+    if adapter is not None:
+        own = snapshot_revision(adapter)
+        revision = f"{revision}+{own}" if revision and own else None
 
     if backend == "cuda":
         model = merged(model_class.from_pretrained(
@@ -418,6 +440,7 @@ def _read_text_model(
             low_cpu_mem_usage=True,
         ))
         device_name = "CPU"
+    model.chatlab_revision = revision
     return model, tokenizer, None, device_name
 
 

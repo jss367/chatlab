@@ -76,6 +76,16 @@ class TrialFileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'not a saved replay'):
             self.read()
 
+    def test_forbidden_interruption_text_is_refused_when_the_file_loads(self):
+        # Refused with the file, rather than by a batch that generates the
+        # trial's responses and then ends it in error where the text is due.
+        for text in ('Use ```code``` here', '</think>', '<|im_start|>'):
+            self.payload['trials'][0]['config']['interruption_text'] = text
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "Trial 'clean': .*code fences"):
+                self.read()
+        self.payload['trials'][0]['config']['interruption_text'] = 'Discuss `inline text`.'
+        self.assertEqual(prepare_trial(self.read(), 'clean').config['interruption_text'], 'Discuss `inline text`.')
+
     def test_a_trial_pins_its_prompt_or_runs_the_stock_wording(self):
         episode = prepare_trial(self.read(), 'clean', Episode(MAZE, CONFIG))
         self.assertEqual(episode.messages[0]['content'], SYSTEM)
