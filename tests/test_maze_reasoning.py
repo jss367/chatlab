@@ -480,7 +480,8 @@ class ReadingManager(SteeringManager):
 
 class ReasoningPageTests(unittest.TestCase):
     def test_loaded_runs_share_a_budget_across_uploads(self):
-        episodes = [Episode(MAZE, CONFIG | {"interruption_text": ""}) for _ in range(3)]
+        # The budget compares file sizes, so timestamps must not vary in serialized length.
+        episodes = [Episode(MAZE, CONFIG | {"interruption_text": ""}, created_at=0.0) for _ in range(3)]
         with tempfile.TemporaryDirectory() as directory:
             paths = [ep.save(Path(directory)) for ep in episodes]
             sizes = [p.stat().st_size for p in paths]
