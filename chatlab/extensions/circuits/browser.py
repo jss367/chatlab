@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import partial
 from uuid import uuid4
 
@@ -79,7 +80,7 @@ def feature_vector(spec, layer, feature, record, strength, loaded_id):
 
 
 def build_browser(context, bench):
-    pages, page_sequences, page_lock = {}, {}, threading.Lock()
+    pages, page_sequences, page_lock = {}, {}, threading.RLock()
 
     def forget(view):
         with page_lock:
@@ -289,4 +290,11 @@ def build_browser(context, bench):
             raise ValueError("The selected feature changed; click it again before steering.")
         return value
 
-    context.navigation.steer_chat(steer, apply_prepared, [chosen, strength, owner], prepare=vector)
+    @contextmanager
+    def commit_selection(value, selected, amount, view):
+        with page_lock:
+            apply_prepared(value, selected, amount, view)
+            yield
+
+    context.navigation.steer_chat(steer, apply_prepared, [chosen, strength, owner],
+                                 prepare=vector, commit=commit_selection)

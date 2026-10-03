@@ -535,7 +535,7 @@ def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tup
     extension_steering_buttons = []
     navigation = NavigationService(
         lambda button, model_id: extension_model_buttons.append((button, model_id)),
-        lambda button, vector, inputs, prepare=None: extension_steering_buttons.append((button, vector, inputs, prepare)))
+        lambda button, vector, inputs, prepare=None, commit=None: extension_steering_buttons.append((button, vector, inputs, prepare, commit)))
     for extension in extensions:
         with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
             context = ExtensionContext(
@@ -562,12 +562,14 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
     for entry in buttons:
         button, vector, inputs = entry[:3]
         prepare = entry[3] if len(entry) > 3 else None
-        def steer(forks, *values, build=vector):
+        commit = entry[4] if len(entry) > 4 else None
+        def steer(forks, *values, build=vector, guard=commit):
             try:
                 value = build(*values)
             except ValueError as error:
                 raise gr.Error(str(error)) from error
-            applied = apply_vector(forks, value)
+            applied = (apply_vector(forks, value, commit=lambda: guard(*values))
+                       if guard is not None else apply_vector(forks, value))
             gr.Info(steering_description(applied[1]))
             return (*applied, CHAT_PAGE, *show_page(CHAT_PAGE),
                     *(gr.update(visible=False) for _ in pages.extensions))

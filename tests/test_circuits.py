@@ -2525,7 +2525,7 @@ class BrowserTests(unittest.TestCase):
         from ui_support import handlers_by_name
         vectors = []
         context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
-                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None:
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None, commit=None:
                                                              vectors.append(prepare or fn)))
         records = SimpleNamespace(get=mock.Mock(return_value=self.record), revision="b" * 40)
         bench = SimpleNamespace(records=lambda spec: records)
@@ -2551,7 +2551,7 @@ class BrowserTests(unittest.TestCase):
         from ui_support import handlers_by_name
         vectors = []
         context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
-                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None, commit=None: vectors.append(prepare or fn)))
         bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
         with gr.Blocks() as demo:
             browser.build_browser(context, bench)
@@ -2587,7 +2587,7 @@ class BrowserTests(unittest.TestCase):
         from threading import Event
         vectors = []
         context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
-                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None, commit=None: vectors.append(prepare or fn)))
         bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
         with gr.Blocks() as demo:
             browser.build_browser(context, bench)
@@ -2628,7 +2628,7 @@ class BrowserTests(unittest.TestCase):
         from ui_support import handlers_by_name
         vectors = []
         context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
-                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None, commit=None: vectors.append(prepare or fn)))
         bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
         with gr.Blocks() as demo:
             browser.build_browser(context, bench)
@@ -2655,6 +2655,42 @@ class BrowserTests(unittest.TestCase):
             with mock.patch.object(browser, "feature_vector", side_effect=switched_during_download):
                 with self.assertRaisesRegex(ValueError, "changed"):
                     vectors[0](selected, 3, "view")
+        finally:
+            demo.close()
+
+    def test_selection_commit_guard_blocks_row_changes_and_rejects_superseded_rows(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        guards = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None, commit=None: guards.append(commit)))
+        bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            handlers = handlers_by_name(demo)
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", handlers["begin_page"]("view")[0])[2]
+            raw = lambda feature: json.dumps(dict(feature=feature, page_id=page["stamp"], nonce=feature))
+            stamp = handlers["begin_pick"](page, raw(1), "view")[0]
+            selected = handlers["picked"](page, raw(1), "view", stamp)[1]
+            entered, done = threading.Event(), threading.Event()
+            def change():
+                entered.set()
+                handlers["begin_pick"](page, raw(2), "view")
+                done.set()
+            thread = threading.Thread(target=change)
+            with guards[0]({}, selected, 3, "view"):
+                thread.start()
+                self.assertTrue(entered.wait(1))
+                self.assertFalse(done.wait(.05))
+            thread.join(2)
+            self.assertTrue(done.is_set())
+            with self.assertRaisesRegex(ValueError, "selected feature changed"):
+                with guards[0]({}, selected, 3, "view"):
+                    self.fail("superseded feature committed")
         finally:
             demo.close()
 
