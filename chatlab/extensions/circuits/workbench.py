@@ -191,8 +191,8 @@ class Workbench:
             entries = explain.get(key, [])
             if not isinstance(entries, list) or len(entries) > attribution.MAX_CHOSEN_TARGETS:
                 raise ValueError(f"Use at most {attribution.MAX_CHOSEN_TARGETS:,} explanation entries per list.")
-            if any(not isinstance(text, str) or len(text) > 32768 for text in entries):
-                raise ValueError("Explanation entries must be text of at most 32768 characters each.")
+            if any(not isinstance(text, str) or len(text) > 4096 for text in entries):
+                raise ValueError("Explanation entries must be text of at most 4096 characters each.")
         attribution._check_cancelled(cancelled)
         with self.models.open_session() as session:
             revision = session.model_revision
