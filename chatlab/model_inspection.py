@@ -576,6 +576,30 @@ class InspectionMixin:
             )
             return np.stack(self._example_readings(examples, use_chat_template, pool, blocks, cancelled))
 
+    def _projection_directions(self, directions, blocks):
+        directions = np.asarray(directions, dtype=np.float32)
+        if directions.ndim != 2 or directions.shape[0] != len(blocks):
+            raise ValueError(f"Give one direction for each of this model's {len(blocks)} decoder blocks.")
+        config = getattr(self.model, "config", None)
+        if callable(getattr(config, "get_text_config", None)):
+            config = config.get_text_config()
+        width = getattr(config, "hidden_size", None) or getattr(config, "n_embd", None)
+        if width is None:
+            width = self.model.get_input_embeddings().weight.shape[-1]
+        if directions.shape[1] != width:
+            raise ValueError(f"These directions are {directions.shape[1]:,} wide; this model's blocks are {width:,}.")
+        if not np.isfinite(directions).all():
+            raise ValueError("Probe directions must be finite.")
+        return directions
+
+    def check_projection(self, directions, *, load_id=None):
+        """Validate a probe against the pinned model without running a forward pass."""
+        with self._lock:
+            blocks = self._reading_blocks(load_id, missing="Load a model before reading a probe.",
+                                          changed="this probe was to be read through",
+                                          mlx="Reading a probe needs a PyTorch model; load its Transformers version.")
+            self._projection_directions(directions, blocks)
+
     @_guards_device_memory
     def project_blocks(self, token_ids: Sequence[int], directions, *, load_id: str | None = None, cancelled=None) -> np.ndarray:
         """Every position's block output, read along one direction per block.
@@ -611,10 +635,7 @@ class InspectionMixin:
                     "Transformers version instead."
                 ),
             )
-            if directions.ndim != 2 or directions.shape[0] != len(blocks):
-                raise ValueError(
-                    f"Give one direction for each of this model's {len(blocks)} decoder blocks."
-                )
+            directions = self._projection_directions(directions, blocks)
             # One pass with no cache holds every layer's attention over the
             # whole passage, so the flat scoring cap applies as well as the window.
             limit = score_token_limit(self.model)

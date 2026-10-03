@@ -523,6 +523,20 @@ class PageTests(unittest.TestCase):
         self.assertIn("Greeting at layer 1", note)
         self.assertEqual(len(table), 2)
 
+    def test_incompatible_imported_probe_shape_is_refused_before_generation(self):
+        trained = self.train()[0]
+        variants = [{**trained, "layers": trained["layers"][:1], "best_layer": 0},
+                    {**trained, "layers": [{**layer, "weights": layer["weights"][:-1]} for layer in trained["layers"]]}]
+        for index, altered in enumerate(variants):
+            with self.subTest(index=index):
+                path = self.data / f"import-{index}.json"
+                path.write_text(probes.dumps(altered))
+                imported = self.fn["import_probe"](str(path), "owner")[0]
+                with mock.patch.object(self.manager, "generate", side_effect=AssertionError("incompatible probe generated")), self.assertRaises(gr.Error):
+                    self.read(imported, GENERATE, "Hello")
+        self.assertIsNone(self.manager.claim_generation())
+        self.manager.release_generation()
+
     def test_a_reply_is_generated_then_read_from_its_first_token(self):
         probe = self.train()[0]
         frames = self.read(probe, GENERATE, "Hello")

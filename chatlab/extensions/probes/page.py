@@ -605,6 +605,8 @@ def build_page(context):
                 note = (f"This probe was trained on {trained_at} weights and this load is {loaded_at}, "
                         "so its readings are approximate." if trained_at and loaded_at and trained_at != loaded_at
                         else "")
+                directions = probes.directions(probe)
+                session.check_projection(directions)
                 visible_positions = None
                 if chosen_mode == GENERATE:
                     messages = ([{"role": "system", "content": system_text}] if system_text.strip() else [])
@@ -643,7 +645,7 @@ def build_page(context):
                     # A passage longer than the window is refused by the reading
                     # itself rather than cut short: a prefix is not what was asked for.
                     ids, first = session.example_ids(message, chat_template=user_turn), 0
-                projections = session.project_layers(ids, probes.directions(probe))
+                projections = session.project_layers(ids, directions)
                 probabilities = probes.probabilities(probe, projections)
                 if visible_positions is not None:
                     # Project the full causal context, then remove exactly the

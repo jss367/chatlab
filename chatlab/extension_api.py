@@ -247,6 +247,11 @@ class GenerationSession:
             cancelled=self._cancelled.is_set,
         )
 
+    def check_projection(self, directions):
+        """Check probe layer count and residual width before generating or reading."""
+        self._check()
+        self._manager.check_projection(directions, load_id=self.load_id)
+
     def project_layers(self, ids, directions):
         """Read every position of a token sequence along one direction per block.
 
