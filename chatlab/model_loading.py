@@ -344,6 +344,10 @@ def _read_text_model(
         # model's are all read by now. Unrecorded when either half is, since
         # a half-known revision would vouch for weights it cannot tell apart.
         base = getattr(model.config, "_commit_hash", None)
+        # New Transformers versions leave _commit_hash unset when loading a
+        # local Hub snapshot. Its cache path still identifies the exact base.
+        if local_path.parent.name == "snapshots" and re.fullmatch(r"[0-9a-f]{40}", local_path.name):
+            base = local_path.name
         own = adapter.name if adapter.parent.name == "snapshots" else None
         model.config._commit_hash = f"{base}+{own}" if base and own else None
         return model

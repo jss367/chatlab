@@ -1,6 +1,6 @@
 -r requirements.txt
 
 # Desktop releases must include both advertised Metal weight precisions.
-transformers>=5.3,<6
+transformers>=5.3,<5.18
 pyinstaller>=6.22,<7
 pywebview>=6.2,<7
