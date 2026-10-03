@@ -452,6 +452,19 @@ class InterventionTests(unittest.TestCase):
             finally:
                 handle.remove()
 
+    def test_rare_intervention_probabilities_do_not_underflow_in_float32(self):
+        from dataclasses import replace
+        devices = ["cpu"] + (["mps"] if torch.backends.mps.is_available() else [])
+        for device in devices:
+            logits = torch.full((1, 64), -120., device=device)
+            logits[..., 1] = 0.
+            blocks = replace(self.blocks, unembed=lambda _hidden: logits, final_softcap=None)
+            result = interventions.run(blocks, self.held, IDS, tokens=[0, 1])
+            with self.subTest(device=device):
+                self.assertGreater(result["probabilities"][0], 0.)
+                expected = torch.tensor(-120., dtype=torch.float64).exp().item()
+                self.assertAlmostEqual(result["probabilities"][0] / expected, 1.)
+
     def test_scaling_by_one_changes_nothing(self):
         k = 0
         layer, feature = int(self.recording.feature_layer[k]), int(self.recording.feature_index[k])
@@ -891,6 +904,19 @@ class WorkbenchTests(unittest.TestCase):
                 path.write_text(json.dumps(graph | change))
                 with self.subTest(change=change), self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
+
+    def test_imported_pivot_totals_must_match_the_token_probabilities(self):
+        for where in ("baseline", "ablate", "boost"):
+            summary = lambda: dict(tokens={"1": .2, "2": .1}, pivot=.2)
+            effects = dict(prefixes=1, boost=2., every_position=False, pivot=[1], alternatives=[2],
+                           baseline=summary(), groups={"g": dict(active_prefixes=1,
+                                                                 ablate=summary(), boost=summary())})
+            value = effects["baseline"] if where == "baseline" else effects["groups"]["g"][where]
+            value["pivot"] = .9
+            with self.subTest(where=where), self.assertRaises(ValueError):
+                workbench._validate_effects(effects, {"g": []})
+            value["pivot"] = .2 * (1 + 1e-8)
+            workbench._validate_effects(effects, {"g": []})
 
     def test_imported_effects_require_every_declared_token(self):
         for where in ("baseline", "ablate", "boost"):
