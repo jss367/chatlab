@@ -112,6 +112,14 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(check(game_of(("start", "Board: _ _ _"), ("reveal", "Word: cat"),
                                        ("c", "Board: C _ _"), ("t", "Board: C _ T"))), [])
 
+    def test_followup_give_up_confirms_a_full_reveal_board(self):
+        game = game_of(("Begin", "Board: _ _ _ _ _"),
+                       ("z", "Board: C R A N E\nWrong guesses left: 0"),
+                       (GIVE_UP, "Word: crane"))
+        self.assertEqual(check(game), [])
+        game["turns"][-1]["revealed_word"] = "crate"
+        self.assertTrue(any("never guessed" in message for _, message in check(game)))
+
     def test_a_board_spelling_out_the_revealed_word_needs_no_guesses(self):
         given_up = game_of(("start", "Board: _ _ _ _ _"), ("c", "Board: C _ _ _ _"),
                            ("x", "Board: C _ _ _ _"), (GIVE_UP, "Board: c r a n e\nWord: crane"))

@@ -230,7 +230,10 @@ def _walk(game):
         # drawn when the game ends or the player asks, not a claim that its
         # letters were guessed. It is still held to every board before it,
         # and later boards may hide what only it showed.
-        spelled = board is not None and "".join(board) == turn.get("revealed_word")
+        followup = game["turns"][number] if number < len(game["turns"]) else {}
+        confirmation = followup.get("revealed_word") if followup.get("guess") == GIVE_UP else None
+        spelled = (board is not None and HIDDEN not in board
+                   and "".join(board) in (turn.get("revealed_word"), confirmation))
         if board is not None:
             drawn = cells.setdefault(len(board), {})
             for position, cell in enumerate(board):
