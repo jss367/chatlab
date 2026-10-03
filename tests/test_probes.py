@@ -421,7 +421,8 @@ class PageTests(unittest.TestCase):
     def test_saved_and_imported_probes_open(self):
         probe = self.train()[0]
         opened = self.fn["open_saved"](probe["id"], "owner")
-        self.assertEqual(opened[0], probe)
+        self.assertEqual(probes.normalize(opened[0]), probes.normalize(probe))
+        self.assertNotEqual(opened[0]["_view_probe"], probe["_view_probe"])
         # The form is refilled from the probe, so it can be changed and trained again.
         self.assertEqual(opened[12:], ("Greeting", "Greeting", "Question", "\n".join(WANTED), "\n".join(UNWANTED),
                                        False, False, "last", 1.0))
@@ -449,6 +450,14 @@ class PageTests(unittest.TestCase):
         fresh = self.read(probe, READ, WANTED[0])[-1][0]
         self.assertEqual(self.fn["change_layer"](probe, fresh, 0, "another view"), (gr.skip(), gr.skip()))
 
+    def test_queued_read_refuses_a_probe_replaced_before_start(self):
+        old = self.train()[0]
+        current = self.fn["open_saved"](old["id"], "owner")[0]
+        with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("stale model work")):
+            with self.assertRaisesRegex(gr.Error, "displayed probe changed"):
+                self.read(old, READ, WANTED[0])
+        self.assertIsNotNone(self.read(current, READ, WANTED[0])[-1][0])
+
     def test_a_run_the_page_moved_on_from_publishes_nothing(self):
         probe = self.train()[0]
         directions = probes.directions
@@ -462,7 +471,8 @@ class PageTests(unittest.TestCase):
                 with mock.patch.object(probes, "directions", side_effect=mid_run):
                     frames = self.read(probe, READ, WANTED[0])
                 self.assertEqual(frames[-1], (gr.skip(),) * 5)
-        # Left alone, the same run publishes.
+        # Left alone, the current probe's run publishes.
+        probe = self.fn["open_saved"](probe["id"], "owner")[0]
         self.assertIsNotNone(self.read(probe, READ, WANTED[0])[-1][0])
 
     def test_a_token_inspection_overtaken_by_a_run_publishes_nothing(self):

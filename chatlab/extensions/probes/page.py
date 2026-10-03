@@ -58,17 +58,29 @@ class Runs:
         self._shown = {}
         self._turns = {}
         self._downloads = {}
+        self._probes = {}
 
     @staticmethod
     def new_owner():
         return uuid4().hex
 
-    def start(self, owner):
+    def start(self, owner, probe):
         with self._lock:
+            if not probe.get("_view_probe") or self._probes.get(owner) != probe["_view_probe"]:
+                raise ValueError("The displayed probe changed; read with the current probe.")
             if owner in self._active:
                 raise ValueError("This view is already reading.")
             self._active[owner] = [threading.Event(), None]
-            return self._active[owner][0]
+            self._turns[owner] = self._turns.get(owner, 0) + 1
+            self._shown[owner] = None
+            return self._active[owner][0], self._turns[owner]
+
+    def replace_probe(self, owner, probe):
+        with self._lock:
+            self._turns[owner] = self._turns.get(owner, 0) + 1
+            self._shown[owner] = None
+            stamp = self._probes[owner] = uuid4().hex
+            return {**probe, "_view_probe": stamp}
 
     def attach(self, owner, session):
         with self._lock:
@@ -136,6 +148,7 @@ class Runs:
         with self._lock:
             self._shown.pop(owner, None)
             self._turns.pop(owner, None)
+            self._probes.pop(owner, None)
             directory = self._downloads.pop(owner, None)
         if directory is not None:
             directory.cleanup()
@@ -337,7 +350,7 @@ def build_page(context):
         """
         # A run for the probe being replaced would finish beside this one's controls.
         runs.cancel(view)
-        runs.turn(view)
+        probe = runs.replace_probe(view, probe)
         choices = saved_choices(context.data_dir)
         listed = any(value == probe["id"] for _label, value in choices)
         examples = probe["examples"]
@@ -442,10 +455,9 @@ def build_page(context):
         if not isinstance(message, str) or not message.strip():
             raise gr.Error("Type something to read first.")
         try:
-            cancel = runs.start(view)
+            cancel, turn = runs.start(view, probe)
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
-        turn = runs.turn(view)
         reading, note = None, ""
         try:
             with context.models.open_session() as session:

@@ -160,6 +160,9 @@ class Workbench:
         return ids
 
     def encoded_prompt(self, session, prompt):
+        for key in ("system", "user", "prefix"):
+            if not isinstance(prompt.get(key), str) or len(prompt[key]) > 32768:
+                raise ValueError("Prompt fields must be text of at most 32768 characters each.")
         # encode_replacement takes the host lock itself. Raw encoding only
         # needs the locked model to read its BOS configuration.
         if prompt["raw"]:
@@ -421,12 +424,15 @@ def load_graph(path):
             time.localtime(created)
         except (OverflowError, OSError) as exc:
             raise ValueError from exc
+        revision = graph.get("transcoder_revision")
+        if revision is not None and (not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision)):
+            raise ValueError
         for key in ("prompt", "explain", "stats"):
             graph.setdefault(key, {})
             if not isinstance(graph[key], dict):
                 raise ValueError
         for key in ("system", "user", "prefix"):
-            if not isinstance(graph["prompt"].get(key), str):
+            if not isinstance(graph["prompt"].get(key), str) or len(graph["prompt"][key]) > 32768:
                 raise ValueError
         if not isinstance(graph["prompt"].get("raw"), bool):
             raise ValueError

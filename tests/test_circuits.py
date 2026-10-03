@@ -699,6 +699,26 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(selected, [2, 0])
         self.assertEqual([c.args[2] for c in run.call_args_list], prefixes)
 
+    def test_imported_prompts_and_snapshot_revisions_are_bounded(self):
+        graph = small_graph()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for key in ("system", "user", "prefix"):
+                prompt = graph["prompt"] | {key: "x" * 32769}
+                path.write_text(json.dumps(graph | {"prompt": prompt}))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+            for revision in (1, "main", "../snapshot", "g" * 40, "a" * 41):
+                path.write_text(json.dumps(graph | {"transcoder_revision": revision}))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+            path.write_text(json.dumps(graph | {"transcoder_revision": "a" * 40}))
+            self.assertEqual(workbench.load_graph(path)["transcoder_revision"], "a" * 40)
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        with mock.patch.object(bench, "_model", side_effect=AssertionError("must not tokenize")):
+            with self.assertRaisesRegex(ValueError, "32768 characters"):
+                bench.encoded_prompt(SimpleNamespace(), graph["prompt"] | {"user": "x" * 32769})
+
     def test_duplicate_imported_group_memberships_are_rejected(self):
         graph = small_graph()
         member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
