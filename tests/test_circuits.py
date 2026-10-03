@@ -563,6 +563,38 @@ class WorkbenchTests(unittest.TestCase):
         other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
         self.assertNotEqual(other, ids)
 
+    def test_invalid_target_and_intervention_tokens_fail_before_model_loading(self):
+        session = SimpleNamespace(model_revision=None, encode=lambda text: [1, 2] if text == "multi" else [int(text)])
+        models = SimpleNamespace(open_session=lambda: contextlib.nullcontext(session))
+        bench = workbench.Workbench(models, tempfile.gettempdir())
+        explains = [dict(mode="tokens", tokens=[]), dict(mode="tokens", tokens=["multi"]),
+                    dict(mode="tokens", tokens=[str(i) for i in range(attribution.MAX_CHOSEN_TARGETS + 1)]),
+                    dict(mode="contrast", tokens=["1"], others=[]),
+                    dict(mode="contrast", tokens=["1"], others=["1"]),
+                    dict(mode="contrast", tokens=[str(i) for i in range(attribution.MAX_CHOSEN_TARGETS)],
+                         others=[str(attribution.MAX_CHOSEN_TARGETS)])]
+        with mock.patch.object(bench, "encoded_prompt", return_value=IDS), \
+                mock.patch.object(bench, "_model", side_effect=AssertionError("expensive model path")), \
+                mock.patch.object(bench, "_same_model"):
+            for explain in explains:
+                with self.subTest(mode=explain["mode"], count=len(explain["tokens"])), self.assertRaises(ValueError):
+                    bench.trace({}, explain, attribution.Settings(), lambda *args: None, lambda: False)
+            for pivot in ([], ["multi"]):
+                with self.subTest(pivot=pivot), self.assertRaises(ValueError):
+                    bench.group_effects({"ids": IDS, "groups": {"group": []}}, pivot, [], [], True,
+                                        2.0, False, lambda *args: None, lambda: False)
+
+    def test_saved_menu_uses_bounded_metadata_and_does_not_parse_graphs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bench = workbench.Workbench(SimpleNamespace(), directory)
+            graph = small_graph()
+            path = bench.save(graph)
+            path.write_text("not parsed by the menu")
+            self.assertEqual(bench.saved(), [(workbench.describe(graph), str(path))])
+            legacy = path.parent / "legacy.json"
+            legacy.write_text("not parsed either")
+            self.assertEqual(len(bench.saved()), 2)
+
     def test_automatic_alternatives_search_beyond_excluded_top_twenty(self):
         self.assertEqual(workbench.automatic_alternatives(-torch.arange(64).float(), list(range(20))), list(range(20, 28)))
 
