@@ -793,6 +793,22 @@ class WorkbenchTests(unittest.TestCase):
         other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
         self.assertNotEqual(other, ids)
 
+    def test_intervention_group_and_forward_budgets_precede_model_reservation(self):
+        opened = mock.Mock(side_effect=AssertionError("model session acquired"))
+        bench = workbench.Workbench(SimpleNamespace(open_session=opened), tempfile.gettempdir())
+        for groups, prefixes in ((33, 1), (32, 16), (2, 256)):
+            graph = {"groups": {str(i): ["feature"] for i in range(groups)}}
+            with self.subTest(groups=groups, prefixes=prefixes), self.assertRaisesRegex(ValueError, "groups|passes"):
+                bench.group_effects(graph, ["1"], [], ["prefix"] * (prefixes - 1), True, 2, False,
+                                    lambda *_: None, lambda: False)
+        opened.assert_not_called()
+        interventions.check_workload(256, 1)
+        interventions.check_workload(15, 32)
+        with mock.patch.object(interventions, "run", side_effect=AssertionError("model forward")) as run:
+            with self.assertRaisesRegex(ValueError, "32 nonempty groups"):
+                interventions.group_effects(None, None, [[1]], {str(i): [] for i in range(33)}, [1], [])
+            run.assert_not_called()
+
     def test_intervention_raw_bounds_precede_session_and_encoding(self):
         opened = mock.Mock(side_effect=AssertionError("model session acquired"))
         bench = workbench.Workbench(SimpleNamespace(open_session=opened), tempfile.gettempdir())
@@ -1157,6 +1173,14 @@ class WorkbenchTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
                 validate.assert_not_called()
+
+    def test_imported_effect_token_lists_must_be_unique_and_disjoint(self):
+        for pivot, alternatives in (([1, 1], [2]), ([1], [2, 2]), ([1], [1, 2])):
+            summary = dict(tokens={"1": .2, "2": .1}, pivot=.2)
+            effects = dict(prefixes=1, boost=2., every_position=False, pivot=pivot, alternatives=alternatives,
+                           baseline=summary, groups={"g": dict(active_prefixes=1, ablate=summary, boost=summary)})
+            with self.subTest(pivot=pivot, alternatives=alternatives), self.assertRaises(ValueError):
+                workbench._validate_effects(effects, {"g": []})
 
     def test_imported_measured_effects_need_a_pivot(self):
         summary = dict(tokens={"2": .1}, pivot=0.)
