@@ -185,6 +185,10 @@ class Workbench:
     def trace(self, prompt, explain, settings, progress, cancelled):
         """A finished graph for the prompt, labelled and ready to save."""
         settings.check()
+        for key in ("tokens", "others"):
+            entries = explain.get(key, [])
+            if not isinstance(entries, list) or len(entries) > attribution.MAX_CHOSEN_TARGETS:
+                raise ValueError(f"Use at most {attribution.MAX_CHOSEN_TARGETS:,} explanation entries per list.")
         with self.models.open_session() as session:
             revision = session.model_revision
             ids = self.encoded_prompt(session, prompt)
