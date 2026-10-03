@@ -226,10 +226,16 @@ def build_browser(context, bench):
         if not selected or not current(view, selected.get("stamp"), ready=True) or not selection_current(view, selected):
             raise ValueError("Wait for the feature page, then click a feature in the list first.")
         spec = spec_named(selected["set"])
+        records = bench.records(spec)
         try:
-            record = bench.records(spec).get(selected["layer"], selected["feature"])
+            record = records.get(selected["layer"], selected["feature"])
         except OSError:
             record = None
+        if record is None:
+            revision = records.revision
+            if not revision:
+                raise ValueError("Could not resolve the feature set snapshot; retry the feature page.")
+            record = {"_transcoder_revision": revision}
         try:
             result = feature_vector(spec, selected["layer"], selected["feature"], record,
                                   float(amount if amount is not None else DEFAULT_STRENGTH),

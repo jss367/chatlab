@@ -638,6 +638,22 @@ class WorkbenchTests(unittest.TestCase):
     def test_automatic_alternatives_search_beyond_excluded_top_twenty(self):
         self.assertEqual(workbench.automatic_alternatives(-torch.arange(64).float(), list(range(20))), list(range(20, 28)))
 
+    def test_imported_identifiers_and_group_names_are_nonempty_and_bounded(self):
+        graph = small_graph()
+        member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for identifier in ("", "x" * 129):
+                nodes = [dict(node, id=identifier) if node["id"] == member else node
+                         for node in graph["nodes"]]
+                path.write_text(json.dumps(graph | {"nodes": nodes}))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+            for name in ("", "x" * 61):
+                path.write_text(json.dumps(graph | {"groups": {name: [member]}}))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+
     def test_duplicate_imported_group_memberships_are_rejected(self):
         graph = small_graph()
         member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
@@ -1167,6 +1183,32 @@ class BrowserTests(unittest.TestCase):
             self.assertIn("feature 2", card)
             html = show(browser.DEFAULT_SET, 4, 0, None)[0]
             self.assertIn('data-page="', html)
+        finally:
+            demo.close()
+
+    def test_failed_feature_range_retains_the_decoder_snapshot(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        vectors = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None:
+                                                             vectors.append(prepare or fn)))
+        records = SimpleNamespace(get=mock.Mock(return_value=self.record), revision="b" * 40)
+        bench = SimpleNamespace(records=lambda spec: records)
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            callbacks = handlers_by_name(demo)
+            show = next(listener.fn for listener in demo.fns.values()
+                        if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", callbacks["begin_page"]("view")[0])[2]
+            raw = json.dumps(dict(feature=2, page_id=page["stamp"]))
+            selected = callbacks["picked"](page, raw, "view", callbacks["begin_pick"](page, raw, "view")[0])[1]
+            records.get.side_effect = OSError("range unavailable")
+            with mock.patch.object(transcoders, "decoder_row", return_value=[0.5, -1.0]) as row:
+                vectors[0](selected, 1, "view")
+            row.assert_called_once_with(browser.spec_named(browser.DEFAULT_SET), 3, 2, revision="b" * 40)
         finally:
             demo.close()
 
