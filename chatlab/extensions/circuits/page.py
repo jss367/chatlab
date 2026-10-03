@@ -491,6 +491,8 @@ def build_page(context):
     # Measuring -----------------------------------------------------------------
 
     def ablate_focused(session_id, graph, focused):
+        if not current_graph(graph, session_id):
+            return gr.skip()
         node = node_of(graph, focused)
         if node is None or node["kind"] != "feature":
             raise gr.Error("Click a feature in the graph first.")
@@ -514,6 +516,9 @@ def build_page(context):
 
     def run_interventions(session_id, graph, pivot_text, alternative_text, prefix_text, include, factor, everywhere,
                           name):
+        if not current_graph(graph, session_id):
+            yield (gr.skip(),) * 6
+            return
         if not graph:
             raise gr.Error("Trace a graph first.")
         if not graph["groups"]:

@@ -236,11 +236,12 @@ def frozen_allocation_bytes(blocks, recording, batch_size):
 class FrozenGraph:
     """The frozen, batched replacement model, answering one target row per batch slot."""
 
-    def __init__(self, blocks, transcoders, recording, batch_size):
+    def __init__(self, blocks, transcoders, recording, batch_size, cancelled=None):
         import torch
 
         self.blocks, self.transcoders, self.recording = blocks, transcoders, recording
         self.batch = batch_size
+        self.cancelled = cancelled
         n, layers = len(recording.ids), len(blocks.layers)
         self.n, self.layers = n, layers
         self.stack = contextlib.ExitStack()
@@ -252,11 +253,14 @@ class FrozenGraph:
 
     def _build(self, torch, n, layers):
         blocks, recording, batch = self.blocks, self.recording, self.batch
+        _check_cancelled(self.cancelled)
         self.stack.enter_context(architecture.frozen(blocks.model))
         self.stack.enter_context(torch.enable_grad())
         self.embedding = recording.embeddings[None].expand(batch, -1, -1).clone().requires_grad_(True)
-        self.outputs = [recording.outputs[layer][None].expand(batch, -1, -1).clone().requires_grad_(True)
-                        for layer in range(layers)]
+        self.outputs = []
+        for layer in range(layers):
+            _check_cancelled(self.cancelled)
+            self.outputs.append(recording.outputs[layer][None].expand(batch, -1, -1).clone().requires_grad_(True))
         self.inputs = [None] * layers
         for layer in range(layers):
             leaf = self.outputs[layer]
@@ -268,9 +272,12 @@ class FrozenGraph:
                                                                       lambda x, *_a, **_k: x))
 
             def keep(_module, _args, output, layer=layer):
+                _check_cancelled(self.cancelled)
                 self.inputs[layer] = output[0] if isinstance(output, tuple) else output
             self.stack.callback(blocks.mlp_input(layer).register_forward_hook(keep).remove)
+        _check_cancelled(self.cancelled)
         self.final = blocks.inner(inputs_embeds=self.embedding, use_cache=False).last_hidden_state
+        _check_cancelled(self.cancelled)
         drift = (self.final[0].float() - recording.final).abs().max().item()
         scale = recording.final.abs().max().item() or 1.0
         if not math.isfinite(drift) or drift > 1e-2 * scale + 1e-3:
@@ -280,7 +287,9 @@ class FrozenGraph:
         tc = self.transcoders
         self.decoders = []
         for layer, (start, end) in enumerate(recording.layer_slices):
+            _check_cancelled(self.cancelled)
             self.decoders.append(tc.decoder_rows(layer, recording.feature_index[start:end]))
+        _check_cancelled(self.cancelled)
 
     def close(self):
         self.stack.close()
@@ -448,7 +457,7 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
         raise ValueError(
             f"This prompt has {features:,} active features; a graph of {budget} of them would need "
             f"{allocation_bytes / 1024 ** 3:.1f} GB. Use a shorter prompt, fewer nodes, or a smaller batch.")
-    graph = FrozenGraph(blocks, transcoders, recording, settings.batch_size)
+    graph = FrozenGraph(blocks, transcoders, recording, settings.batch_size, cancelled=stop)
     try:
         rows = torch.zeros(len(targets) + budget, columns, dtype=torch.float32)
         normalized = torch.zeros_like(rows)
