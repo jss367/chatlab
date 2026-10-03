@@ -284,6 +284,26 @@ class AttributionTests(unittest.TestCase):
                 attribution.attribute(blocks, held, IDS, self.decode)
             frozen.assert_not_called()
 
+    def test_frozen_construction_cancels_decoder_gathers_and_restores_model(self):
+        model = tiny_model("gemma3")
+        blocks = architecture.blocks(model)
+        held = tiny_transcoders(blocks)
+        recording = attribution.record(blocks, held, IDS)
+        stopped = False
+        rows = held.decoder_rows
+        def first(*args):
+            nonlocal stopped
+            result = rows(*args)
+            stopped = True
+            return result
+        with mock.patch.object(held, "decoder_rows", side_effect=first) as called:
+            with self.assertRaises(attribution.Cancelled):
+                attribution.FrozenGraph(blocks, held, recording, 4, cancelled=lambda: stopped)
+            self.assertEqual(called.call_count, 1)
+        self.assertFalse(any(m._forward_hooks for m in model.modules()))
+        self.assertFalse(any("forward" in vars(m) for m in model.modules()))
+        self.assertTrue(all(p.requires_grad for p in model.parameters()))
+
     def test_recording_cancels_between_transcoder_layers(self):
         blocks = architecture.blocks(tiny_model("gemma3"))
         held = tiny_transcoders(blocks)
@@ -663,6 +683,23 @@ class WorkbenchTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
 
+    def test_duplicate_imported_edges_are_rejected(self):
+        graph = small_graph()
+        self.assertTrue(graph["edges"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            path.write_text(json.dumps(graph | {"edges": graph["edges"] + [graph["edges"][0]]}))
+            with self.assertRaisesRegex(ValueError, "not a valid"):
+                workbench.load_graph(path)
+
+    def test_automatic_alternatives_follow_averaged_measured_prefixes(self):
+        prefixes = [[7, 8], [7, 9]]
+        distributions = [torch.tensor([0.9, 0.09, 0.01]), torch.tensor([0.001, 0.001, 0.998])]
+        with mock.patch.object(interventions, "run", side_effect=[{"log_probs": p.log()} for p in distributions]) as run:
+            selected = workbench.measured_alternatives("blocks", "held", prefixes, [1], lambda: False)
+        self.assertEqual(selected, [2, 0])
+        self.assertEqual([c.args[2] for c in run.call_args_list], prefixes)
+
     def test_duplicate_imported_group_memberships_are_rejected(self):
         graph = small_graph()
         member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
@@ -942,6 +979,9 @@ class WorkbenchTests(unittest.TestCase):
                 self.assertTrue(all(value == gr.skip() for value in handlers["group_selected"](old, [feature_id], "stale", 40, False, "view")))
                 self.assertTrue(all(value == gr.skip() for value in handlers["delete_group"](old, "group", [], 40, False, "view")))
                 self.assertFalse((Path(directory) / "graphs" / f"{old['id']}.json").exists())
+                with mock.patch.object(workbench.Workbench, "background", side_effect=AssertionError("stale work")):
+                    stale = list(handlers["run_interventions"]("view", old, "", "", "", True, 2, False, "group"))
+                self.assertEqual(stale, [(gr.skip(),) * 6])
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     trace_frames = list(handlers["run_trace"]("view", "", "test", "", False,
                                       "The likeliest next tokens", "", "", 16, .8, .98, 8, 40, False))

@@ -340,8 +340,7 @@ class Workbench:
                 self._same_transcoders(graph, held)
                 self._measurement_ids(graph, blocks)
                 if not alternatives:
-                    logits = interventions.run(blocks, held, graph["ids"])["log_probs"]
-                    alternatives = automatic_alternatives(logits, pivot)
+                    alternatives = measured_alternatives(blocks, held, prefixes, pivot, cancelled)
                 nodes = {n["id"]: n for n in graph["nodes"]}
                 n = len(graph["ids"])
                 groups = {name: [(nodes[m]["layer"], nodes[m]["feature"], n - 1 - nodes[m]["position"])
@@ -524,7 +523,12 @@ def load_graph(path):
                 node["probability"] = float(node["probability"])
                 if not isinstance(node["text"], str) or not 0 <= node["probability"] <= 1:
                     raise ValueError
+        edge_pairs = set()
         for edge in graph["edges"]:
+            pair = (edge["source"], edge["target"])
+            if pair in edge_pairs:
+                raise ValueError
+            edge_pairs.add(pair)
             if edge["source"] not in ids or edge["target"] not in ids:
                 raise ValueError
             weight = float(edge["weight"])
@@ -600,6 +604,16 @@ def _validate_effects(effects, groups):
     texts = effects.get("token_text", {})
     if not isinstance(texts, dict) or len(texts) > 8192 or any(not isinstance(v, str) or len(v) > 4096 for v in texts.values()):
         raise ValueError
+
+
+def measured_alternatives(blocks, held, prefixes, pivot, cancelled):
+    probabilities = None
+    for ids in prefixes:
+        if cancelled and cancelled():
+            raise attribution.Cancelled()
+        values = interventions.run(blocks, held, ids)["log_probs"].exp()
+        probabilities = values if probabilities is None else probabilities + values
+    return automatic_alternatives(probabilities / len(prefixes), pivot)
 
 
 def automatic_alternatives(log_probs, pivot):
