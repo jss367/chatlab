@@ -498,6 +498,7 @@ def load_graph(path):
                 raise ValueError
         feature_coordinates = set()
         residual_coordinates = set()
+        target_signatures = set()
         for node in graph["nodes"]:
             if node["kind"] not in ("feature", "error", "embedding", "target"):
                 raise ValueError
@@ -557,6 +558,11 @@ def load_graph(path):
                     raise ValueError
                 if not all(type(value) is int and 0 <= value < 2 ** 31 for value in values):
                     raise ValueError
+                signature = (("token", node["token_id"]) if node["target_kind"] == "token" else
+                             ("contrast", tuple(sorted(node["positive"])), tuple(sorted(node["negative"]))))
+                if signature in target_signatures:
+                    raise ValueError
+                target_signatures.add(signature)
                 node["probability"] = float(node["probability"])
                 if not isinstance(node["text"], str) or not 0 <= node["probability"] <= 1:
                     raise ValueError

@@ -600,7 +600,7 @@ class RenderTests(unittest.TestCase):
     def test_target_rendering_is_bounded_without_dropping_saved_targets(self):
         graph = dict(self.graph)
         target = next(n for n in graph["nodes"] if n["kind"] == "target")
-        targets = [dict(target, id=f"target-{i}", text="<&" * 2048) for i in range(4096)]
+        targets = [dict(target, id=f"target-{i}", token_id=i, text="<&" * 2048) for i in range(4096)]
         graph["nodes"] = [n for n in graph["nodes"] if n["kind"] != "target"] + targets
         view = render.graph_view(graph, selected=[n["id"] for n in targets])
         self.assertEqual(view.count('cg-node target'), 64)
@@ -955,6 +955,21 @@ class WorkbenchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "32768 characters"):
                 bench.encoded_prompt(SimpleNamespace(), graph["prompt"] | {"user": "x" * 32769})
 
+    def test_imported_targets_cannot_alias_the_same_objective(self):
+        graph = small_graph()
+        target = next(n for n in graph["nodes"] if n["kind"] == "target")
+        token = dict(target, target_kind="token", token_id=1)
+        contrast = dict(target, target_kind="contrast", positive=[1, 2], negative=[3, 4])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for original, alias in ((token, dict(token, id="alias")),
+                                     (contrast, dict(contrast, id="alias", positive=[2, 1], negative=[4, 3]))):
+                path.write_text(json.dumps(graph | {"nodes": [original, alias], "edges": []}))
+                with self.subTest(kind=original["target_kind"]), self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+            path.write_text(json.dumps(graph | {"nodes": [token, dict(token, id="distinct", token_id=2)], "edges": []}))
+            self.assertEqual(len(workbench.load_graph(path)["nodes"]), 2)
+
     def test_feature_aliases_cannot_duplicate_imported_coordinates(self):
         graph = small_graph()
         feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
@@ -1238,7 +1253,7 @@ class WorkbenchTests(unittest.TestCase):
             self.assertTrue(all(isinstance(edge["weight"], float) for edge in loaded["edges"]))
             render.graph_view(loaded)
             # Chosen-token traces can legitimately contain more than the ten default targets.
-            chosen = dict(graph, nodes=[{**graph["nodes"][-1], "id": f"target:{i}"} for i in range(20)], edges=[])
+            chosen = dict(graph, nodes=[{**graph["nodes"][-1], "id": f"target:{i}", "token_id": i} for i in range(20)], edges=[])
             path.write_text(json.dumps(chosen))
             self.assertEqual(len(workbench.load_graph(path)["nodes"]), 20)
             bad = Path(directory) / "bad.json"
