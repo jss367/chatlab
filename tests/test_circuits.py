@@ -612,6 +612,31 @@ class RenderTests(unittest.TestCase):
             page = render.group_view(graph, groups)
         self.assertEqual(page.count('<path class="cg-edge'), 5)
 
+    def test_all_measured_token_bars_fit_inside_group_svg(self):
+        import re
+        members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"][:1]
+        for pivot, alternatives in ((list(range(20)), []), ([], list(range(30))),
+                                    (list(range(20)), list(range(20, 40)))):
+            effects = dict(pivot=pivot, alternatives=alternatives, groups={}, prefixes=1,
+                           baseline=dict(tokens={str(t): .01 for t in pivot + alternatives}))
+            view = render.group_view(self.graph, {"g": members}, effects)
+            height = float(re.search(r'viewBox="0 0 [^ ]+ ([^"]+)"', view)[1])
+            positions = [float(y) for y in re.findall(r'<text[^>]+ y="([^"]+)"', view)]
+            self.assertLess(max(positions) + 12, height)
+            self.assertEqual(view.count('<rect class="bar '), len(pivot) + len(alternatives))
+
+    def test_imported_group_card_bounds_feature_chips_and_labels(self):
+        nodes = [dict(id=str(i), kind="feature", layer=0, feature=i, pos=0) for i in range(4096)]
+        graph = dict(nodes=nodes)
+        members = [n["id"] for n in nodes]
+        labels = {m: '<&"' * 4096 for m in members}
+        card = render.group_card("group", members, graph, labels=labels)
+        self.assertEqual(card.count('<span title='), 64)
+        self.assertIn('Showing 64 of 4,096 features.', card)
+        self.assertLess(len(card), 65000)
+        self.assertNotIn('<&"', card)
+        self.assertIn('…', card)
+
     def test_group_view_and_card_show_measured_effects(self):
         members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"][:2]
         effects = {"prefixes": 2, "boost": 2.0, "every_position": False, "pivot": [3], "alternatives": [5],
