@@ -414,8 +414,8 @@ def build_page(context):
                 raise ValueError("L2 strength must be positive and finite.")
             with context.models.open_session() as session:
                 model_id, revision, precision = session.model_id, session.model_revision, session.precision
-                wanted_rows = session.read_examples(positive, chat_template=template, pool=pooling)
-                unwanted_rows = session.read_examples(negative, chat_template=template, pool=pooling)
+                rows = session.read_examples(positive + negative, chat_template=template, pool=pooling)
+                wanted_rows, unwanted_rows = rows[:len(positive)], rows[len(positive):]
             # The model is released before fitting, which needs only the arrays.
             fitted, folds = probes.train(wanted_rows, unwanted_rows, l2=strength, paired=pairs)
             probe = probes.build(name=probe_name, model_id=model_id,

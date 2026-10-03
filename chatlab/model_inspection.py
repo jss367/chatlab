@@ -512,7 +512,7 @@ class InspectionMixin:
         limit = STEERING_EXAMPLE_TOKEN_LIMIT
         if window is not None:
             limit = min(limit, window)
-        readings = []
+        encoded = []
         for index, example in enumerate(examples, start=1):
             ids = self._example_ids(example, use_chat_template)
             if not ids:
@@ -522,8 +522,8 @@ class InspectionMixin:
                     f"Example {index} is {len(ids):,} tokens, above the "
                     f"{limit:,} one example may be. Shorten it."
                 )
-            readings.append(self._pooled_block_outputs(ids, blocks, pool))
-        return readings
+            encoded.append(ids)
+        return [self._pooled_block_outputs(ids, blocks, pool) for ids in encoded]
 
     @_guards_device_memory
     def read_examples(

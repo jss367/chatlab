@@ -85,6 +85,17 @@ class FitTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "total coefficient limit"):
                 probes.normalize(value)
 
+    def test_imported_probe_metrics_have_valid_ranges(self):
+        value = trained()
+        for metric, invalid in (("train_accuracy", -1.), ("train_accuracy", 7.),
+                                ("heldout_accuracy", -1.), ("heldout_accuracy", 7.), ("heldout_loss", -.1)):
+            layers = [dict(layer) for layer in value["layers"]]
+            layers[-1][metric] = invalid
+            with self.subTest(metric=metric, invalid=invalid), self.assertRaisesRegex(ValueError, "between 0 and 1|nonnegative"):
+                probes.normalize(value | {"layers": layers})
+        layers = [dict(layer, train_accuracy=0., heldout_accuracy=1., heldout_loss=0.) for layer in value["layers"]]
+        probes.normalize(value | {"layers": layers})
+
     def test_the_fit_is_at_the_penalized_optimum(self):
         rng = np.random.default_rng(3)
         rows = rng.normal(size=(30, 50)) * rng.uniform(0.1, 10, size=50) + rng.normal(size=50)
@@ -378,6 +389,16 @@ class PageTests(unittest.TestCase):
                 examples = ["valid"] * 63 + ["x" * 32769]
                 with self.subTest(field=field), self.assertRaisesRegex(gr.Error, "at most 32768 characters"):
                     self.train(**{field: "\n".join(examples)})
+
+    def test_final_negative_token_length_is_checked_before_any_forward(self):
+        def encoded(text, _template):
+            return [2] * (65 if text == "oversized" else 1)
+        with mock.patch.object(self.manager, "_example_ids", side_effect=encoded), \
+                mock.patch.object(self.manager, "_pooled_block_outputs", side_effect=AssertionError("must not run forward")) as reads:
+            with self.assertRaisesRegex(gr.Error, "Example 128 is 65 tokens, above the 64"):
+                self.train(wanted="\n".join(["valid"] * 64),
+                           unwanted="\n".join(["valid"] * 63 + ["oversized"]))
+            reads.assert_not_called()
 
     def test_invalid_l2_is_refused_before_model_work(self):
         with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("must not read examples")):

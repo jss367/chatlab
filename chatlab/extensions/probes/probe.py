@@ -253,12 +253,17 @@ def normalize(value):
         width = len(weights) if width is None else width
         if len(weights) != width:
             raise ValueError("Every layer's weights must be the same width.")
+        metrics = {key: number(item.get(key), key.replace("_", " "))
+                   for key in ("train_accuracy", "heldout_accuracy", "heldout_loss")}
+        if any(not 0 <= metrics[key] <= 1 for key in ("train_accuracy", "heldout_accuracy")):
+            raise ValueError("Probe accuracies must be between 0 and 1.")
+        if metrics["heldout_loss"] < 0:
+            raise ValueError("Probe held-out loss must be nonnegative.")
         clean.append({
             "layer": index,
             "weights": [weight(w) for w in weights],
             "bias": number(item.get("bias"), "bias"),
-            **{key: number(item.get(key), key.replace("_", " "))
-               for key in ("train_accuracy", "heldout_accuracy", "heldout_loss")},
+            **metrics,
         })
     revision = value.get("model_revision")
     if revision is not None and (not isinstance(revision, str) or not 0 < len(revision) <= 200):
