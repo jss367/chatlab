@@ -72,7 +72,8 @@ def visible(graph, nodes_shown, show_errors, keep=()):
     chosen |= {n["id"] for n in nodes if n["kind"] == "target"}
     present = {n["id"] for n in nodes}
     chosen &= present
-    fed = {e["source"] for e in graph["edges"] if e["target"] in chosen and e["source"].startswith("t:")}
+    embeddings = {node["id"] for node in nodes if node["kind"] == "embedding"}
+    fed = {e["source"] for e in graph["edges"] if e["target"] in chosen and e["source"] in embeddings}
     chosen |= fed
     return [n for n in nodes if n["id"] in chosen]
 
