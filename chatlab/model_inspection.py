@@ -505,7 +505,7 @@ class InspectionMixin:
         self._drop_inspect_cache()
         return blocks
 
-    def _example_readings(self, examples, use_chat_template: bool, pool: str, blocks) -> list[np.ndarray]:
+    def _example_readings(self, examples, use_chat_template: bool, pool: str, blocks, cancelled=None) -> list[np.ndarray]:
         """Every example read at every block, pooled, one array per example."""
 
         window = model_position_limit(self.model)
@@ -514,6 +514,8 @@ class InspectionMixin:
             limit = min(limit, window)
         encoded = []
         for index, example in enumerate(examples, start=1):
+            if cancelled and cancelled():
+                raise ProjectionCancelled("Stopped reading examples.")
             ids = self._example_ids(example, use_chat_template)
             if not ids:
                 raise ValueError(f"Example {index} did not produce any tokens.")
@@ -523,7 +525,14 @@ class InspectionMixin:
                     f"{limit:,} one example may be. Shorten it."
                 )
             encoded.append(ids)
-        return [self._pooled_block_outputs(ids, blocks, pool) for ids in encoded]
+        rows = []
+        for ids in encoded:
+            if cancelled and cancelled():
+                raise ProjectionCancelled("Stopped reading examples.")
+            rows.append(self._pooled_block_outputs(ids, blocks, pool))
+        if cancelled and cancelled():
+            raise ProjectionCancelled("Stopped reading examples.")
+        return rows
 
     @_guards_device_memory
     def read_examples(
@@ -533,6 +542,7 @@ class InspectionMixin:
         use_chat_template: bool = False,
         pool: str = "last",
         load_id: str | None = None,
+        cancelled=None,
     ) -> np.ndarray:
         """Every decoder block's output for each example, pooled as a steering extraction pools it.
 
@@ -563,7 +573,7 @@ class InspectionMixin:
                     "version instead."
                 ),
             )
-            return np.stack(self._example_readings(examples, use_chat_template, pool, blocks))
+            return np.stack(self._example_readings(examples, use_chat_template, pool, blocks, cancelled))
 
     @_guards_device_memory
     def project_blocks(self, token_ids: Sequence[int], directions, *, load_id: str | None = None, cancelled=None) -> np.ndarray:

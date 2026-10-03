@@ -423,8 +423,35 @@ class PageTests(unittest.TestCase):
         with mock.patch.object(probes, "train", side_effect=moved_on):
             frame = self.train(probe_name="New training")
         self.assertEqual(frame, (gr.skip(),) * 21)
-        # The training artifact is retained even when its UI completion is stale.
-        self.assertEqual(len(list(self.data.glob("*.json"))), 2)
+        # Superseded fitting stops and does not save an obsolete training artifact.
+        self.assertEqual(len(list(self.data.glob("*.json"))), 1)
+
+    def test_opening_a_probe_cancels_training_between_example_passes(self):
+        original = self.manager._pooled_block_outputs
+        calls = []
+        def moved_on(*args, **kwargs):
+            calls.append(True)
+            result = original(*args, **kwargs)
+            self.fn["begin_open"]("owner")
+            return result
+        with mock.patch.object(self.manager, "_pooled_block_outputs", side_effect=moved_on), mock.patch.object(probes, "train", side_effect=AssertionError("obsolete fit")):
+            self.assertEqual(self.train(), (gr.skip(),) * 21)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(list(self.data.glob("*.json")), [])
+        self.assertIsNone(self.manager.claim_generation())
+        self.manager.release_generation()
+
+    def test_new_training_cancels_the_active_training_session(self):
+        runs = page_module.Runs()
+        request = runs.begin_training("owner")
+        session = mock.Mock()
+        active = runs.attach_training("owner", session, 0, request)
+        self.assertIsNotNone(active)
+        runs.begin_training("owner")
+        self.assertTrue(active[0].is_set())
+        session.cancel.assert_called_once()
+        runs.finish_training("owner", active)
+        self.assertEqual(runs._training_active, {})
 
     def test_failed_training_preserves_the_displayed_reading(self):
         probe = self.train()[0]

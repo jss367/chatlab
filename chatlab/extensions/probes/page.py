@@ -62,6 +62,7 @@ class Runs:
         self._downloads = {}
         self._probes = {}
         self._training = {}
+        self._training_active = {}
         self._read_requests = {}
         self._read_sequences = {}
 
@@ -80,6 +81,10 @@ class Runs:
             self._shown[owner] = None
             request = uuid4().hex
             self._read_requests[owner] = (request, self._turns[owner])
+            training = self._training_active.get(owner)
+            if training:
+                training[0].set()
+                training[1].cancel()
             active = self._active.get(owner)
             if active:
                 active[0].set()
@@ -103,6 +108,7 @@ class Runs:
             return self._active[owner][0], self._turns[owner]
 
     def begin_training(self, owner):
+        self.cancel(owner)
         with self._lock:
             request = uuid4().hex
             self._training[owner] = (request, self._turns.get(owner, 0))
@@ -112,6 +118,21 @@ class Runs:
         with self._lock:
             captured = self._training.get(owner)
             return captured[1] if captured and captured[0] == request and captured[1] == self._turns.get(owner, 0) else None
+
+    def attach_training(self, owner, session, turn, request):
+        with self._lock:
+            if (self._turns.get(owner, 0) != turn or
+                    request is not None and self._training.get(owner, (None,))[0] != request):
+                session.cancel()
+                return None
+            active = [threading.Event(), session]
+            self._training_active[owner] = active
+            return active
+
+    def finish_training(self, owner, active):
+        with self._lock:
+            if self._training_active.get(owner) is active:
+                self._training_active.pop(owner, None)
 
     def replace_probe(self, owner, probe, turn=None, request=None):
         with self._lock:
@@ -145,6 +166,10 @@ class Runs:
                     return
                 self._read_sequences[owner] = sequence
             self._read_requests.pop(owner, None)
+            training = self._training_active.get(owner)
+            if training:
+                training[0].set()
+                training[1].cancel()
             active = self._active.get(owner)
             if active:
                 active[0].set()
@@ -430,6 +455,7 @@ def build_page(context):
         turn = runs.snapshot(view) if request is None else runs.training_snapshot(view, request)
         if turn is None:
             return (gr.skip(),) * len(probe_outputs)
+        active = None
         positive, negative = parse_examples(wanted), parse_examples(unwanted)
         looking_for, against = (looking_for or "").strip(), (against or "").strip()
         try:
@@ -451,18 +477,27 @@ def build_page(context):
             if not math.isfinite(strength) or strength <= 0:
                 raise ValueError("L2 strength must be positive and finite.")
             with context.models.open_session() as session:
+                active = runs.attach_training(view, session, turn, request)
+                if active is None:
+                    return (gr.skip(),) * len(probe_outputs)
                 model_id, revision, precision = session.model_id, session.model_revision, session.precision
                 rows = session.read_examples(positive + negative, chat_template=template, pool=pooling)
                 wanted_rows, unwanted_rows = rows[:len(positive)], rows[len(positive):]
             # The model is released before fitting, which needs only the arrays.
-            fitted, folds = probes.train(wanted_rows, unwanted_rows, l2=strength, paired=pairs)
+            fitted, folds = probes.train(wanted_rows, unwanted_rows, l2=strength, paired=pairs,
+                                         cancelled=lambda: active[0].is_set() or not runs.live(view, turn))
             probe = probes.build(name=probe_name, model_id=model_id,
                                  model_revision=revision, precision=precision,
                                  positive_label=looking_for, negative_label=against,
                                  positive_examples=positive, negative_examples=negative, pool=pooling,
                                  chat_template=template, l2=strength, layers=fitted, folds=folds, paired=pairs)
+        except (ProjectionCancelled, probes.TrainingCancelled):
+            return (gr.skip(),) * len(probe_outputs)
         except (TypeError, ValueError, RuntimeError) as exc:
             raise gr.Error(str(exc)) from exc
+        finally:
+            if active is not None:
+                runs.finish_training(view, active)
         try:
             save(probe)
         except OSError as exc:

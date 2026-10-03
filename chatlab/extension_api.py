@@ -244,6 +244,7 @@ class GenerationSession:
         self._check()
         return self._manager.read_examples(
             list(texts), use_chat_template=bool(chat_template), pool=pool, load_id=self.load_id,
+            cancelled=self._cancelled.is_set,
         )
 
     def project_layers(self, ids, directions):

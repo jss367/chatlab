@@ -34,6 +34,15 @@ LATEST_CREATED = 32503680000.0
 FLOAT32_MAX = float(np.finfo(np.float32).max)
 
 
+class TrainingCancelled(RuntimeError):
+    """Training was superseded or stopped between fitting operations."""
+
+
+def _check_cancelled(cancelled):
+    if cancelled and cancelled():
+        raise TrainingCancelled("Stopped training the probe.")
+
+
 def _sigmoid(values):
     return 0.5 * (1.0 + np.tanh(0.5 * np.asarray(values, dtype=np.float64)))
 
@@ -43,14 +52,16 @@ def _log_loss(probabilities, labels):
     return float(-np.mean(labels * np.log(clipped) + (1 - labels) * np.log(1 - clipped)))
 
 
-def _newton(features, labels, l2):
+def _newton(features, labels, l2, cancelled=None):
     """L2-penalized logistic regression by Newton's method; the intercept is unpenalized."""
+    _check_cancelled(cancelled)
     count, width = features.shape
     design = np.hstack([features, np.ones((count, 1))])
     penalty = np.full(width + 1, float(l2))
     penalty[-1] = 0.0
     theta = np.zeros(width + 1)
     for _ in range(NEWTON_STEPS):
+        _check_cancelled(cancelled)
         probabilities = _sigmoid(design @ theta)
         gradient = design.T @ (probabilities - labels) + penalty * theta
         curvature = probabilities * (1 - probabilities)
@@ -62,7 +73,7 @@ def _newton(features, labels, l2):
     return theta[:-1], float(theta[-1])
 
 
-def fit(activations, labels, l2=DEFAULT_L2):
+def fit(activations, labels, l2=DEFAULT_L2, *, cancelled=None):
     """One layer's probe, as raw-space weights and a bias.
 
     Each feature is standardized first, so the penalty treats every direction
@@ -73,6 +84,7 @@ def fit(activations, labels, l2=DEFAULT_L2):
     The standardization is folded back into the weights, so a probability is
     ``sigmoid(weights · x + bias)`` for a raw block output ``x``.
     """
+    _check_cancelled(cancelled)
     activations = np.asarray(activations, dtype=np.float64)
     labels = np.asarray(labels, dtype=np.float64)
     mean = activations.mean(axis=0)
@@ -81,7 +93,7 @@ def fit(activations, labels, l2=DEFAULT_L2):
     standardized = (activations - mean) / spread
     left, singular, right = np.linalg.svd(standardized, full_matrices=False)
     keep = singular > singular.max(initial=0.0) * 1e-10
-    coefficients, bias = _newton(left[:, keep] * singular[keep], labels, l2)
+    coefficients, bias = _newton(left[:, keep] * singular[keep], labels, l2, cancelled)
     weights = (right[keep].T @ coefficients) / spread
     return weights, bias - float(weights @ mean)
 
@@ -118,7 +130,7 @@ def folds_for(labels, folds=FOLDS, *, paired=False):
     return assignment
 
 
-def train(positive, negative, *, l2=DEFAULT_L2, paired=False):
+def train(positive, negative, *, l2=DEFAULT_L2, paired=False, cancelled=None):
     """A probe at every block, with how well each one held up on examples it did not see.
 
     ``positive`` and ``negative`` are shaped ``(examples, blocks, width)``.
@@ -143,13 +155,15 @@ def train(positive, negative, *, l2=DEFAULT_L2, paired=False):
     fold_count = int(assignment.max()) + 1
     layers = []
     for layer in range(activations.shape[1]):
+        _check_cancelled(cancelled)
         rows = activations[:, layer]
-        weights, bias = fit(rows, labels, l2)
+        weights, bias = fit(rows, labels, l2, cancelled=cancelled)
         trained = _sigmoid(rows @ weights + bias)
         held = np.empty(len(labels))
         for fold in range(fold_count):
+            _check_cancelled(cancelled)
             out = assignment == fold
-            fold_weights, fold_bias = fit(rows[~out], labels[~out], l2)
+            fold_weights, fold_bias = fit(rows[~out], labels[~out], l2, cancelled=cancelled)
             held[out] = _sigmoid(rows[out] @ fold_weights + fold_bias)
         layers.append({
             "layer": layer,
@@ -159,6 +173,7 @@ def train(positive, negative, *, l2=DEFAULT_L2, paired=False):
             "heldout_accuracy": float(np.mean((held > 0.5) == labels)),
             "heldout_loss": _log_loss(held, labels),
         })
+    _check_cancelled(cancelled)
     return layers, fold_count
 
 
