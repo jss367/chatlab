@@ -353,7 +353,7 @@ class RegistryTests(unittest.TestCase):
         buttons = []
         def build(context):
             button = gr.Button("Prepared steering")
-            def validate(value):
+            def validate(value, selected=None):
                 if not valid[0]:
                     raise ValueError("Selection changed")
                 return value
@@ -366,9 +366,14 @@ class RegistryTests(unittest.TestCase):
             capture = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
             preparation = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "prepare_steering")
             application = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "apply_prepared_steering")
+            self.assertFalse(capture.queue)
             self.assertNotEqual(preparation.concurrency_id, "conversation-pane")
             self.assertEqual(application.concurrency_id, "conversation-pane")
-            forks, receipt = capture.fn(new_forks())
+            forks = new_forks()
+            selected = {"feature": "A"}
+            receipt = capture.fn(forks, selected)
+            selected["feature"] = "B"
+            self.assertEqual(receipt[0], ({"feature": "A"},))
             payload = preparation.fn(receipt)
             application.fn(forks, payload)
             prepare.assert_called_once()
@@ -382,9 +387,10 @@ class RegistryTests(unittest.TestCase):
             from chatlab.ui.steering import store
             with self.assertRaisesRegex(gr.Error, "Steering changed"):
                 application.fn(store(forks, None), payload)
-            newer_forks, _newer_receipt = capture.fn(forks)
+            newer_receipt = capture.fn(forks, selected)
             with self.assertRaisesRegex(gr.Error, "Steering changed"):
-                application.fn(newer_forks, payload)
+                application.fn(forks, payload)
+            payload = (payload[0], *newer_receipt)
             valid[0] = False
             with self.assertRaisesRegex(gr.Error, "Selection changed"):
                 application.fn(forks, payload)

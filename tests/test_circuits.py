@@ -619,7 +619,7 @@ class WorkbenchTests(unittest.TestCase):
             for explain in explains:
                 with self.subTest(mode=explain["mode"], count=len(explain["tokens"])), self.assertRaises(ValueError):
                     bench.trace({}, explain, attribution.Settings(), lambda *args: None, lambda: False)
-            for pivot in ([], ["multi"]):
+            for pivot in ([], ["multi"], [str(i) for i in range(4097)]):
                 with self.subTest(pivot=pivot), self.assertRaises(ValueError):
                     bench.group_effects({"ids": IDS, "groups": {"group": []}}, pivot, [], [], True,
                                         2.0, False, lambda *args: None, lambda: False)
@@ -651,6 +651,15 @@ class WorkbenchTests(unittest.TestCase):
                     workbench.load_graph(path)
             for name in ("", "x" * 61):
                 path.write_text(json.dumps(graph | {"groups": {name: [member]}}))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+
+    def test_imported_explanation_strings_are_bounded(self):
+        graph = small_graph()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for key in ("tokens", "alternatives"):
+                path.write_text(json.dumps(graph | {"explain": {key: ["x" * 4097]}}))
                 with self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
 

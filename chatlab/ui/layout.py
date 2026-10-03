@@ -15,6 +15,8 @@ which answer to the pane and the Chat page both.
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import html
 import logging
 from dataclasses import dataclass
@@ -24,7 +26,7 @@ from uuid import uuid4
 import gradio as gr
 
 from chatlab import attachments, experiment_runs, library, settings, themes
-from chatlab.conversation import MAIN_BRANCH, branch_choices, copy_forks, new_forks
+from chatlab.conversation import MAIN_BRANCH, branch_choices, new_forks
 from chatlab.device_memory import warm_device
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.registry import load_enabled
@@ -566,12 +568,13 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
         else:
             captured, prepared = gr.State(None), gr.State(None)
             def capture_steering(forks, *values):
-                forks = copy_forks(forks)
+                # Reserve only ephemeral request metadata on the live view;
+                # returning a copied conversation here could overwrite a queued reply.
                 identity = forks.setdefault("_view_identity", uuid4().hex)
                 branch = forks.get("active", MAIN_BRANCH)
                 generations = forks.setdefault("_steering_generation", {})
                 generations[branch] = generations.get(branch, 0) + 1
-                return forks, (values, branch, identity, generations[branch])
+                return (deepcopy(values), branch, identity, generations[branch])
             def prepare_steering(receipt, build=prepare):
                 values, branch, identity, generation = receipt
                 try:
@@ -586,8 +589,7 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
                 if (forks.get("_steering_generation") or {}).get(branch) != generation:
                     raise gr.Error("Steering changed while this request was preparing. Keep the newer choice or try again.")
                 return apply(forks, value, *values)
-            event = button.click(capture_steering, [states.forks, *inputs], [states.forks, captured],
-                                 concurrency_id=CONVERSATION_PANE_QUEUE)
+            event = button.click(capture_steering, [states.forks, *inputs], captured, queue=False)
             prepared_event = event.success(prepare_steering, captured, prepared,
                                            concurrency_id="extension-steering-prepare")
             prepared_event.success(apply_prepared_steering, [states.forks, prepared], outputs,
