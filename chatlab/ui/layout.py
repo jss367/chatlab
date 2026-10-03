@@ -568,18 +568,23 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
             def capture_steering(forks, *values):
                 forks = copy_forks(forks)
                 identity = forks.setdefault("_view_identity", uuid4().hex)
-                return forks, (values, forks.get("active", MAIN_BRANCH), identity)
+                branch = forks.get("active", MAIN_BRANCH)
+                generations = forks.setdefault("_steering_generation", {})
+                generations[branch] = generations.get(branch, 0) + 1
+                return forks, (values, branch, identity, generations[branch])
             def prepare_steering(receipt, build=prepare):
-                values, branch, identity = receipt
+                values, branch, identity, generation = receipt
                 try:
-                    return build(*values), values, branch, identity
+                    return build(*values), values, branch, identity, generation
                 except ValueError as error:
                     raise gr.Error(str(error)) from error
             def apply_prepared_steering(forks, payload, apply=steer):
-                value, values, branch, identity = payload
+                value, values, branch, identity, generation = payload
                 if ((forks or {}).get("active", MAIN_BRANCH) != branch
                         or (forks or {}).get("_view_identity") != identity):
                     raise gr.Error("The active conversation changed while preparing steering. Try again on the intended conversation.")
+                if (forks.get("_steering_generation") or {}).get(branch) != generation:
+                    raise gr.Error("Steering changed while this request was preparing. Keep the newer choice or try again.")
                 return apply(forks, value, *values)
             event = button.click(capture_steering, [states.forks, *inputs], [states.forks, captured],
                                  concurrency_id=CONVERSATION_PANE_QUEUE)

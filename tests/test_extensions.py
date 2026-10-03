@@ -379,6 +379,12 @@ class RegistryTests(unittest.TestCase):
                 application.fn(new_forks(), payload)
             from chatlab.conversation import copy_forks
             application.fn(copy_forks(forks), payload)
+            from chatlab.ui.steering import store
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(store(forks, None), payload)
+            newer_forks, _newer_receipt = capture.fn(forks)
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(newer_forks, payload)
             valid[0] = False
             with self.assertRaisesRegex(gr.Error, "Selection changed"):
                 application.fn(forks, payload)

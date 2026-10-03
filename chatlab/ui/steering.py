@@ -46,6 +46,8 @@ def steering_updates(forks):
 def store(forks, value):
     forks = copy_forks(forks)
     held = branch_sampling(forks, forks["active"])
+    generations = forks.setdefault("_steering_generation", {})
+    generations[forks["active"]] = generations.get(forks["active"], 0) + 1
     held["steering"] = compact(value)
     put_branch_sampling(forks, forks["active"], held)
     return forks
