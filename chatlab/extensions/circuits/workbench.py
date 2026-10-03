@@ -482,6 +482,11 @@ def load_graph(path):
                 or not all(type(token) is int and 0 <= token < 2 ** 31 for token in token_ids)):
             raise ValueError
         spec = next((s for s in transcoders.CATALOGUE if s.key == graph.get("transcoders")), None)
+        expected_revision = spec.training_model_revision if spec is not None else None
+        matching_model = spec is not None and str(graph.get("model_id", "")).lower() in {m.lower() for m in spec.model_ids}
+        graph["training_model_revision"] = expected_revision
+        graph["checkpoint_compatibility"] = ("verified" if expected_revision is not None and matching_model
+                                              and graph.get("model_revision") == expected_revision else "unverified")
         width = spec.width if spec is not None else graph.get("transcoder_width")
         if type(width) is not int or not 1 <= width <= 1000000:
             raise ValueError

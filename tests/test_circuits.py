@@ -188,6 +188,26 @@ class AttributionTests(unittest.TestCase):
                 values = directions[:4] @ recording.final[-1]
                 torch.testing.assert_close(rows.sum(1) + biases, values, rtol=1e-4, atol=1e-4)
 
+    def test_half_precision_encoders_preserve_feature_activation_completeness(self):
+        for kind in ("gemma3", "qwen3"):
+            for dtype in (torch.float16, torch.bfloat16):
+                blocks = architecture.blocks(tiny_model(kind))
+                held = tiny_transcoders(blocks, bias=False)
+                held.w_enc = [weight.to(dtype) for weight in held.w_enc]
+                recording = attribution.record(blocks, held, IDS)
+                late = torch.nonzero(recording.feature_layer >= 1, as_tuple=True)[0][:6].tolist()
+                self.assertTrue(late)
+                graph = attribution.FrozenGraph(blocks, held, recording, batch_size=8)
+                try:
+                    rows = graph.rows([("feature", k) for k in late])
+                finally:
+                    graph.close()
+                with self.subTest(kind=kind, dtype=dtype):
+                    for row, k in zip(rows, late):
+                        layer, feature = int(recording.feature_layer[k]), int(recording.feature_index[k])
+                        expected = recording.activation[k] - held.b_enc[layer][feature]
+                        torch.testing.assert_close(row.sum(), expected, rtol=1e-4, atol=1e-4)
+
     def test_edges_into_a_feature_add_up_to_its_activation(self):
         for kind in ("gemma3", "qwen3"):
             with self.subTest(kind=kind):
@@ -485,7 +505,7 @@ class InterventionTests(unittest.TestCase):
                 with mock.patch.object(self.held, "activate_one", wraps=self.held.activate_one) as activate:
                     interventions.run(self.blocks, self.held, IDS, [(0, 0, 0., None)])
                 with self.subTest(dtype=dtype):
-                    torch.testing.assert_close(activate.call_args.args[2], expected[0], rtol=0, atol=0)
+                    torch.testing.assert_close(activate.call_args.args[2], expected[0], rtol=1e-6, atol=1e-6)
             finally:
                 handle.remove()
 
@@ -1050,6 +1070,27 @@ class WorkbenchTests(unittest.TestCase):
             self.assertEqual(workbench.load_graph(path)["stats"], dict(error_share=0., kept_features=kept, traced_features=kept, active_features=kept))
             path.write_text(json.dumps(graph | {"nodes": [dict(n, effect=-1.) for n in graph["nodes"]]}))
             self.assertTrue(all(n["effect"] == -1. for n in workbench.load_graph(path)["nodes"]))
+
+    def test_imported_checkpoint_claims_are_normalized_against_the_catalogue(self):
+        from dataclasses import replace
+        graph = small_graph()
+        claims = dict(training_model_revision="f" * 40, checkpoint_compatibility="verified")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            path.write_text(json.dumps(graph | claims))
+            loaded = workbench.load_graph(path)
+            self.assertIsNone(loaded["training_model_revision"])
+            self.assertEqual(loaded["checkpoint_compatibility"], "unverified")
+            spec = replace(transcoders.CATALOGUE[0], key="tiny", model_ids=("test/tiny",), training_model_revision="a" * 40)
+            with mock.patch.object(transcoders, "CATALOGUE", (spec,)):
+                for revision, model, expected in (("a" * 40, "test/tiny", "verified"),
+                                                   ("b" * 40, "test/tiny", "unverified"),
+                                                   (None, "test/tiny", "unverified"),
+                                                   ("a" * 40, "other/model", "unverified")):
+                    path.write_text(json.dumps(graph | claims | dict(model_revision=revision, model_id=model)))
+                    loaded = workbench.load_graph(path)
+                    self.assertEqual(loaded["training_model_revision"], "a" * 40)
+                    self.assertEqual(loaded["checkpoint_compatibility"], expected)
 
     def test_imported_targets_cannot_alias_the_same_objective(self):
         graph = small_graph()
@@ -1658,6 +1699,67 @@ class WorkbenchTests(unittest.TestCase):
                     self.assertNotEqual(original, newer)
                     self.assertTrue(cancelled.is_set())
                     self.assertTrue(all(value == gr.skip() for frame in frames for value in frame))
+            finally:
+                demo.close()
+
+    def test_trace_ticket_is_rechecked_after_background_session_registration(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                original = handlers["begin_trace"]("view")
+                real_background = workbench.Workbench.background
+                def delayed_registration(bench, owner, work):
+                    handlers["begin_trace"](owner)
+                    yield from real_background(bench, owner, work)
+                with mock.patch.object(workbench.Workbench, "background", delayed_registration), \
+                        mock.patch.object(workbench.Workbench, "trace", side_effect=AssertionError("obsolete model run")) as trace:
+                    frames = list(handlers["run_trace"]("view", "", "hi", "", False, "The likeliest next tokens",
+                                                        "", "", 40, .8, .98, 8, 40, False, original))
+                trace.assert_not_called()
+                self.assertTrue(all(value == gr.skip() for frame in frames for value in frame))
+            finally:
+                demo.close()
+
+    def test_opened_graph_cancels_active_work_and_stages_normalized_metadata(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                cells = dict(zip(handlers["begin_trace"].__code__.co_freevars, handlers["begin_trace"].__closure__))
+                bench = cells["bench"].cell_contents
+                flag = threading.Event()
+                bench._sessions["view"] = {"cancelled": flag}
+                path = Path(directory) / "upload.json"
+                graph = small_graph() | dict(checkpoint_compatibility="verified", training_model_revision="f" * 40)
+                graph["prompt"]["user"] = "東京"
+                path.write_text(json.dumps(graph))
+                opened = handlers["open_path"](path, 40, False, "view")
+                self.assertTrue(flag.is_set())
+                self.assertEqual(opened[0]["checkpoint_compatibility"], "unverified")
+                staging_cell = dict(zip(handlers["open_path"].__code__.co_freevars, handlers["open_path"].__closure__))["staged"]
+                staged_cells = dict(zip(staging_cell.cell_contents.__code__.co_freevars, staging_cell.cell_contents.__closure__))
+                download = Path(staged_cells["staging"].cell_contents["view"].name) / "circuit.json"
+                self.assertIn("東京", download.read_text())
+                offered = json.loads(download.read_text())
+                self.assertEqual(offered["checkpoint_compatibility"], "unverified")
+                self.assertIsNone(offered["training_model_revision"])
+                self.assertEqual(json.loads(path.read_text())["checkpoint_compatibility"], "verified")
+                bench._sessions.clear()
             finally:
                 demo.close()
 

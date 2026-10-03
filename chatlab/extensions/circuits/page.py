@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -12,6 +11,7 @@ from uuid import uuid4
 
 import gradio as gr
 
+from chatlab.extension_api import write_private_text
 from chatlab.ui.token_menu import MENU_BRIDGE_CLASS
 
 from . import render, transcoders
@@ -291,7 +291,7 @@ def build_page(context):
             copy = Path(directory.name) / "circuit.json"
             partial = Path(directory.name) / ".circuit.tmp"
             try:
-                shutil.copyfile(path, partial)
+                write_private_text(partial, json.dumps(graph, ensure_ascii=False))
                 partial.replace(copy)
             finally:
                 partial.unlink(missing_ok=True)
@@ -383,13 +383,20 @@ def build_page(context):
         graph = None
         try:
             settings.check()
-            for item in bench.background(session_id, lambda p, c: bench.trace(prompt, explain_spec, settings, p, c)):
+            def trace_work(p, c):
+                with version_lock:
+                    stale = version(session_id) != stamp or (request is not None and trace_requests.get(session_id, (None,))[0] != request)
+                    if stale:
+                        raise Cancelled()
+                return bench.trace(prompt, explain_spec, settings, p, c)
+
+            for item in bench.background(session_id, trace_work):
                 if item[0] == "progress":
                     yield (_progress_text(*item[1:]), gr.skip(), *skip)
                 else:
                     graph = item[1]
         except Cancelled:
-            if request is not None and trace_requests.get(session_id, (None,))[0] != request:
+            if version(session_id) != stamp or (request is not None and trace_requests.get(session_id, (None,))[0] != request):
                 yield (gr.skip(), gr.skip(), *skip)
             else:
                 yield ("Stopped.", gr.skip(), *skip)
@@ -657,6 +664,8 @@ def build_page(context):
         try:
             with version_lock:
                 versions[session_id] = graph["_view_version"] = uuid4().hex
+                trace_requests.pop(session_id, None)
+                bench.cancel(session_id)
                 offered = staged(path, graph, session_id)
         except OSError:
             offered = None
