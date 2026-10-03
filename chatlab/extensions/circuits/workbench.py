@@ -476,6 +476,7 @@ def load_graph(path):
         for kind, limit in limits.items():
             if sum(n["kind"] == kind for n in nodes) > limit:
                 raise ValueError
+        feature_coordinates = set()
         for node in graph["nodes"]:
             if node["kind"] not in ("feature", "error", "embedding", "target"):
                 raise ValueError
@@ -505,6 +506,10 @@ def load_graph(path):
                 feature = node["feature"]
                 if type(feature) is not int or not 0 <= feature < width:
                     raise ValueError
+                coordinate = (layer, position, feature)
+                if coordinate in feature_coordinates:
+                    raise ValueError
+                feature_coordinates.add(coordinate)
                 node["activation"] = float(node["activation"])
                 if not math.isfinite(node["activation"]) or node["activation"] < 0:
                     raise ValueError

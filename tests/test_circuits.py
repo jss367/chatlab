@@ -719,6 +719,15 @@ class WorkbenchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "32768 characters"):
                 bench.encoded_prompt(SimpleNamespace(), graph["prompt"] | {"user": "x" * 32769})
 
+    def test_feature_aliases_cannot_duplicate_imported_coordinates(self):
+        graph = small_graph()
+        feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            path.write_text(json.dumps(graph | {"nodes": graph["nodes"] + [dict(feature, id="alias")]}))
+            with self.assertRaisesRegex(ValueError, "not a valid"):
+                workbench.load_graph(path)
+
     def test_duplicate_imported_group_memberships_are_rejected(self):
         graph = small_graph()
         member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
@@ -965,6 +974,32 @@ class WorkbenchTests(unittest.TestCase):
                 feature = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
                 with mock.patch.object(workbench.Workbench, "background", stopped):
                     self.assertEqual(handlers_by_name(demo)["ablate_focused"]("view", graph, feature), gr.skip())
+            finally:
+                demo.close()
+
+    def test_feature_details_completed_after_opening_another_graph_are_discarded(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                old = small_graph()
+                new = dict(old, id="new-graph")
+                path = Path(directory) / "new.json"
+                path.write_text(json.dumps(new))
+                feature = next(n["id"] for n in old["nodes"] if n["kind"] == "feature")
+                def fetched(*args):
+                    handlers["open_path"](path, 40, False, "view")
+                    return None
+                with mock.patch.object(workbench.Workbench, "record", side_effect=fetched):
+                    result = handlers["picked"](old, json.dumps(dict(selected=[feature], focus=feature)), "view")
+                self.assertEqual(result, (gr.skip(),) * 5)
             finally:
                 demo.close()
 
