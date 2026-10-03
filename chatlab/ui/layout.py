@@ -576,6 +576,7 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
                 generations = forks.setdefault("_steering_generation", {})
                 generations[branch] = generations.get(branch, 0) + 1
                 generation = generations[branch]
+                forks.get("_steering_requests", {}).clear()
             return (values, branch, identity, generation)
         def validate_receipt(forks, branch, identity, generation):
             if ((forks or {}).get("active", MAIN_BRANCH) != branch

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import threading
 import time
 from uuid import uuid4
@@ -45,6 +46,35 @@ def controls(value):
 def steering_updates(forks):
     held = branch_sampling(forks, (forks or {}).get("active", MAIN_BRANCH))
     return controls(normalize(held.get("steering")))
+
+
+def reserve_steering(forks, values):
+    """Reserve a manual edit when clicked, before the conversation queue."""
+    values = deepcopy(values)
+    with STEERING_LOCK:
+        identity = forks.setdefault("_view_identity", uuid4().hex)
+        branch = forks.get("active", MAIN_BRANCH)
+        generations = forks.setdefault("_steering_generation", {})
+        generations[branch] = generations.get(branch, 0) + 1
+        ticket = uuid4().hex
+        pending = forks.setdefault("_steering_requests", {})
+        pending.clear()
+        pending[ticket] = (values, branch, identity, generations[branch])
+        return ticket
+
+
+def apply_reserved_steering(forks, ticket, handler, output_count, reverse=False):
+    """Apply only the latest clicked edit, without advancing older requests."""
+    with STEERING_LOCK:
+        pending = forks.get("_steering_requests", {})
+        receipt = pending.pop(ticket, None) if isinstance(ticket, str) else None
+        if receipt is None:
+            return (gr.skip(),) * output_count
+        values, branch, identity, generation = receipt
+        if (forks.get("active", MAIN_BRANCH) != branch or forks.get("_view_identity") != identity
+                or forks.get("_steering_generation", {}).get(branch) != generation):
+            return (gr.skip(),) * output_count
+        return handler(*values, forks) if reverse else handler(forks, *values)
 
 
 def store(forks, value):

@@ -305,6 +305,49 @@ class RegistryTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_queued_manual_edits_do_not_invalidate_later_extension_clicks(self):
+        from chatlab.conversation import branch_sampling, copy_forks, new_forks
+        buttons = []
+        def build(context):
+            button = gr.Button("Steer")
+            def value():
+                return {"format": "chatlab-steering-1", "model_id": "org/model", "layer": 0,
+                        "vector": [1., 0.], "strength": 2.}
+            context.navigation.steer_chat(button, value)
+            buttons.append(button)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch("chatlab.ui.layout.load_enabled", return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            capture = listener_named(demo, "capture_steering")
+            apply = listener_named(demo, "apply_captured_steering")
+            for name, values in (("remove_vector", ()), ("import_vector", ("not-read.json",)),
+                                 ("use_extracted", (None, 0)), ("remember_steering", (None, False, 1., 0))):
+                manual_capture = listener_named(demo, "capture_" + name)
+                manual_apply = listener_named(demo, name)
+                self.assertFalse(manual_capture.queue)
+                self.assertEqual(manual_apply.concurrency_id, apply.concurrency_id)
+                forks = new_forks()
+                ticket = manual_capture.fn(forks, *values)
+                queued = copy_forks(forks)
+                receipt = capture.fn(forks)
+                generation = forks["_steering_generation"][forks["active"]]
+                with self.subTest(manual=name):
+                    self.assertTrue(all(item == gr.skip() for item in manual_apply.fn(queued, ticket)))
+                    self.assertEqual(forks["_steering_generation"][forks["active"]], generation)
+                    result = apply.fn(queued, receipt)
+                    self.assertEqual(branch_sampling(result[0], result[0]["active"])["steering"]["strength"], 2.)
+            # Reversing click order gives the newer manual Remove precedence.
+            forks = new_forks()
+            receipt = capture.fn(forks)
+            ticket = listener_named(demo, "capture_remove_vector").fn(forks)
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                apply.fn(forks, receipt)
+            result = listener_named(demo, "remove_vector").fn(forks, ticket)
+            self.assertIsNone(branch_sampling(result[0], result[0]["active"]).get("steering"))
+        finally:
+            demo.close()
+
     def test_extension_steering_button_steers_the_conversation_and_opens_chat(self):
         from chatlab.conversation import MAIN_BRANCH, branch_sampling, new_forks
 
