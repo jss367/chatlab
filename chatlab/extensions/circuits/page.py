@@ -119,7 +119,7 @@ def _progress_text(stage, done, total):
 def build_page(context):
     bench = Workbench(context.models, context.data_dir)
     staging, staging_lock = {}, threading.Lock()
-    versions, version_lock = {}, threading.RLock()
+    versions, focused_nodes, version_lock = {}, {}, threading.RLock()
 
     def version(session_id):
         with version_lock:
@@ -129,6 +129,7 @@ def build_page(context):
         bench.cancel(session_id)
         with version_lock:
             versions.pop(session_id, None)
+            focused_nodes.pop(session_id, None)
         with staging_lock:
             directory = staging.pop(session_id, None)
         if directory is not None:
@@ -391,7 +392,7 @@ def build_page(context):
 
     # Selecting, naming and grouping ---------------------------------------------
 
-    def picked(graph, raw_pick):
+    def picked(graph, raw_pick, session_id):
         if not graph:
             return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
         try:
@@ -401,13 +402,15 @@ def build_page(context):
             focused = data["focus"] if data.get("focus") in ids else None
         except (TypeError, ValueError, KeyError):
             return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
-        features = sum(1 for i in chosen if i.startswith("f:"))
+        with version_lock:
+            focused_nodes[session_id] = focused
+        features = sum(1 for n in graph["nodes"] if n["id"] in chosen and n["kind"] == "feature")
         note = (f"{len(chosen)} selected, {features} of them features." if len(chosen) > 1 else "")
         node = node_of(graph, focused)
         name = (graph.get("labels") or {}).get(focused, "") if node and node["kind"] == "feature" else ""
         return chosen, focused, describe_card(graph, focused), note, name
 
-    pick.input(picked, [graph_state, pick], [selection, focus, card, selected_note, label],
+    pick.input(picked, [graph_state, pick, owner], [selection, focus, card, selected_note, label],
                concurrency_id="circuits-read", trigger_mode="always_last", show_progress="hidden")
 
     def rename_node(graph, focused, text, chosen, shown, errors, session_id):
@@ -429,7 +432,8 @@ def build_page(context):
     def group_selected(graph, chosen, name, shown, errors, session_id):
         if not graph:
             raise gr.Error("Trace a graph first.")
-        members = [i for i in chosen if i.startswith("f:")]
+        feature_ids = {n["id"] for n in graph["nodes"] if n["kind"] == "feature"}
+        members = list(dict.fromkeys(i for i in chosen if i in feature_ids))
         if not members:
             raise gr.Error("Select features in the graph first: click one, shift-click more.")
         name = (name or "").strip()[:60] or f"group {len(graph['groups']) + 1}"
@@ -493,7 +497,9 @@ def build_page(context):
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         card = describe_card(graph, focused, result)
-        return card if version(session_id) == stamp else gr.skip()
+        with version_lock:
+            fresh = version(session_id) == stamp and focused_nodes.get(session_id, focused) == focused
+        return card if fresh else gr.skip()
 
     ablate.click(ablate_focused, [owner, graph_state, focus], card, concurrency_id="circuits")
 

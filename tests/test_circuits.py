@@ -876,6 +876,12 @@ class WorkbenchTests(unittest.TestCase):
                     late_frames = list(handlers["run_interventions"]("view", old, "", "", "", True, 2, False, "group"))
                 self.assertEqual(late_frames[-1], (gr.skip(),) * 6)
 
+                features = [n["id"] for n in old["nodes"] if n["kind"] == "feature"]
+                def changed_focus(*args):
+                    handlers["picked"](old, json.dumps({"selected": [features[1]], "focus": features[1]}), "view")
+                    yield "result", {"deltas": []}
+                with mock.patch.object(workbench.Workbench, "background", changed_focus):
+                    self.assertEqual(handlers["ablate_focused"]("view", old, features[0]), gr.skip())
                 feature = next(n["id"] for n in old["nodes"] if n["kind"] == "feature")
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     self.assertEqual(handlers["ablate_focused"]("view", old, feature), gr.skip())
@@ -896,6 +902,16 @@ class WorkbenchTests(unittest.TestCase):
                 handlers = handlers_by_name(demo)
                 graph = small_graph()
                 members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
+                # Imported IDs need not use the publisher's f: prefix.
+                old_id = members[0]
+                members[0] = "imported-feature"
+                for node in graph["nodes"]:
+                    if node["id"] == old_id:
+                        node["id"] = members[0]
+                for edge in graph["edges"]:
+                    for key in ("source", "target"):
+                        if edge[key] == old_id:
+                            edge[key] = members[0]
                 grouped = handlers["group_selected"](graph, members, "group", 40, False, "view")
                 offered = Path(grouped[-1])
                 self.assertEqual(json.loads(offered.read_text())["groups"], {"group": members})
