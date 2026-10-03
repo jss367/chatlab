@@ -60,6 +60,7 @@ class Runs:
         self._turns = {}
         self._downloads = {}
         self._probes = {}
+        self._training = {}
 
     @staticmethod
     def new_owner():
@@ -76,8 +77,22 @@ class Runs:
             self._shown[owner] = None
             return self._active[owner][0], self._turns[owner]
 
-    def replace_probe(self, owner, probe):
+    def begin_training(self, owner):
         with self._lock:
+            request = uuid4().hex
+            self._training[owner] = (request, self._turns.get(owner, 0))
+            return request
+
+    def training_snapshot(self, owner, request):
+        with self._lock:
+            captured = self._training.get(owner)
+            return captured[1] if captured and captured[0] == request and captured[1] == self._turns.get(owner, 0) else None
+
+    def replace_probe(self, owner, probe, turn=None, request=None):
+        with self._lock:
+            if (turn is not None and self._turns.get(owner, 0) != turn
+                    or request is not None and self._training.get(owner, (None,))[0] != request):
+                return None
             self._turns[owner] = self._turns.get(owner, 0) + 1
             self._shown[owner] = None
             stamp = self._probes[owner] = uuid4().hex
@@ -150,6 +165,7 @@ class Runs:
             self._shown.pop(owner, None)
             self._turns.pop(owner, None)
             self._probes.pop(owner, None)
+            self._training.pop(owner, None)
             directory = self._downloads.pop(owner, None)
         if directory is not None:
             directory.cleanup()
@@ -275,6 +291,7 @@ def build_page(context):
     with gr.Column(elem_id="probes-page"):
         owner = gr.State(value=runs.new_owner, delete_callback=runs.forget)
         probe_state = gr.State(None)
+        train_request = gr.Textbox(visible=False)
         reading_state = gr.State(None)
         gr.Markdown("# Linear probes\nGive examples of two kinds of text. A logistic regression is fitted to the "
                     "residual stream at every layer and tested on examples it was not trained on. Then read any "
@@ -342,7 +359,7 @@ def build_page(context):
         path.parent.mkdir(parents=True, exist_ok=True)
         write_private_text(path, probes.dumps(probe))
 
-    def shown_probe(probe, view):
+    def shown_probe(probe, view, turn=None, request=None):
         """Everything that changes when a different probe is the current one.
 
         The form is filled with what the probe was trained from, so it can be
@@ -350,8 +367,10 @@ def build_page(context):
         until the reader says otherwise.
         """
         # A run for the probe being replaced would finish beside this one's controls.
+        probe = runs.replace_probe(view, probe, turn, request)
+        if probe is None:
+            return (gr.skip(),) * len(probe_outputs)
         runs.cancel(view)
-        probe = runs.replace_probe(view, probe)
         choices = saved_choices(context.data_dir)
         listed = any(value == probe["id"] for _label, value in choices)
         examples = probe["examples"]
@@ -368,8 +387,10 @@ def build_page(context):
                      name, positive_label, negative_label, positive_text, negative_text,
                      chat_template, paired, pool, l2]
 
-    def train_probe(probe_name, looking_for, against, wanted, unwanted, template, pairs, pooling, strength, view):
-        turn = runs.snapshot(view)
+    def train_probe(probe_name, looking_for, against, wanted, unwanted, template, pairs, pooling, strength, view, request=None):
+        turn = runs.snapshot(view) if request is None else runs.training_snapshot(view, request)
+        if turn is None:
+            return (gr.skip(),) * len(probe_outputs)
         positive, negative = parse_examples(wanted), parse_examples(unwanted)
         looking_for, against = (looking_for or "").strip(), (against or "").strip()
         try:
@@ -403,10 +424,10 @@ def build_page(context):
         except OSError as exc:
             logger.warning("Could not save probe %s: %s", probe["id"], exc)
             gr.Warning(f"The probe was trained but not saved: {exc}.")
-        return shown_probe(probe, view) if runs.live(view, turn) else (gr.skip(),) * len(probe_outputs)
+        return shown_probe(probe, view, turn, request)
 
-    train.click(train_probe, [name, positive_label, negative_label, positive_text, negative_text,
-                              chat_template, paired, pool, l2, owner], probe_outputs, concurrency_id="probes-model")
+    train.click(runs.begin_training, owner, train_request, queue=False).success(train_probe, [name, positive_label, negative_label, positive_text, negative_text,
+                              chat_template, paired, pool, l2, owner, train_request], probe_outputs, concurrency_id="probes-model")
 
     def open_saved(probe_id, view):
         if not probe_id:

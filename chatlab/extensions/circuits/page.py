@@ -120,6 +120,7 @@ def build_page(context):
     bench = Workbench(context.models, context.data_dir)
     staging, staging_lock = {}, threading.Lock()
     versions, focused_nodes, version_lock = {}, {}, threading.RLock()
+    trace_requests = {}
 
     def version(session_id):
         with version_lock:
@@ -133,6 +134,7 @@ def build_page(context):
         with version_lock:
             versions.pop(session_id, None)
             focused_nodes.pop(session_id, None)
+            trace_requests.pop(session_id, None)
         with staging_lock:
             directory = staging.pop(session_id, None)
         if directory is not None:
@@ -141,6 +143,7 @@ def build_page(context):
     with gr.Column(elem_id="circuits-page"):
         owner = gr.State(value=lambda: uuid4().hex, delete_callback=forget)
         graph_state = gr.State(None)
+        trace_request = gr.Textbox(visible=False)
         selection = gr.State([])
         focus = gr.State(None)
         gr.Markdown("# Circuit tracing\nWhich transcoder features carried the model to a token. Each MLP is "
@@ -346,8 +349,21 @@ def build_page(context):
 
     # Tracing -----------------------------------------------------------------
 
+    def begin_trace(session_id):
+        with version_lock:
+            request = uuid4().hex
+            trace_requests[session_id] = (request, version(session_id))
+            return request
+
     def run_trace(session_id, system_text, user_text, prefix_text, plain, choice, tokens_text, others_text,
-                  nodes, node_share, edge_share, batch_size, shown, errors):
+                  nodes, node_share, edge_share, batch_size, shown, errors, request=None):
+        with version_lock:
+            captured = trace_requests.get(session_id)
+            stale_request = request is not None and (not captured or captured[0] != request or captured[1] != version(session_id))
+            stamp = captured[1] if request is not None and captured else version(session_id)
+        if stale_request:
+            yield (gr.skip(),) * (len(graph_outputs) + 2)
+            return
         settings = Settings(int(nodes), int(batch_size), float(node_share), float(edge_share))
         prompt = {"system": system_text or "", "user": user_text or "", "prefix": prefix_text or "",
                   "raw": bool(plain)}
@@ -357,7 +373,6 @@ def build_page(context):
             raise gr.Error("Write a user message first.")
         skip = (gr.skip(),) * len(graph_outputs)
         graph = None
-        stamp = version(session_id)
         try:
             settings.check()
             for item in bench.background(session_id, lambda p, c: bench.trace(prompt, explain_spec, settings, p, c)):
@@ -371,7 +386,7 @@ def build_page(context):
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         with version_lock:
-            stale = version(session_id) != stamp
+            stale = version(session_id) != stamp or (request is not None and trace_requests.get(session_id, (None,))[0] != request)
             if not stale:
                 path = save(graph, session_id)
                 stamp = version(session_id)
@@ -382,10 +397,11 @@ def build_page(context):
         frame = (f"Traced {stats['traced_features']} of {stats['active_features']:,} active features. "
                  f"Checkpoint compatibility: {graph.get('checkpoint_compatibility', 'unverified')}.",
                  status_text(bench.status()), *show_graph(graph, path, shown, errors))
-        yield frame if version(session_id) == stamp else (gr.skip(), gr.skip(), *skip)
+        yield frame if (version(session_id) == stamp and
+                        (request is None or trace_requests.get(session_id, (None,))[0] == request)) else (gr.skip(), gr.skip(), *skip)
 
-    trace.click(run_trace, [owner, system, user, prefix, raw, explain, explain_tokens, explain_others,
-                            max_nodes, node_threshold, edge_threshold, batch, nodes_shown, show_errors],
+    trace.click(begin_trace, owner, trace_request, queue=False).success(run_trace, [owner, system, user, prefix, raw, explain, explain_tokens, explain_others,
+                            max_nodes, node_threshold, edge_threshold, batch, nodes_shown, show_errors, trace_request],
                 [progress, status, *graph_outputs], concurrency_id="circuits", show_progress="hidden")
     stop.click(bench.cancel, owner, None, queue=False)
     stop_run.click(bench.cancel, owner, None, queue=False)

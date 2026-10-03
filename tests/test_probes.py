@@ -301,6 +301,14 @@ class PageTests(unittest.TestCase):
         runs.forget("other")
         self.assertFalse(other.parent.exists())
 
+    def test_queued_training_cannot_replace_a_later_opened_probe(self):
+        probe = self.train()[0]
+        request = self.fn["begin_training"]("owner")
+        current = self.fn["open_saved"](probe["id"], "owner")[0]
+        with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("stale training")):
+            self.assertEqual(self.train(request=request), (gr.skip(),) * 21)
+        self.assertIsNotNone(self.read(current, READ, WANTED[0])[-1][0])
+
     def test_training_completed_after_opening_another_probe_does_not_replace_it(self):
         opened = self.train()[0]
         fit = probes.train
