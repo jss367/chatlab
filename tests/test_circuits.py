@@ -1119,6 +1119,25 @@ class WorkbenchTests(unittest.TestCase):
                 with self.subTest(change=change), self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
 
+    def test_oversized_group_map_is_rejected_before_effect_validation(self):
+        graph = small_graph()
+        graph["groups"] = {f"g{i}": [] for i in range(4097)}
+        graph["effects"] = {"groups": {name: {} for name in graph["groups"]}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            path.write_text(json.dumps(graph))
+            with mock.patch.object(workbench, "_validate_effects", side_effect=AssertionError("effects traversed")) as validate:
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+                validate.assert_not_called()
+
+    def test_imported_measured_effects_need_a_pivot(self):
+        summary = dict(tokens={"2": .1}, pivot=0.)
+        effects = dict(prefixes=1, boost=2., every_position=False, pivot=[], alternatives=[2],
+                       baseline=summary, groups={"g": dict(active_prefixes=1, ablate=summary, boost=summary)})
+        with self.assertRaises(ValueError):
+            workbench._validate_effects(effects, {"g": []})
+
     def test_imported_token_probability_sets_are_consistent_distributions(self):
         for where in ("baseline", "ablate", "boost"):
             def summary():

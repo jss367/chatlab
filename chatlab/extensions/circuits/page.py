@@ -39,6 +39,7 @@ JS = r"""
     Object.getOwnPropertyDescriptor(prototype, 'value').set.call(field, value);
     field.dispatchEvent(new Event('input', {bubbles: true}));
   };
+  let featureClick = 0;
   document.addEventListener('click', event => {
     const node = event.target.closest('#circuits-graph .cg-node[data-node]');
     if (node) {
