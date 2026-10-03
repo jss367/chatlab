@@ -1791,6 +1791,40 @@ class WorkbenchTests(unittest.TestCase):
             finally:
                 demo.close()
 
+    def test_graph_mutations_cancel_invalidated_model_work(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None, lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                cells = dict(zip(handlers["begin_trace"].__code__.co_freevars, handlers["begin_trace"].__closure__))
+                bench = cells["bench"].cell_contents
+                for name in ("group_selected", "rename_node", "delete_group"):
+                    fn = handlers[name]
+                    save = dict(zip(fn.__code__.co_freevars, fn.__closure__))["save"].cell_contents
+                    graph = small_graph()
+                    member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+                    graph["groups"] = {"old": [member]}
+                    save(graph, "view")
+                    flag = threading.Event()
+                    bench._sessions["view"] = {"cancelled": flag}
+                    args = {"group_selected": (graph, [member], "new", 40, False, "view"),
+                            "rename_node": (graph, member, "renamed", [member], 40, False, "view"),
+                            "delete_group": (graph, "old", [member], 40, False, "view")}[name]
+                    with mock.patch.object(workbench.Workbench, "record", return_value=None):
+                        fn(*args)
+                    with self.subTest(mutation=name):
+                        self.assertTrue(flag.is_set())
+                    bench._sessions.clear()
+            finally:
+                demo.close()
+
     def test_graph_mutations_cannot_save_over_a_newer_publication(self):
         import gradio as gr
         from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector

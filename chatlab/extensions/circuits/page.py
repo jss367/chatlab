@@ -316,6 +316,8 @@ def build_page(context):
                 if checked and not current_graph(graph, session_id):
                     return False
                 versions[session_id] = graph["_view_version"] = uuid4().hex
+                trace_requests.pop(session_id, None)
+                bench.cancel(session_id)
                 return staged(bench.save(graph), graph, session_id)
         except OSError as exc:
             logger.warning("Could not save graph %s: %s", graph.get("id"), exc)
