@@ -25,7 +25,7 @@ The best layer is the one with the highest held-out accuracy. With a few dozen e
 
 ## Reading with a probe
 
-Choose **Generate a reply** to send a message to the loaded model and read its reply, or **Read text** to read a passage as written. The reply streams into **Reply**. When it finishes, the whole sequence is run through the model once more, and every block's output at every position is read along that block's probe. One reading covers at most 4,096 tokens, prompt included, or the model's window if that is shorter. A longer passage is refused, and a reply is limited to what the prompt leaves of that. A stopped reply is still read, up to where it stopped.
+Choose **Generate a reply** to send a message to the loaded model and read its reply, or **Read text** to read a passage as written. The reply streams into **Reply**. When it finishes, the whole sequence is run through the model once more, and every block's output at every position is read along that block's probe. One reading covers at most 4,096 tokens, prompt included, or the model's window if that is shorter. A longer passage is refused, and a reply is limited to what the prompt leaves of that. Stop keeps the partial reply in **Reply** and skips the probe reading; no scores or strip are produced for that stopped reply.
 
 The strip colors each token by the probe's probability at the layer on the slider. The slider starts at the best layer. Five buckets run from blue (under 10%, the **Against** side) through neutral (30–70%) to red (over 90%, the **Looking for** side). Moving the slider repaints the strip without running the model again. Click a token to see its probability at every layer. **Every layer** shows a grid of every layer against every token. Hover a cell to see its token.
 
