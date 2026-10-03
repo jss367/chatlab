@@ -462,7 +462,7 @@ def load_graph(path):
                 or not isinstance(edges, list) or len(edges) > min(200000, len(nodes) ** 2)):
             raise ValueError
         ids = {n["id"] for n in nodes}
-        if len(ids) != len(nodes) or not all(isinstance(value, str) for value in ids):
+        if len(ids) != len(nodes) or not all(isinstance(value, str) and 1 <= len(value) <= 128 for value in ids):
             raise ValueError
         limits = {"feature": 4096, "error": layers * len(tokens),
                   "embedding": len(tokens), "target": attribution.MAX_CHOSEN_TARGETS}
@@ -549,7 +549,7 @@ def load_graph(path):
             raise ValueError
         memberships = set()
         for name, members in graph["groups"].items():
-            if (not isinstance(name, str) or not isinstance(members, list) or len(members) > 4096
+            if (not isinstance(name, str) or not 1 <= len(name) <= 60 or not isinstance(members, list) or len(members) > 4096
                     or not all(isinstance(member, str) and member in feature_ids for member in members)):
                 raise ValueError
             if len(set(members)) != len(members) or memberships.intersection(members):

@@ -637,6 +637,22 @@ class WorkbenchTests(unittest.TestCase):
     def test_automatic_alternatives_search_beyond_excluded_top_twenty(self):
         self.assertEqual(workbench.automatic_alternatives(-torch.arange(64).float(), list(range(20))), list(range(20, 28)))
 
+    def test_imported_identifiers_and_group_names_are_nonempty_and_bounded(self):
+        graph = small_graph()
+        member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for identifier in ("", "x" * 129):
+                nodes = [dict(node, id=identifier) if node["id"] == member else node
+                         for node in graph["nodes"]]
+                path.write_text(json.dumps(graph | {"nodes": nodes}))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+            for name in ("", "x" * 61):
+                path.write_text(json.dumps(graph | {"groups": {name: [member]}}))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+
     def test_duplicate_imported_group_memberships_are_rejected(self):
         graph = small_graph()
         member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
