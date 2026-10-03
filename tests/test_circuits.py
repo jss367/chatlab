@@ -1033,6 +1033,46 @@ class WorkbenchTests(unittest.TestCase):
             finally:
                 demo.close()
 
+    def test_stale_focus_and_redraw_do_not_start_or_repaint_old_work(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None, lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                graph = small_graph()
+                members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
+                handlers["group_selected"](graph, members, "group", 40, False, "view")
+                with mock.patch.object(workbench.Workbench, "record", return_value=None):
+                    handlers["picked"](graph, json.dumps(dict(selected=[members[1]], focus=members[1])), "view")
+                with mock.patch.object(workbench.Workbench, "background") as work:
+                    self.assertEqual(handlers["ablate_focused"]("view", graph, members[0]), gr.skip())
+                work.assert_not_called()
+                newer = small_graph()
+                newer["id"] = "newer"
+                path = Path(directory) / "newer.json"
+                path.write_text(json.dumps(newer))
+                original = render.graph_view
+                opened = False
+                def rendering(*args, **kwargs):
+                    nonlocal opened
+                    if not opened:
+                        opened = True
+                        handlers["open_path"](path, 40, False, "view")
+                    return original(*args, **kwargs)
+                with mock.patch.object(render, "graph_view", side_effect=rendering):
+                    self.assertEqual(handlers["redraw"](graph, members, 40, False, "view"), gr.skip())
+                with mock.patch.object(render, "graph_view") as drawn:
+                    self.assertEqual(handlers["redraw"](graph, members, 40, False, "view"), gr.skip())
+                drawn.assert_not_called()
+            finally:
+                demo.close()
+
     def test_stop_cancels_all_submitted_gradio_jobs(self):
         import gradio as gr
         from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
