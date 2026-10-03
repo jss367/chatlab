@@ -344,8 +344,6 @@ class Workbench:
                                             model_revision=session.model_revision)
                 self._same_transcoders(graph, held)
                 self._measurement_ids(graph, blocks)
-                if not alternatives:
-                    alternatives = measured_alternatives(blocks, held, prefixes, pivot, cancelled)
                 nodes = {n["id"]: n for n in graph["nodes"]}
                 n = len(graph["ids"])
                 groups = {name: [(nodes[m]["layer"], nodes[m]["feature"], n - 1 - nodes[m]["position"])
@@ -355,7 +353,8 @@ class Workbench:
                 effects = interventions.group_effects(
                     blocks, held, prefixes, groups, pivot, alternatives, boost=boost,
                     every_position=every_position, progress=lambda d, t: progress("Intervening", d, t),
-                    cancelled=cancelled)
+                    cancelled=cancelled, auto_alternatives=not alternatives)
+                alternatives = effects["alternatives"]
                 effects["token_text"] = {str(t): session.decode([t]) for t in [*pivot, *alternatives]}
                 return effects
 

@@ -493,24 +493,37 @@ def build_page(context):
                      [graph_state, graph_view, groups_view, group_pick, group_card, group_name, download],
                      concurrency_id="circuits-read")
 
-    def choose_group(graph, name):
-        if not graph or name not in graph["groups"]:
-            return render.group_card(None, [], {"nodes": []})
-        return render.group_card(name, graph["groups"][name], graph, graph.get("effects"), graph.get("labels"),
-                                 decoder(graph))
+    def choose_group(graph, name, session_id):
+        fresh, stamp = checked_version(graph, session_id)
+        if not fresh:
+            return gr.skip()
+        if name not in graph["groups"]:
+            card = render.group_card(None, [], {"nodes": []})
+        else:
+            card = render.group_card(name, graph["groups"][name], graph, graph.get("effects"), graph.get("labels"),
+                                     decoder(graph))
+        with version_lock:
+            return card if version(session_id) == stamp and current_graph(graph, session_id) else gr.skip()
 
-    group_pick.input(choose_group, [graph_state, group_pick], group_card, queue=False)
+    group_pick.input(choose_group, [graph_state, group_pick, owner], group_card, queue=False)
 
-    def group_clicked(graph, raw_pick):
+    def group_clicked(graph, raw_pick, session_id):
+        fresh, stamp = checked_version(graph, session_id)
+        if not fresh:
+            return gr.skip(), gr.skip()
         try:
             name = json.loads(raw_pick)["name"]
         except (TypeError, ValueError, KeyError):
             return gr.skip(), gr.skip()
-        if not graph or name not in graph["groups"]:
+        if name not in graph["groups"]:
             return gr.skip(), gr.skip()
-        return gr.update(value=name), choose_group(graph, name)
+        card = choose_group(graph, name, session_id)
+        with version_lock:
+            if version(session_id) != stamp or not current_graph(graph, session_id):
+                return gr.skip(), gr.skip()
+            return gr.update(value=name), card
 
-    group_pick_bridge.input(group_clicked, [graph_state, group_pick_bridge], [group_pick, group_card], queue=False)
+    group_pick_bridge.input(group_clicked, [graph_state, group_pick_bridge, owner], [group_pick, group_card], queue=False)
 
     def delete_group(graph, name, chosen, shown, errors, session_id):
         if graph and not current_graph(graph, session_id):
