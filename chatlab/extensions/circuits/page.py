@@ -137,6 +137,10 @@ def build_page(context):
     def current_graph(graph, session_id):
         return graph is not None and graph.get("_view_version") == version(session_id)
 
+    def checked_version(graph, session_id):
+        with version_lock:
+            return current_graph(graph, session_id), version(session_id)
+
     def forget(session_id):
         bench.cancel(session_id)
         with version_lock:
@@ -349,7 +353,7 @@ def build_page(context):
             raise gr.Error(str(exc)) from exc
         yield "", status_text(bench.status())
 
-    load_button.click(load_now, owner, [progress, status], concurrency_id="circuits", show_progress="hidden")
+    load_event = load_button.click(load_now, owner, [progress, status], concurrency_id="circuits", show_progress="hidden")
 
     def unload_now():
         transcoders.unload()
@@ -414,11 +418,9 @@ def build_page(context):
         yield frame if (version(session_id) == stamp and
                         (request is None or trace_requests.get(session_id, (None,))[0] == request)) else (gr.skip(), gr.skip(), *skip)
 
-    trace.click(begin_trace, owner, trace_request, queue=False).success(run_trace, [owner, system, user, prefix, raw, explain, explain_tokens, explain_others,
+    trace_event = trace.click(begin_trace, owner, trace_request, queue=False).success(run_trace, [owner, system, user, prefix, raw, explain, explain_tokens, explain_others,
                             max_nodes, node_threshold, edge_threshold, batch, nodes_shown, show_errors, trace_request],
                 [progress, status, *graph_outputs], concurrency_id="circuits", show_progress="hidden")
-    stop.click(bench.cancel, owner, None, queue=False)
-    stop_run.click(bench.cancel, owner, None, queue=False)
 
     for control in (nodes_shown, show_errors):
         control.change(draw, [graph_state, selection, nodes_shown, show_errors], graph_view, queue=False)
@@ -532,12 +534,12 @@ def build_page(context):
     # Measuring -----------------------------------------------------------------
 
     def ablate_focused(session_id, graph, focused):
-        if not current_graph(graph, session_id):
+        fresh, stamp = checked_version(graph, session_id)
+        if not fresh:
             return gr.skip()
         node = node_of(graph, focused)
         if node is None or node["kind"] != "feature":
             raise gr.Error("Click a feature in the graph first.")
-        stamp = version(session_id)
         result = None
         try:
             for item in bench.background(session_id, lambda p, c: bench.ablate(graph, node, p, c)):
@@ -553,18 +555,18 @@ def build_page(context):
             fresh = version(session_id) == stamp and focused_nodes.get(session_id, focused) == focused
         return card if fresh else gr.skip()
 
-    ablate.click(ablate_focused, [owner, graph_state, focus], card, concurrency_id="circuits")
+    ablate_event = ablate.click(ablate_focused, [owner, graph_state, focus], card, concurrency_id="circuits")
 
     def run_interventions(session_id, graph, pivot_text, alternative_text, prefix_text, include, factor, everywhere,
                           name):
-        if not current_graph(graph, session_id):
+        fresh, stamp = checked_version(graph, session_id)
+        if not fresh:
             yield (gr.skip(),) * 6
             return
         if not graph:
             raise gr.Error("Trace a graph first.")
         if not graph["groups"]:
             raise gr.Error("Group some features in the graph first.")
-        stamp = version(session_id)
         skip = (gr.skip(),) * 5
         effects = None
         try:
@@ -600,10 +602,19 @@ def build_page(context):
                f"{effects['prefixes']} prefix{'es' * (effects['prefixes'] != 1)}.", graph, *draw_groups(graph, name), path)
         yield frame if version(session_id) == stamp else (gr.skip(),) * 6
 
-    run.click(run_interventions, [owner, graph_state, pivot, alternatives, prefixes, include_prompt, boost,
+    intervention_event = run.click(run_interventions, [owner, graph_state, pivot, alternatives, prefixes, include_prompt, boost,
                                   every_position, group_pick],
               [run_progress, graph_state, groups_view, group_pick, group_card, download],
               concurrency_id="circuits", show_progress="hidden")
+
+    def stop_now(session_id):
+        with version_lock:
+            trace_requests.pop(session_id, None)
+        bench.cancel(session_id)
+
+    queued_jobs = [load_event, trace_event, ablate_event, intervention_event]
+    stop.click(stop_now, owner, None, queue=False, cancels=queued_jobs)
+    stop_run.click(stop_now, owner, None, queue=False, cancels=queued_jobs)
 
     # Opening saved graphs --------------------------------------------------------
 

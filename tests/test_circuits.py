@@ -437,6 +437,22 @@ class InterventionTests(unittest.TestCase):
         self.held = tiny_transcoders(self.blocks)
         self.recording = attribution.record(self.blocks, self.held, IDS)
 
+    def test_intervention_encoder_matches_trace_precision(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            self.held.w_enc[0] = self.held.w_enc[0].to(dtype)
+            expected = []
+            def record_input(_module, _args, output):
+                value = output[0] if isinstance(output, tuple) else output
+                expected.append(self.held.pre_activations(0, value[0])[:, 0])
+            handle = self.blocks.mlp_input(0).register_forward_hook(record_input)
+            try:
+                with mock.patch.object(self.held, "activate_one", wraps=self.held.activate_one) as activate:
+                    interventions.run(self.blocks, self.held, IDS, [(0, 0, 0., None)])
+                with self.subTest(dtype=dtype):
+                    torch.testing.assert_close(activate.call_args.args[2], expected[0], rtol=0, atol=0)
+            finally:
+                handle.remove()
+
     def test_scaling_by_one_changes_nothing(self):
         k = 0
         layer, feature = int(self.recording.feature_layer[k]), int(self.recording.feature_index[k])
@@ -976,6 +992,74 @@ class WorkbenchTests(unittest.TestCase):
                         bench.save(bad)
             self.assertFalse(bench.graphs_dir().exists())
 
+    def test_ablation_cannot_stamp_old_graph_with_a_newly_opened_version(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits import page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None, lambda *args: None))
+            with gr.Blocks() as demo:
+                page.build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                old = small_graph()
+                member = next(n["id"] for n in old["nodes"] if n["kind"] == "feature")
+                handlers["group_selected"](old, [member], "old", 40, False, "view")
+                newer = small_graph()
+                newer["id"] = "newer"
+                path = Path(directory) / "newer.json"
+                path.write_text(json.dumps(newer))
+                fn = handlers["ablate_focused"]
+                cell = dict(zip(fn.__code__.co_freevars, fn.__closure__))["node_of"]
+                original = cell.cell_contents
+                opened = False
+                def opening(graph, node):
+                    nonlocal opened
+                    if not opened:
+                        opened = True
+                        handlers["open_path"](path, 40, False, "view")
+                    return original(graph, node)
+                def measured(*args):
+                    yield ("done", None)
+                cell.cell_contents = opening
+                try:
+                    with mock.patch.object(workbench.Workbench, "background", measured):
+                        result = handlers["ablate_focused"]("view", old, member)
+                finally:
+                    cell.cell_contents = original
+                self.assertEqual(result, gr.skip())
+            finally:
+                demo.close()
+
+    def test_stop_cancels_all_submitted_gradio_jobs(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None, lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                jobs = {fn._id for fn in demo.fns.values() if fn.name in
+                        ("load_now", "run_trace", "ablate_focused", "run_interventions")}
+                cancellations = [set(dependency["cancels"]) for dependency in demo.config["dependencies"]
+                                 if dependency.get("cancels")]
+                self.assertEqual(len(jobs), 4)
+                self.assertEqual(cancellations, [jobs, jobs])
+                handlers = handlers_by_name(demo)
+                request = handlers["begin_trace"]("view")
+                handlers["stop_now"]("view")
+                with mock.patch.object(workbench.Workbench, "background") as work:
+                    list(handlers["run_trace"]("view", "", "hi", "", False, "", False, False,
+                                               40, .8, .98, 8, 40, False, request))
+                work.assert_not_called()
+            finally:
+                demo.close()
+
     def test_graph_mutations_cannot_save_over_a_newer_publication(self):
         import gradio as gr
         from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
@@ -1218,14 +1302,12 @@ class WorkbenchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "broken"):
             list(bench.background("owner", fails))
 
-    def test_stop_before_worker_registration_prevents_work(self):
+    def test_idle_stop_does_not_cancel_future_work(self):
         bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
-        work = mock.Mock(return_value="result")
         bench.cancel("owner")
-        with self.assertRaises(attribution.Cancelled):
-            list(bench.background("owner", work))
-        work.assert_not_called()
+        work = mock.Mock(return_value="result")
         self.assertEqual(list(bench.background("owner", work)), [("done", "result")])
+        work.assert_called_once()
 
     def test_one_run_per_view(self):
         bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())

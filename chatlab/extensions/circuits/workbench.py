@@ -58,7 +58,6 @@ class Workbench:
         self._records = {}
         self._lock = threading.Lock()
         self._sessions = {}
-        self._pending_cancellations = set()
 
     # Status -------------------------------------------------------------
 
@@ -74,9 +73,7 @@ class Workbench:
     def cancel(self, owner):
         with self._lock:
             session = self._sessions.get(owner)
-            if session is None:
-                self._pending_cancellations.add(owner)
-            else:
+            if session is not None:
                 session["cancelled"].set()
 
     def background(self, owner, work):
@@ -90,9 +87,6 @@ class Workbench:
         with self._lock:
             if owner in self._sessions:
                 raise ValueError("This view is already running something. Wait for it or press Stop.")
-            if owner in self._pending_cancellations:
-                self._pending_cancellations.remove(owner)
-                cancelled.set()
             self._sessions[owner] = {"cancelled": cancelled}
 
         def progress(stage, done, total):
