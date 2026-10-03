@@ -569,7 +569,6 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
         def capture_steering(forks, *values):
             # Reserve only ephemeral request metadata on the live view;
             # returning a copied conversation here could overwrite a queued reply.
-            values = deepcopy(values)
             with capture_lock:
                 identity = forks.setdefault("_view_identity", uuid4().hex)
                 branch = forks.get("active", MAIN_BRANCH)
@@ -577,7 +576,9 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
                 generations[branch] = generations.get(branch, 0) + 1
                 generation = generations[branch]
                 forks.get("_steering_requests", {}).clear()
-            return (values, branch, identity, generation)
+            # The reservation precedes potentially slow copies: an older
+            # callback finishing last cannot acquire a newer generation.
+            return (deepcopy(values), branch, identity, generation)
         def validate_receipt(forks, branch, identity, generation):
             if ((forks or {}).get("active", MAIN_BRANCH) != branch
                     or (forks or {}).get("_view_identity") != identity):

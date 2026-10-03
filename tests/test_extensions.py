@@ -305,6 +305,55 @@ class RegistryTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_slow_capture_copy_does_not_reverse_steering_order(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from chatlab.conversation import new_forks, branch_sampling
+        from chatlab.ui import steering as controls_module
+        def build(context):
+            context.navigation.steer_chat(gr.Button("Steer"), lambda value: value,
+                                          [gr.State(None)])
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch("chatlab.ui.layout.load_enabled", return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            for manual in (False, True):
+                entered, release = Event(), Event()
+                class SlowValue(dict):
+                    def __deepcopy__(self, memo):
+                        entered.set()
+                        if not release.wait(2):
+                            raise AssertionError("copy was not released")
+                        return dict(self)
+                old = SlowValue(format="chatlab-steering-1", model_id="org/model", layer=0,
+                                vector=[1., 0.], strength=1.)
+                new = dict(old, strength=2.)
+                forks = new_forks()
+                if manual:
+                    capture = lambda value: controls_module.reserve_steering(forks, (value, True, value["strength"], 0))
+                    apply = lambda ticket: controls_module.apply_reserved_steering(
+                        forks, ticket, controls_module.remember_steering, 3)
+                else:
+                    capture = lambda value: listener_named(demo, "capture_steering").fn(forks, value)
+                    apply = lambda receipt: listener_named(demo, "apply_captured_steering").fn(forks, receipt)
+                with self.subTest(manual=manual), ThreadPoolExecutor(max_workers=2) as pool:
+                    older = pool.submit(capture, old)
+                    self.assertTrue(entered.wait(1))
+                    try:
+                        newer = pool.submit(capture, new).result(timeout=1)
+                    finally:
+                        release.set()
+                    older = older.result(timeout=2)
+                    if manual:
+                        self.assertTrue(all(item == gr.skip() for item in apply(older)))
+                    else:
+                        with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                            apply(older)
+                    result = apply(newer)
+                    self.assertEqual(branch_sampling(result[0], result[0]["active"])["steering"]["strength"], 2.)
+        finally:
+            demo.close()
+
     def test_queued_manual_edits_do_not_invalidate_later_extension_clicks(self):
         from chatlab.conversation import branch_sampling, copy_forks, new_forks
         buttons = []

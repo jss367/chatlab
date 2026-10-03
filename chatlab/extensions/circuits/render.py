@@ -24,6 +24,8 @@ TOP = 28
 SMALL = 0.05
 EDGES_PER_NODE = 10
 MAX_GROUP_FLOWS = 1000
+MAX_GROUP_CHIPS = 64
+MAX_CHIP_LABEL = 160
 
 
 def token_text(text):
@@ -431,7 +433,7 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
     box_w, box_h, gap = 210, 64, 26
     col_x = {d: 130 + (d - 1) * (box_w + 56) for d in columns}
     tallest = max(len(v) for v in columns.values())
-    height = max(340, 40 + tallest * (box_h + gap))
+    height = max(340, 40 + tallest * (box_h + gap), _token_bars_height(effects))
     place = {}
     for d, names in columns.items():
         names.sort(key=lambda g: mean_layer[g])
@@ -506,6 +508,13 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
     return f'<div class="cg-root viz-root"><div class="cg-scroll">{"".join(parts)}</div>{legend}</div>'
 
 
+def _token_bars_height(effects):
+    if not effects:
+        return 96
+    lists = [effects["pivot"], effects["alternatives"]]
+    return 50 + sum(38 + 22 * len(ids) for ids in lists if ids) + 20
+
+
 def _token_bars(effects, x, decode):
     if not effects:
         return (f'<text class="cg-axis" x="{x}" y="60">Run the interventions to see each</text>'
@@ -541,9 +550,12 @@ def group_card(name, members, graph, effects=None, labels=None, decode=None):
     labels = labels or {}
     decode = decode or str
     nodes = {n["id"]: n for n in graph["nodes"]}
-    chips = "".join(f'<span title="{_esc(m)}">{_esc(node_label(nodes[m], labels))}</span>'
-                    for m in members if m in nodes)
-    body = [f'<h4>{_esc(name)}</h4><div class="cg-chips">{chips}</div>']
+    visible_members = [m for m in members if m in nodes]
+    chips = "".join(f'<span title="{_esc(_short(m, 96))}">{_esc(_short(node_label(nodes[m], labels), MAX_CHIP_LABEL))}</span>'
+                    for m in visible_members[:MAX_GROUP_CHIPS])
+    body = [f'<h4>{_esc(_short(name, 200))}</h4><div class="cg-chips">{chips}</div>']
+    if len(visible_members) > MAX_GROUP_CHIPS:
+        body.append(f'<p class="cg-muted">Showing {MAX_GROUP_CHIPS} of {len(visible_members):,} features.</p>')
     effect = (effects or {}).get("groups", {}).get(name)
     if not effect:
         body.append('<p class="cg-muted">Run the interventions to measure this group.</p>')

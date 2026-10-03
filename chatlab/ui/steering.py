@@ -50,7 +50,6 @@ def steering_updates(forks):
 
 def reserve_steering(forks, values):
     """Reserve a manual edit when clicked, before the conversation queue."""
-    values = deepcopy(values)
     with STEERING_LOCK:
         identity = forks.setdefault("_view_identity", uuid4().hex)
         branch = forks.get("active", MAIN_BRANCH)
@@ -59,8 +58,13 @@ def reserve_steering(forks, values):
         ticket = uuid4().hex
         pending = forks.setdefault("_steering_requests", {})
         pending.clear()
-        pending[ticket] = (values, branch, identity, generations[branch])
-        return ticket
+        generation = generations[branch]
+    values = deepcopy(values)
+    with STEERING_LOCK:
+        if (forks.get("active", MAIN_BRANCH) == branch and forks.get("_view_identity") == identity
+                and generations.get(branch) == generation):
+            pending[ticket] = (values, branch, identity, generation)
+    return ticket
 
 
 def apply_reserved_steering(forks, ticket, handler, output_count, reverse=False):
