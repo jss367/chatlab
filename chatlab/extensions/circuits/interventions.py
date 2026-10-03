@@ -60,8 +60,8 @@ def run(blocks, transcoders, ids, changes=(), tokens=(), *, cancelled=None):
             delta = torch.zeros(value.shape[1:], dtype=torch.float32, device=value.device)
             for feature, factor, where in by_layer[layer]:
                 features = torch.tensor([feature], device=value.device)
-                encoder = transcoders.w_enc[layer][features]
-                pre = (x.to(encoder.dtype) @ encoder.T).float()
+                encoder = transcoders.encoder_rows(layer, features)
+                pre = x.float() @ encoder.T
                 pre = pre + transcoders.b_enc[layer][features].float()
                 acts = transcoders.activate_one(layer, feature, pre[:, 0])
                 if where is not None:

@@ -130,7 +130,7 @@ class Transcoders:
     def pre_activations(self, layer, x):
         """Encoder pre-activations for inputs ``x`` (..., d_model), in float32."""
         weights = self.w_enc[layer]
-        return (x.to(weights.dtype) @ weights.T).float() + self.b_enc[layer].float()
+        return x.float() @ weights.float().T + self.b_enc[layer].float()
 
     def activate(self, layer, pre):
         threshold = self.threshold[layer]
