@@ -477,6 +477,8 @@ def build_page(context):
             if not math.isfinite(strength) or strength <= 0:
                 raise ValueError("L2 strength must be positive and finite.")
             with context.models.open_session() as session:
+                if template and not session.has_chat_template:
+                    raise ValueError("This model has no native chat template. Turn off Read each example as a user message to train on plain passages.")
                 active = runs.attach_training(view, session, turn, request)
                 if active is None:
                     return (gr.skip(),) * len(probe_outputs)

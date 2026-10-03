@@ -219,6 +219,12 @@ class GenerationSession:
         self._check()
         return set(self._manager.hidden_token_ids())
 
+    @property
+    def has_chat_template(self):
+        """Whether the pinned tokenizer provides native user-message framing."""
+        self._check()
+        return bool(getattr(self._manager.tokenizer, "chat_template", None))
+
     def example_ids(self, text, *, chat_template=False):
         """The token IDs one example is read as, by :meth:`read_examples` and Chat's vector extraction.
 

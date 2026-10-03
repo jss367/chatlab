@@ -10,7 +10,7 @@ Load a model on the Models page. On the Probes page, name the two sides under **
 
 **How examples are read** holds four settings:
 
-- **Read each example as a user message** puts each example in a user turn followed by the generation prompt, so the last token is where the model would answer from. Unticked, the example is read as a passage, starting with whatever marker the tokenizer opens one with.
+- **Read each example as a user message** puts each example in a user turn followed by the generation prompt, so the last token is where the model would answer from. Unticked, the example is read as a passage, starting with whatever marker the tokenizer opens one with. User-message training requires a native chat template; if the model has none, turn this option off to train on passages.
 - **The examples are pairs** says that line *n* of each side is the same example with the property changed: "Paris is the capital of France." against "Paris is the capital of Italy.". Each pair is then held out together. Leave it unticked for unpaired examples. When paired examples are split across folds, a held-out example's twin sits in training with the opposite label. The twin is the nearest thing to it there, so held-out accuracy falls below chance however well the probe generalizes. When every layer reads below chance, the summary suggests this setting.
 - **Pool each example by** the last token, or the mean over every token.
 - **L2 strength** is the penalty on the weights. Each feature is standardized before fitting, so the penalty treats every direction alike. The default, 1, is scikit-learn's default `C=1`.

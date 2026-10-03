@@ -453,6 +453,14 @@ class PageTests(unittest.TestCase):
         runs.finish_training("owner", active)
         self.assertEqual(runs._training_active, {})
 
+    def test_missing_native_template_is_refused_before_example_forwards(self):
+        self.manager.tokenizer.chat_template = None
+        with mock.patch.object(self.manager, "_pooled_block_outputs", side_effect=AssertionError("fallback framing trained")), self.assertRaisesRegex(gr.Error, "no native chat template"):
+            self.train(template=True)
+        self.assertEqual(list(self.data.glob("*.json")), [])
+        self.assertIsNone(self.manager.claim_generation())
+        self.manager.release_generation()
+
     def test_failed_training_preserves_the_displayed_reading(self):
         probe = self.train()[0]
         reading = self.read(probe, READ, WANTED[0])[-1][0]
