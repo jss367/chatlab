@@ -521,6 +521,7 @@ def new_forks() -> dict:
 def copy_forks(forks: dict | None) -> dict:
     forks = forks or new_forks()
     return {
+        **({"_view_identity": forks["_view_identity"]} if "_view_identity" in forks else {}),
         "active": forks.get("active", MAIN_BRANCH),
         "branches": {
             name: copy_turns(turns) for name, turns in forks.get("branches", {}).items()

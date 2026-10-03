@@ -19,11 +19,12 @@ import html
 import logging
 from dataclasses import dataclass
 from functools import partial
+from uuid import uuid4
 
 import gradio as gr
 
 from chatlab import attachments, experiment_runs, library, settings, themes
-from chatlab.conversation import MAIN_BRANCH, branch_choices, new_forks
+from chatlab.conversation import MAIN_BRANCH, branch_choices, copy_forks, new_forks
 from chatlab.device_memory import warm_device
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.registry import load_enabled
@@ -563,22 +564,29 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
         if prepare is None:
             button.click(steer, [states.forks, *inputs], outputs, concurrency_id=CONVERSATION_PANE_QUEUE)
         else:
-            prepared = gr.State(None)
-            def prepare_steering(forks, *values, build=prepare):
+            captured, prepared = gr.State(None), gr.State(None)
+            def capture_steering(forks, *values):
+                forks = copy_forks(forks)
+                identity = forks.setdefault("_view_identity", uuid4().hex)
+                return forks, (values, forks.get("active", MAIN_BRANCH), identity)
+            def prepare_steering(receipt, build=prepare):
+                values, branch, identity = receipt
                 try:
-                    branch = (forks or {}).get("active", MAIN_BRANCH)
-                    return build(*values), values, branch
+                    return build(*values), values, branch, identity
                 except ValueError as error:
                     raise gr.Error(str(error)) from error
             def apply_prepared_steering(forks, payload, apply=steer):
-                value, values, branch = payload
-                if (forks or {}).get("active", MAIN_BRANCH) != branch:
+                value, values, branch, identity = payload
+                if ((forks or {}).get("active", MAIN_BRANCH) != branch
+                        or (forks or {}).get("_view_identity") != identity):
                     raise gr.Error("The active conversation changed while preparing steering. Try again on the intended conversation.")
                 return apply(forks, value, *values)
-            event = button.click(prepare_steering, [states.forks, *inputs], prepared,
-                                 concurrency_id="extension-steering-prepare")
-            event.success(apply_prepared_steering, [states.forks, prepared], outputs,
-                          concurrency_id=CONVERSATION_PANE_QUEUE)
+            event = button.click(capture_steering, [states.forks, *inputs], [states.forks, captured],
+                                 concurrency_id=CONVERSATION_PANE_QUEUE)
+            prepared_event = event.success(prepare_steering, captured, prepared,
+                                           concurrency_id="extension-steering-prepare")
+            prepared_event.success(apply_prepared_steering, [states.forks, prepared], outputs,
+                                   concurrency_id=CONVERSATION_PANE_QUEUE)
 
 
 def _wire_pages(

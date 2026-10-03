@@ -363,18 +363,25 @@ class RegistryTests(unittest.TestCase):
         with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
             demo = app.build_app()
         try:
-            preparation = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            capture = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            preparation = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "prepare_steering")
             application = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "apply_prepared_steering")
             self.assertNotEqual(preparation.concurrency_id, "conversation-pane")
             self.assertEqual(application.concurrency_id, "conversation-pane")
-            payload = preparation.fn(new_forks())
-            application.fn(new_forks(), payload)
+            forks, receipt = capture.fn(new_forks())
+            payload = preparation.fn(receipt)
+            application.fn(forks, payload)
             prepare.assert_called_once()
             with self.assertRaisesRegex(gr.Error, "active conversation changed"):
-                application.fn({**new_forks(), "active": "Different chat"}, payload)
+                application.fn({**forks, "active": "Different chat"}, payload)
+            # Clear all creates fresh forks with the same Main label.
+            with self.assertRaisesRegex(gr.Error, "active conversation changed"):
+                application.fn(new_forks(), payload)
+            from chatlab.conversation import copy_forks
+            application.fn(copy_forks(forks), payload)
             valid[0] = False
             with self.assertRaisesRegex(gr.Error, "Selection changed"):
-                application.fn(new_forks(), payload)
+                application.fn(forks, payload)
             prepare.assert_called_once()
         finally:
             demo.close()
