@@ -304,10 +304,12 @@ def build_page(context):
                 partial.unlink(missing_ok=True)
             return str(copy)
 
-    def save(graph, session_id):
+    def save(graph, session_id, checked=False):
         """Save the graph, and refresh the current view's download copy."""
         try:
             with version_lock:
+                if checked and not current_graph(graph, session_id):
+                    return False
                 versions[session_id] = graph["_view_version"] = uuid4().hex
                 return staged(bench.save(graph), graph, session_id)
         except OSError as exc:
@@ -461,7 +463,9 @@ def build_page(context):
         else:
             labels.pop(focused, None)
         graph = {**graph, "labels": labels}
-        path = save(graph, session_id)
+        path = save(graph, session_id, checked=True)
+        if path is False:
+            return (gr.skip(),) * 7
         return graph, draw(graph, chosen, shown, errors), describe_card(graph, focused), *draw_groups(graph, None), path
 
     rename.click(rename_node, [graph_state, focus, label, selection, nodes_shown, show_errors, owner],
@@ -481,7 +485,9 @@ def build_page(context):
         groups = {g: ms for g, ms in groups.items() if ms}
         groups[name] = members
         graph = {**graph, "groups": groups, "effects": None}
-        path = save(graph, session_id)
+        path = save(graph, session_id, checked=True)
+        if path is False:
+            return (gr.skip(),) * 7
         gr.Info(f"Grouped {len(members)} feature{'s' * (len(members) != 1)} as {name}.")
         return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, name), "", path
 
@@ -515,7 +521,9 @@ def build_page(context):
             raise gr.Error("Choose a group first.")
         groups = {g: m for g, m in graph["groups"].items() if g != name}
         graph = {**graph, "groups": groups, "effects": None}
-        path = save(graph, session_id)
+        path = save(graph, session_id, checked=True)
+        if path is False:
+            return (gr.skip(),) * 6
         return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, None), path
 
     remove_group.click(delete_group, [graph_state, group_pick, selection, nodes_shown, show_errors, owner],

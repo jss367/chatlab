@@ -23,6 +23,7 @@ LEFT = 46
 TOP = 28
 SMALL = 0.05
 EDGES_PER_NODE = 10
+MAX_GROUP_FLOWS = 1000
 
 
 def token_text(text):
@@ -454,7 +455,8 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
     parts = [f'<svg class="cg-svg cg-fit" viewBox="0 0 {width} {height}" '
              'role="img" aria-label="Grouped attribution graph">']
     strongest = max((abs(w) for w in flows.values()), default=1.0) or 1.0
-    for (a, b), weight in sorted(flows.items(), key=lambda item: abs(item[1])):
+    visible_flows = sorted(flows.items(), key=lambda item: abs(item[1]), reverse=True)[:MAX_GROUP_FLOWS]
+    for (a, b), weight in reversed(visible_flows):
         share = abs(weight) / strongest
         if share < 0.03:
             continue
