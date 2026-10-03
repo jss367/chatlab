@@ -235,16 +235,16 @@ def normalize(value):
             for side in ("positive", "negative")):
         raise ValueError("The probe's examples must be two lists of text.")
     layers = value.get("layers")
-    if not isinstance(layers, list) or not layers:
-        raise ValueError("The probe needs at least one layer.")
+    if not isinstance(layers, list) or not 1 <= len(layers) <= 256:
+        raise ValueError("The probe needs between 1 and 256 layers.")
     width = None
     clean = []
     for index, item in enumerate(layers):
         if not isinstance(item, dict) or item.get("layer") != index:
             raise ValueError("The probe's layers must run 0, 1, 2 … in order.")
         weights = item.get("weights")
-        if not isinstance(weights, list) or not weights:
-            raise ValueError(f"Layer {index} has no weights.")
+        if not isinstance(weights, list) or not 1 <= len(weights) <= 65536:
+            raise ValueError(f"Layer {index} needs between 1 and 65,536 weights.")
         width = len(weights) if width is None else width
         if len(weights) != width:
             raise ValueError("Every layer's weights must be the same width.")

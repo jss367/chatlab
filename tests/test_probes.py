@@ -156,6 +156,8 @@ class FileTests(unittest.TestCase):
         layers = probe["layers"]
         for change, message in (
             (dict(format="other"), "chatlab-probe-1"),
+            (dict(layers=[{}] * 257), "256 layers"),
+            (dict(layers=[dict(layers[0], weights=[0.0] * 65537)]), "65,536 weights"),
             (dict(negative_label="Yes"), "different labels"),
             (dict(pool="max"), "last or mean"),
             (dict(best_layer=len(layers)), "best layer"),
