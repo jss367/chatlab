@@ -320,6 +320,8 @@ class Workbench:
             self._same_model(graph, session)
             pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
             alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
+            if len(pivot) > 4096 or len(alternatives) > 4096:
+                raise ValueError("Use at most 4096 distinct pivot tokens and 4096 alternatives.")
             if not pivot:
                 raise ValueError("Name at least one pivot token.")
             if not graph["groups"]:
@@ -431,7 +433,7 @@ def load_graph(path):
             raise ValueError
         for key in ("tokens", "alternatives"):
             values = graph["explain"].get(key, [])
-            if not isinstance(values, list) or len(values) > 4096 or any(not isinstance(v, str) for v in values):
+            if not isinstance(values, list) or len(values) > 4096 or any(not isinstance(v, str) or len(v) > 4096 for v in values):
                 raise ValueError
         for key in ("kept_features", "traced_features", "active_features"):
             value = graph["stats"].get(key, 0)
@@ -573,11 +575,12 @@ def _validate_effects(effects, groups):
         if not isinstance(values, list) or len(values) > 4096 or any(type(t) is not int or not 0 <= t < 2 ** 31 for t in values):
             raise ValueError
         tokens.extend(values)
+    allowed_token_keys = {str(t) for t in tokens}
     def summary(value):
         if not isinstance(value, dict) or not isinstance(value["tokens"], dict) or len(value["tokens"]) > 8192:
             raise ValueError
         for key, number in value["tokens"].items():
-            if str(key) not in {str(t) for t in tokens}:
+            if str(key) not in allowed_token_keys:
                 raise ValueError
             number = float(number)
             if not math.isfinite(number) or not 0 <= number <= 1:

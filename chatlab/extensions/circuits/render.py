@@ -346,9 +346,13 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
         if a and b and a != b and b != prompt_bucket and b != error_bucket and a != target_bucket:
             flows[(a, b)] += edge["weight"]
     mean_layer = {name: sum(nodes[m]["layer"] for m in members) / len(members) for name, members in groups.items()}
+    incoming_flows = defaultdict(list)
+    for (a, b), weight in flows.items():
+        if weight != 0:
+            incoming_flows[b].append(a)
     depth = {}
     for name in sorted(groups, key=lambda g: mean_layer[g]):
-        parents = [depth[a] for (a, b), w in flows.items() if b == name and a in depth and w != 0]
+        parents = [depth[a] for a in incoming_flows[name] if a in depth]
         depth[name] = 1 + max(parents, default=0)
     columns = defaultdict(list)
     for name, d in depth.items():
