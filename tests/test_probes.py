@@ -96,6 +96,15 @@ class FitTests(unittest.TestCase):
         layers = [dict(layer, train_accuracy=0., heldout_accuracy=1., heldout_loss=0.) for layer in value["layers"]]
         probes.normalize(value | {"layers": layers})
 
+    def test_imported_best_layer_is_derived_from_normalized_metrics(self):
+        value = trained()
+        for accuracies, losses, expected in (([.2, .9, .3], [.1, .8, .1], 1),
+                                             ([.8, .8, .8], [.4, .2, .3], 1),
+                                             ([.8, .8, .8], [.2, .2, .2], 0)):
+            layers = [dict(layer, heldout_accuracy=accuracy, heldout_loss=loss)
+                      for layer, accuracy, loss in zip(value["layers"], accuracies, losses)]
+            self.assertEqual(probes.normalize(value | {"layers": layers, "best_layer": 2})["best_layer"], expected)
+
     def test_the_fit_is_at_the_penalized_optimum(self):
         rng = np.random.default_rng(3)
         rows = rng.normal(size=(30, 50)) * rng.uniform(0.1, 10, size=50) + rng.normal(size=50)
@@ -449,6 +458,29 @@ class PageTests(unittest.TestCase):
         self.assertEqual(whole["first"], 0)
         self.assertEqual(len(self.read(probe, GENERATE, "Hello", layer=0)[-1][1]["value"]),
                          len(reading["token_ids"]) - prompt)
+
+    def test_hidden_response_tokens_keep_context_but_leave_visible_reading(self):
+        probe = self.train()[0]
+        prompt_ids = [1]
+        generated = [2, EOS_ID, 3, 4]
+        hidden = {EOS_ID, 4}
+        def generate(*args, **kwargs):
+            yield SimpleNamespace(text="visible reply", prompt_ids=prompt_ids,
+                                  metrics=[dict(token_id=token) for token in generated])
+        projections = np.arange(10, dtype=float).reshape(2, 5) / 10
+        expected = probes.probabilities(probe, projections)[:, [0, 1, 3]]
+        for show_prompt in (False, True):
+            with mock.patch.object(self.manager, "generate", side_effect=generate), \
+                    mock.patch.object(self.manager, "hidden_token_ids", return_value=hidden), \
+                    mock.patch.object(self.manager, "project_blocks", return_value=projections) as project:
+                frames = self.read(probe, GENERATE, "Hello", show_prompt=show_prompt)
+            reading = frames[-1][0]
+            self.assertEqual(project.call_args.args[0], prompt_ids + generated)
+            self.assertEqual(reading["token_ids"], [1, 2, 3])
+            self.assertEqual(reading["first"], 0 if show_prompt else 1)
+            np.testing.assert_allclose(reading["probabilities"], expected)
+            self.assertEqual(len(frames[-1][1]["value"]), 3 if show_prompt else 2)
+            self.assertEqual(frames[-1][4], gr.skip())
 
     def test_a_passage_longer_than_the_window_is_refused_not_cut_short(self):
         probe = self.train()[0]

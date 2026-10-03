@@ -278,6 +278,7 @@ def normalize(value):
     best = value.get("best_layer")
     if type(best) is not int or not 0 <= best < len(clean):
         raise ValueError("The probe's best layer is not one of its layers.")
+    best = best_layer(clean)
     l2 = number(value.get("l2"), "L2 strength")
     if l2 <= 0:
         raise ValueError("L2 strength must be positive and finite.")

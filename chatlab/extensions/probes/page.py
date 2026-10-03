@@ -506,6 +506,7 @@ def build_page(context):
                 note = (f"This probe was trained on {trained_at} weights and this load is {loaded_at}, "
                         "so its readings are approximate." if trained_at and loaded_at and trained_at != loaded_at
                         else "")
+                visible_positions = None
                 if chosen_mode == GENERATE:
                     messages = ([{"role": "system", "content": system_text}] if system_text.strip() else [])
                     messages.append({"role": "user", "content": message})
@@ -535,15 +536,24 @@ def build_page(context):
                         return
                     prompt_ids = [int(value) for value in last.prompt_ids]
                     ids = prompt_ids + [int(metric["token_id"]) for metric in last.metrics]
+                    hidden = session.hidden_token_ids
+                    visible_positions = list(range(len(prompt_ids))) + [
+                        position for position in range(len(prompt_ids), len(ids)) if ids[position] not in hidden]
                     first = 0 if show_prompt else len(prompt_ids)
                 else:
                     # A passage longer than the window is refused by the reading
                     # itself rather than cut short: a prefix is not what was asked for.
                     ids, first = session.example_ids(message, chat_template=user_turn), 0
                 projections = session.project_layers(ids, probes.directions(probe))
+                probabilities = probes.probabilities(probe, projections)
+                if visible_positions is not None:
+                    # Project the full causal context, then remove exactly the
+                    # response positions the streaming decoder hides.
+                    ids = [ids[position] for position in visible_positions]
+                    probabilities = probabilities[:, visible_positions]
                 reading = dict(id=uuid4().hex, probe_id=probe["id"], model_id=session.model_id, load_id=session.load_id,
                                token_ids=ids, texts=[session.decode([token]) for token in ids], first=first,
-                               probabilities=probes.probabilities(probe, projections).tolist())
+                               probabilities=probabilities.tolist())
         except ProjectionCancelled:
             yield ((gr.skip(), gr.skip(), gr.skip(), "Stopped.", gr.skip())
                    if runs.live(view, turn) else (gr.skip(),) * 5)
