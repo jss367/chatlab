@@ -440,7 +440,9 @@ def unreadable_copies(path: Path | None = None) -> list[Path]:
     """
 
     target = path or library_path()
-    return sorted(target.parent.glob(f"{target.name}.unreadable-*"))
+    if not target.parent.is_dir():
+        return []
+    return sorted(p for p in target.parent.iterdir() if p.name.startswith(f"{target.name}.unreadable-"))
 
 
 def _replace(target: Path, text: str) -> bool:

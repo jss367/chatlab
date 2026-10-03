@@ -138,6 +138,16 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual({p.read_text() for p in library.unreadable_copies(self.path)},
                          {"{first broken", "{second broken"})
 
+    def test_backup_lookup_treats_the_configured_filename_literally(self):
+        self.path.parent.mkdir(parents=True)
+        target = self.path.with_name("chat[1]*?.json")
+        target.write_text("{broken")
+        with self.assertLogs(library.logger, level="WARNING"):
+            library.write(new_forks(), target)
+        copies = library.unreadable_copies(target)
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].read_text(), "{broken")
+
     def test_a_file_from_another_app_is_refused(self):
         with self.assertRaises(ValueError):
             library.parse(json.dumps({"format": "other", "branches": []}))
