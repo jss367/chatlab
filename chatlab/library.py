@@ -405,12 +405,12 @@ def _read_for_save(target: Path) -> dict | None:
     """
 
     existing = read(target)
-    if existing is None:
-        _keep_unreadable(target)
+    if existing is None and not _keep_unreadable(target):
+        raise OSError("The unreadable conversations file could not be preserved.")
     return existing
 
 
-def _keep_unreadable(target: Path) -> None:
+def _keep_unreadable(target: Path) -> bool:
     """Move a conversations file :func:`read` could not use out of the way of a save.
 
     An unreadable file reads as no conversations at all, and the save that
@@ -422,14 +422,15 @@ def _keep_unreadable(target: Path) -> None:
     """
 
     if not target.is_file():
-        return
+        return True
     kept = target.with_name(f"{target.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex}")
     try:
         os.replace(target, kept)
     except OSError as error:
         logger.warning("Could not keep the unreadable conversations file %s aside: %s", target, error)
-        return
+        return False
     logger.warning("Kept the unreadable conversations file as %s.", kept)
+    return True
 
 
 def unreadable_copies(path: Path | None = None) -> list[Path]:
@@ -483,7 +484,10 @@ def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool
 
     target = path or library_path()
     with _WRITE_LOCK:
-        existing = _read_for_save(target)
+        try:
+            existing = _read_for_save(target)
+        except OSError:
+            return None
         merged = merge(forks, existing)
         if preserve_active and existing and existing["active"] in merged["branches"]:
             merged["active"] = existing["active"]
@@ -508,7 +512,10 @@ def claim_name(forks: dict | None, prefix: str, path: Path | None = None) -> str
     forks = copy_forks(forks)
     target = path or library_path()
     with _WRITE_LOCK:
-        on_disk = _read_for_save(target)
+        try:
+            on_disk = _read_for_save(target)
+        except OSError:
+            return next_branch_name(forks, prefix)
         taken = set(on_disk["branches"]) | set(on_disk["updated"]) if on_disk else set()
         name = next_branch_name(forks, prefix, taken)
         put_branch(forks, name, [])

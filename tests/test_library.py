@@ -148,6 +148,17 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(len(copies), 1)
         self.assertEqual(copies[0].read_text(), "{broken")
 
+    def test_failed_backup_preservation_aborts_both_save_paths(self):
+        self.path.parent.mkdir(parents=True)
+        raw = "{only recovery copy"
+        self.path.write_text(raw)
+        with mock.patch.object(library.os, "replace", side_effect=OSError("filename too long")) as replace:
+            with self.assertLogs(library.logger, level="WARNING"):
+                self.assertIsNone(library.write(new_forks(), self.path))
+                self.assertEqual(library.claim_name(new_forks(), "Chat", self.path), "Chat 1")
+            self.assertEqual(replace.call_count, 2)
+        self.assertEqual(self.path.read_text(), raw)
+
     def test_a_file_from_another_app_is_refused(self):
         with self.assertRaises(ValueError):
             library.parse(json.dumps({"format": "other", "branches": []}))
