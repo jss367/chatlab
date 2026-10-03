@@ -191,19 +191,22 @@ class Workbench:
             entries = explain.get(key, [])
             if not isinstance(entries, list) or len(entries) > attribution.MAX_CHOSEN_TARGETS:
                 raise ValueError(f"Use at most {attribution.MAX_CHOSEN_TARGETS:,} explanation entries per list.")
+            if any(not isinstance(text, str) or len(text) > 32768 for text in entries):
+                raise ValueError("Explanation entries must be text of at most 32768 characters each.")
+        attribution._check_cancelled(cancelled)
         with self.models.open_session() as session:
             revision = session.model_revision
             ids = self.encoded_prompt(session, prompt)
             token_ids, contrast = None, None
             if explain["mode"] == "tokens":
-                token_ids = self.single_tokens(session, explain["tokens"], "Tokens to explain")
+                token_ids = self.single_tokens(session, explain["tokens"], "Tokens to explain", cancelled)
                 if not token_ids:
                     raise ValueError("List the tokens to explain, one per line.")
                 if len(set(token_ids)) > attribution.MAX_CHOSEN_TARGETS:
                     raise ValueError(f"Choose at most {attribution.MAX_CHOSEN_TARGETS:,} distinct target tokens.")
             elif explain["mode"] == "contrast":
-                positive = self.single_tokens(session, explain["tokens"], "Pivot tokens")
-                negative = self.single_tokens(session, explain["others"], "Other tokens")
+                positive = self.single_tokens(session, explain["tokens"], "Pivot tokens", cancelled)
+                negative = self.single_tokens(session, explain["others"], "Other tokens", cancelled)
                 if not positive or not negative:
                     raise ValueError("A contrast needs tokens on both sides.")
                 if len(set(positive) | set(negative)) > attribution.MAX_CHOSEN_TARGETS:
@@ -618,7 +621,8 @@ def _validate_effects(effects, groups):
     def summary(value):
         if not isinstance(value, dict) or not isinstance(value["tokens"], dict) or len(value["tokens"]) > 8192:
             raise ValueError
-        if {str(key) for key in value["tokens"]} != allowed_token_keys:
+        if (len({str(key) for key in value["tokens"]}) != len(value["tokens"])
+                or {str(key) for key in value["tokens"]} != allowed_token_keys):
             raise ValueError
         for key, number in value["tokens"].items():
             if str(key) not in allowed_token_keys:
@@ -627,6 +631,8 @@ def _validate_effects(effects, groups):
             if not math.isfinite(number) or not 0 <= number <= 1:
                 raise ValueError
             value["tokens"][key] = number
+        if math.fsum(value["tokens"].values()) > 1 + 1e-6:
+            raise ValueError
         value["pivot"] = float(value["pivot"])
         if not math.isfinite(value["pivot"]) or not 0 <= value["pivot"] <= 1:
             raise ValueError

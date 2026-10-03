@@ -496,7 +496,12 @@ def build_page(context):
         members = list(dict.fromkeys(i for i in chosen if i in feature_ids))
         if not members:
             raise gr.Error("Select features in the graph first: click one, shift-click more.")
-        name = (name or "").strip()[:60] or f"group {len(graph['groups']) + 1}"
+        name = (name or "").strip()[:60]
+        if not name:
+            suffix = 1
+            while f"group {suffix}" in graph["groups"]:
+                suffix += 1
+            name = f"group {suffix}"
         members = list(dict.fromkeys([*graph["groups"].get(name, []), *members]))
         groups = {g: [m for m in ms if m not in members] for g, ms in graph["groups"].items()}
         groups = {g: ms for g, ms in groups.items() if ms}

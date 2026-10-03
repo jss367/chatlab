@@ -27,6 +27,7 @@ MAX_GROUP_FLOWS = 1000
 MAX_GROUP_CHIPS = 64
 MAX_CHIP_LABEL = 160
 MAX_DISPLAY_TOKENS = 64
+MAX_DISPLAY_TARGETS = 64
 
 
 def token_text(text):
@@ -73,7 +74,9 @@ def visible(graph, nodes_shown, show_errors, keep=()):
     if show_errors:
         errors = sorted((n for n in nodes if n["kind"] == "error"), key=lambda n: -n["influence"])
         chosen |= {n["id"] for n in errors[: max(4, nodes_shown // 3)]}
-    chosen |= {n["id"] for n in nodes if n["kind"] == "target"}
+    targets = [n for n in nodes if n["kind"] == "target"]
+    chosen -= {n["id"] for n in targets}
+    chosen |= {n["id"] for n in targets[:MAX_DISPLAY_TARGETS]}
     present = {n["id"] for n in nodes}
     chosen &= present
     embeddings = {node["id"] for node in nodes if node["kind"] == "embedding"}
@@ -170,7 +173,7 @@ def graph_view(graph, *, nodes_shown=40, show_errors=False, selected=(), labels=
             classes.append("sel")
         if node["id"] in grouped:
             classes.append("grouped")
-        title = _title(node, label, grouped.get(node["id"]), tokens)
+        title = _title(node, _short(label, 160) if kind == "target" else label, grouped.get(node["id"]), tokens)
         attrs = f'class="{" ".join(classes)}" data-node="{_esc(node["id"])}"'
         if kind == "feature":
             r = 4 + 6 * math.sqrt(max(node["influence"], 0) / top_influence)
@@ -201,6 +204,9 @@ def graph_view(graph, *, nodes_shown=40, show_errors=False, selected=(), labels=
             f'traced and {stats.get("active_features", 0):,} active'
             + (f'; the {hidden} least influential are hidden' if hidden > 0 else "")
             + f'. Transcoder error carries {100 * stats.get("error_share", 0):.0f}% of the influence.')
+    total_targets = sum(n["kind"] == "target" for n in graph["nodes"])
+    if total_targets > MAX_DISPLAY_TARGETS:
+        note += f" Showing {MAX_DISPLAY_TARGETS} of {total_targets:,} targets."
     legend = (
         '<div class="cg-legend">'
         '<span><i class="dot promotes"></i>promotes the target</span>'

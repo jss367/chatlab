@@ -598,6 +598,17 @@ class RenderTests(unittest.TestCase):
         if any(n["kind"] == "error" for n in self.graph["nodes"]):
             self.assertIn('class="cg-node error', with_errors)
 
+    def test_target_rendering_is_bounded_without_dropping_saved_targets(self):
+        graph = dict(self.graph)
+        target = next(n for n in graph["nodes"] if n["kind"] == "target")
+        targets = [dict(target, id=f"target-{i}", text="<&" * 2048) for i in range(4096)]
+        graph["nodes"] = [n for n in graph["nodes"] if n["kind"] != "target"] + targets
+        view = render.graph_view(graph, selected=[n["id"] for n in targets])
+        self.assertEqual(view.count('cg-node target'), 64)
+        self.assertIn('Showing 64 of 4,096 targets.', view)
+        self.assertLess(len(view), 250000)
+        self.assertEqual(sum(n["kind"] == "target" for n in graph["nodes"]), 4096)
+
     def test_selected_and_named_features_are_drawn_so(self):
         feature = next(n for n in self.graph["nodes"] if n["kind"] == "feature")
         page = render.graph_view(self.graph, nodes_shown=1, selected=[feature["id"]],
@@ -820,8 +831,33 @@ class WorkbenchTests(unittest.TestCase):
                 self.assertEqual(first["groups"]["named"], members[:1])
                 repeated = group(second, members[:1], "named", 40, False, "view")[0]
                 self.assertEqual(repeated["groups"]["named"], members)
+                # A gap in automatic names must not merge into another group.
+                graph = small_graph()
+                graph["groups"] = {"group 2": members[:1]}
+                fresh = group(graph, members[1:], "", 40, False, "fresh")[0]
+                self.assertEqual(fresh["groups"], {"group 2": members[:1], "group 1": members[1:]})
             finally:
                 demo.close()
+
+    def test_explanation_entry_bounds_precede_session_and_honor_cancellation(self):
+        opened = mock.Mock(side_effect=AssertionError("model session acquired"))
+        bench = workbench.Workbench(SimpleNamespace(open_session=opened), tempfile.gettempdir())
+        for key in ("tokens", "others"):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "32768"):
+                bench.trace({}, {"mode": "contrast", "tokens": ["1"], "others": ["2"], key: ["x" * 32769]},
+                            attribution.Settings(), lambda *args: None, lambda: False)
+        opened.assert_not_called()
+        stopped = [False]
+        def encode(text):
+            stopped[0] = True
+            return [1]
+        bench.models = SimpleNamespace(open_session=lambda: contextlib.nullcontext(
+            SimpleNamespace(model_revision=None, encode=encode)))
+        with mock.patch.object(bench, "encoded_prompt", return_value=IDS), \
+                mock.patch.object(bench, "_model", side_effect=AssertionError("model loaded")):
+            with self.assertRaises(attribution.Cancelled):
+                bench.trace({}, {"mode": "tokens", "tokens": ["1", "2"]}, attribution.Settings(),
+                            lambda *args: None, lambda: stopped[0])
 
     def test_invalid_target_and_intervention_tokens_fail_before_model_loading(self):
         session = SimpleNamespace(model_revision=None, encode=lambda text: [1, 2] if text == "multi" else [int(text)])
@@ -1068,6 +1104,23 @@ class WorkbenchTests(unittest.TestCase):
                 path.write_text(json.dumps(graph | change))
                 with self.subTest(change=change), self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
+
+    def test_imported_token_probability_sets_are_consistent_distributions(self):
+        for where in ("baseline", "ablate", "boost"):
+            def summary():
+                return dict(tokens={"1": .2, "2": .1}, pivot=.2)
+            effects = dict(prefixes=1, boost=2., every_position=False, pivot=[1], alternatives=[2],
+                           baseline=summary(), groups={"g": dict(active_prefixes=1,
+                                                                 ablate=summary(), boost=summary())})
+            value = effects["baseline"] if where == "baseline" else effects["groups"]["g"][where]
+            value.update(tokens={"1": .6, "2": .6}, pivot=.6)
+            with self.subTest(where=where), self.assertRaises(ValueError):
+                workbench._validate_effects(effects, {"g": []})
+            value.update(tokens={"1": .5, "2": .5000005}, pivot=.5)
+            workbench._validate_effects(effects, {"g": []})
+            value.update(tokens={1: .3, "1": .3, "2": .1}, pivot=.6)
+            with self.subTest(aliased=where), self.assertRaises(ValueError):
+                workbench._validate_effects(effects, {"g": []})
 
     def test_imported_pivot_totals_must_match_the_token_probabilities(self):
         for where in ("baseline", "ablate", "boost"):
