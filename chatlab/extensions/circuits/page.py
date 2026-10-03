@@ -121,7 +121,32 @@ def build_page(context):
     bench = Workbench(context.models, context.data_dir)
     staging, staging_lock = {}, threading.Lock()
     versions, focused_nodes, version_lock = {}, {}, threading.RLock()
-    trace_requests = {}
+    trace_requests, open_requests, action_sequences = {}, {}, {}
+
+    def reserve_action(session_id, sequence):
+        previous = action_sequences.get(session_id, 0)
+        sequence = previous + 1 if sequence is None else sequence
+        if type(sequence) is not int or not previous < sequence < 2**53:
+            return False
+        action_sequences[session_id] = sequence
+        return True
+
+    def begin_edit(graph, session_id, sequence):
+        return json.dumps({"graph_id": (graph or {}).get("id"), "sequence": sequence})
+
+    def edit_current(graph, session_id, request):
+        if request is None:
+            return True
+        if not isinstance(request, str) or len(request) > 256:
+            return False
+        try:
+            payload = json.loads(request)
+            with version_lock:
+                return (type(payload["sequence"]) is int
+                        and payload["sequence"] == action_sequences.get(session_id, 0)
+                        and payload["graph_id"] == (graph or {}).get("id"))
+        except (KeyError, TypeError, ValueError):
+            return False
 
     def version(session_id):
         with version_lock:
@@ -140,6 +165,8 @@ def build_page(context):
             versions.pop(session_id, None)
             focused_nodes.pop(session_id, None)
             trace_requests.pop(session_id, None)
+            open_requests.pop(session_id, None)
+            action_sequences.pop(session_id, None)
         with staging_lock:
             directory = staging.pop(session_id, None)
         if directory is not None:
@@ -149,6 +176,12 @@ def build_page(context):
         owner = gr.State(value=lambda: uuid4().hex, delete_callback=forget)
         graph_state = gr.State(None)
         trace_request = gr.Textbox(visible=False)
+        open_request = gr.Textbox(visible=False)
+        rename_request = gr.Textbox(visible=False)
+        group_request = gr.Textbox(visible=False)
+        delete_request = gr.Textbox(visible=False)
+        action_sequence = gr.Number(value=0, precision=0, visible=False)
+        next_action_sequence = "(window.chatlabCircuitsSequence = (window.chatlabCircuitsSequence || 0) + 1)"
         selection = gr.State([])
         focus = gr.State(None)
         gr.Markdown("# Circuit tracing\nWhich transcoder features carried the model to a token. Each MLP is "
@@ -297,11 +330,11 @@ def build_page(context):
                 partial.unlink(missing_ok=True)
             return str(copy)
 
-    def save(graph, session_id, checked=False):
+    def save(graph, session_id, checked=False, action=None):
         """Save the graph, and refresh the current view's download copy."""
         try:
             with version_lock:
-                if checked and not current_graph(graph, session_id):
+                if not edit_current(graph, session_id, action) or (checked and not current_graph(graph, session_id)):
                     return False
                 versions[session_id] = graph["_view_version"] = uuid4().hex
                 trace_requests.pop(session_id, None)
@@ -358,9 +391,12 @@ def build_page(context):
 
     # Tracing -----------------------------------------------------------------
 
-    def begin_trace(session_id):
+    def begin_trace(session_id, sequence=None):
         with version_lock:
             request = uuid4().hex
+            if not reserve_action(session_id, sequence):
+                return request
+            open_requests.pop(session_id, None)
             trace_requests[session_id] = (request, version(session_id))
             bench.cancel(session_id)
             return request
@@ -420,7 +456,8 @@ def build_page(context):
         yield frame if (version(session_id) == stamp and
                         (request is None or trace_requests.get(session_id, (None,))[0] == request)) else (gr.skip(), gr.skip(), *skip)
 
-    trace_event = trace.click(begin_trace, owner, trace_request, queue=False).success(run_trace, [owner, system, user, prefix, raw, explain, explain_tokens, explain_others,
+    trace_event = trace.click(begin_trace, [owner, action_sequence], trace_request, queue=False,
+                              js="(owner, _) => [owner, " + next_action_sequence + "]").success(run_trace, [owner, system, user, prefix, raw, explain, explain_tokens, explain_others,
                             max_nodes, node_threshold, edge_threshold, batch, nodes_shown, show_errors, trace_request],
                 [progress, status, *graph_outputs], concurrency_id="circuits", show_progress="hidden")
 
@@ -468,7 +505,9 @@ def build_page(context):
     pick.input(picked, [graph_state, pick, owner], [selection, focus, card, selected_note, label],
                concurrency_id="circuits-read", trigger_mode="always_last", show_progress="hidden")
 
-    def rename_node(graph, focused, text, chosen, shown, errors, session_id):
+    def rename_node(graph, focused, text, chosen, shown, errors, session_id, request=None):
+        if not edit_current(graph, session_id, request):
+            return (gr.skip(),) * 7
         if not current_graph(graph, session_id):
             return (gr.skip(),) * 7
         node = node_of(graph, focused)
@@ -480,16 +519,23 @@ def build_page(context):
         else:
             labels.pop(focused, None)
         graph = {**graph, "labels": labels}
-        path = save(graph, session_id, checked=True)
+        path = save(graph, session_id, checked=True, action=request)
         if path is False:
             return (gr.skip(),) * 7
         frame = (graph, draw(graph, chosen, shown, errors), describe_card(graph, focused), *draw_groups(graph, None), path)
         return frame if current_graph(graph, session_id) else (gr.skip(),) * 7
 
-    rename.click(rename_node, [graph_state, focus, label, selection, nodes_shown, show_errors, owner],
-                 [graph_state, graph_view, card, groups_view, group_pick, group_card, download], concurrency_id="circuits-read")
+    def wire_edit(button, callback, inputs, outputs, ticket):
+        event = button.click(begin_edit, [graph_state, owner, action_sequence], ticket, queue=False,
+                             js="(graph, owner, _) => [graph, owner, (window.chatlabCircuitsSequence || 0)]")
+        event.success(callback, [*inputs, ticket], outputs, concurrency_id="circuits-read")
 
-    def group_selected(graph, chosen, name, shown, errors, session_id):
+    wire_edit(rename, rename_node, [graph_state, focus, label, selection, nodes_shown, show_errors, owner],
+              [graph_state, graph_view, card, groups_view, group_pick, group_card, download], rename_request)
+
+    def group_selected(graph, chosen, name, shown, errors, session_id, request=None):
+        if not edit_current(graph, session_id, request):
+            return (gr.skip(),) * 7
         if graph and not current_graph(graph, session_id):
             return (gr.skip(),) * 7
         if not graph:
@@ -509,16 +555,15 @@ def build_page(context):
         groups = {g: ms for g, ms in groups.items() if ms}
         groups[name] = members
         graph = {**graph, "groups": groups, "effects": None}
-        path = save(graph, session_id, checked=True)
+        path = save(graph, session_id, checked=True, action=request)
         if path is False:
             return (gr.skip(),) * 7
         gr.Info(f"Grouped {len(members)} feature{'s' * (len(members) != 1)} as {name}.")
         frame = (graph, draw(graph, chosen, shown, errors), *draw_groups(graph, name), "", path)
         return frame if current_graph(graph, session_id) else (gr.skip(),) * 7
 
-    make_group.click(group_selected, [graph_state, selection, group_name, nodes_shown, show_errors, owner],
-                     [graph_state, graph_view, groups_view, group_pick, group_card, group_name, download],
-                     concurrency_id="circuits-read")
+    wire_edit(make_group, group_selected, [graph_state, selection, group_name, nodes_shown, show_errors, owner],
+              [graph_state, graph_view, groups_view, group_pick, group_card, group_name, download], group_request)
 
     def choose_group(graph, name, session_id):
         fresh, stamp = checked_version(graph, session_id)
@@ -552,21 +597,23 @@ def build_page(context):
 
     group_pick_bridge.input(group_clicked, [graph_state, group_pick_bridge, owner], [group_pick, group_card], queue=False)
 
-    def delete_group(graph, name, chosen, shown, errors, session_id):
+    def delete_group(graph, name, chosen, shown, errors, session_id, request=None):
+        if not edit_current(graph, session_id, request):
+            return (gr.skip(),) * 6
         if graph and not current_graph(graph, session_id):
             return (gr.skip(),) * 6
         if not graph or name not in graph["groups"]:
             raise gr.Error("Choose a group first.")
         groups = {g: m for g, m in graph["groups"].items() if g != name}
         graph = {**graph, "groups": groups, "effects": None}
-        path = save(graph, session_id, checked=True)
+        path = save(graph, session_id, checked=True, action=request)
         if path is False:
             return (gr.skip(),) * 6
         frame = (graph, draw(graph, chosen, shown, errors), *draw_groups(graph, None), path)
         return frame if current_graph(graph, session_id) else (gr.skip(),) * 6
 
-    remove_group.click(delete_group, [graph_state, group_pick, selection, nodes_shown, show_errors, owner],
-                       [graph_state, graph_view, groups_view, group_pick, group_card, download], concurrency_id="circuits-read")
+    wire_edit(remove_group, delete_group, [graph_state, group_pick, selection, nodes_shown, show_errors, owner],
+              [graph_state, graph_view, groups_view, group_pick, group_card, download], delete_request)
 
     # Measuring -----------------------------------------------------------------
 
@@ -645,27 +692,56 @@ def build_page(context):
               [run_progress, graph_state, groups_view, group_pick, group_card, download],
               concurrency_id="circuits", show_progress="hidden")
 
-    def stop_now(session_id):
+    def stop_now(session_id, sequence=None):
         with version_lock:
+            if not reserve_action(session_id, sequence):
+                return
             trace_requests.pop(session_id, None)
-        bench.cancel(session_id)
+            open_requests.pop(session_id, None)
+            bench.cancel(session_id)
 
     queued_jobs = [load_event, trace_event, ablate_event, intervention_event]
-    stop.click(stop_now, owner, None, queue=False, cancels=queued_jobs)
-    stop_run.click(stop_now, owner, None, queue=False, cancels=queued_jobs)
+    stop.click(stop_now, [owner, action_sequence], None, queue=False, cancels=queued_jobs,
+               js="(owner, _) => [owner, " + next_action_sequence + "]")
+    stop_run.click(stop_now, [owner, action_sequence], None, queue=False, cancels=queued_jobs,
+                   js="(owner, _) => [owner, " + next_action_sequence + "]")
 
     # Opening saved graphs --------------------------------------------------------
 
-    def open_path(path, shown, errors, session_id):
+    def begin_open(path, session_id, sequence=None):
+        request = uuid4().hex
         if not path:
-            return (gr.skip(),) * len(graph_outputs)
+            return request
+        with version_lock:
+            if not reserve_action(session_id, sequence):
+                return request
+            trace_requests.pop(session_id, None)
+            bench.cancel(session_id)
+            open_requests[session_id] = (request, version(session_id))
+        return request
+
+    def open_current(session_id, request):
+        captured = open_requests.get(session_id)
+        return captured is not None and captured == (request, version(session_id))
+
+    def open_path(path, shown, errors, session_id, request=None):
+        skip = (gr.skip(),) * len(graph_outputs)
+        if not path:
+            return skip
+        request = begin_open(path, session_id) if request is None else request
+        with version_lock:
+            if not open_current(session_id, request):
+                return skip
         try:
             graph = load_graph(path)
         except (OSError, ValueError) as exc:
             raise gr.Error(str(exc)) from exc
         try:
             with version_lock:
+                if not open_current(session_id, request):
+                    return skip
                 versions[session_id] = graph["_view_version"] = uuid4().hex
+                open_requests.pop(session_id, None)
                 trace_requests.pop(session_id, None)
                 bench.cancel(session_id)
                 offered = staged(path, graph, session_id)
@@ -673,5 +749,8 @@ def build_page(context):
             offered = None
         return show_graph(graph, offered, shown, errors)
 
-    saved.input(open_path, [saved, nodes_shown, show_errors, owner], graph_outputs, concurrency_id="circuits-read")
-    upload.upload(open_path, [upload, nodes_shown, show_errors, owner], graph_outputs, concurrency_id="circuits-read")
+    for control, submit in ((saved, saved.input), (upload, upload.upload)):
+        event = submit(begin_open, [control, owner, action_sequence], open_request, queue=False,
+                       js="(path, owner, _) => [path, owner, " + next_action_sequence + "]")
+        event.success(open_path, [control, nodes_shown, show_errors, owner, open_request], graph_outputs,
+                      concurrency_id="circuits-read", trigger_mode="always_last")
