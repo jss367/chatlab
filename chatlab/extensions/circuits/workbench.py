@@ -593,6 +593,7 @@ def _validate_effects(effects, groups):
             raise ValueError
         tokens.extend(values)
     allowed_token_keys = {str(t) for t in tokens}
+    pivot_keys = {str(t) for t in effects["pivot"]}
     def summary(value):
         if not isinstance(value, dict) or not isinstance(value["tokens"], dict) or len(value["tokens"]) > 8192:
             raise ValueError
@@ -607,6 +608,9 @@ def _validate_effects(effects, groups):
             value["tokens"][key] = number
         value["pivot"] = float(value["pivot"])
         if not math.isfinite(value["pivot"]) or not 0 <= value["pivot"] <= 1:
+            raise ValueError
+        total = math.fsum(number for key, number in value["tokens"].items() if str(key) in pivot_keys)
+        if not math.isclose(value["pivot"], total, rel_tol=1e-6, abs_tol=0.):
             raise ValueError
     summary(effects["baseline"])
     if not isinstance(effects["groups"], dict) or any(name not in groups for name in effects["groups"]):
@@ -626,7 +630,7 @@ def measured_alternatives(blocks, held, prefixes, pivot, cancelled):
     for ids in prefixes:
         if cancelled and cancelled():
             raise attribution.Cancelled()
-        values = interventions.run(blocks, held, ids)["log_probs"].exp()
+        values = interventions.run(blocks, held, ids)["log_probs"].cpu().double().exp()
         probabilities = values if probabilities is None else probabilities + values
     return automatic_alternatives(probabilities / len(prefixes), pivot)
 
