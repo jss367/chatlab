@@ -480,6 +480,24 @@ class InterventionTests(unittest.TestCase):
                                                 pivot=[3], alternatives=result["alternatives"])
         self.assertEqual(result, explicit)
 
+    def test_stopped_intervention_interrupts_layers_and_restores_hooks(self):
+        stopped = False
+        def stop(*_args):
+            nonlocal stopped
+            stopped = True
+        handle = self.blocks.layers[0].register_forward_hook(stop)
+        try:
+            later = self.blocks.layers[1]
+            with mock.patch.object(later, "forward", wraps=later.forward) as forward:
+                with self.assertRaises(attribution.Cancelled):
+                    interventions.run(self.blocks, self.held, IDS, cancelled=lambda: stopped)
+                forward.assert_not_called()
+        finally:
+            handle.remove()
+        self.assertFalse(any(m._forward_hooks or m._forward_pre_hooks for m in self.model.modules()))
+        stopped = False
+        self.assertIn("log_probs", interventions.run(self.blocks, self.held, IDS, cancelled=lambda: stopped))
+
     def test_scaling_by_one_changes_nothing(self):
         k = 0
         layer, feature = int(self.recording.feature_layer[k]), int(self.recording.feature_index[k])
@@ -932,6 +950,28 @@ class WorkbenchTests(unittest.TestCase):
                 workbench._validate_effects(effects, {"g": []})
             value["pivot"] = .2 * (1 + 1e-8)
             workbench._validate_effects(effects, {"g": []})
+
+    def test_focused_ablation_stops_before_its_second_pass(self):
+        stopped = False
+        graph = small_graph()
+        node = next(n for n in graph["nodes"] if n["kind"] == "feature")
+        session = SimpleNamespace(model_revision=None)
+        bench = workbench.Workbench(SimpleNamespace(open_session=lambda: contextlib.nullcontext(session)),
+                                    tempfile.gettempdir())
+        blocks = architecture.blocks(tiny_model("gemma3"))
+        held = tiny_transcoders(blocks)
+        def baseline(*_args, **_kwargs):
+            nonlocal stopped
+            stopped = True
+            return {"log_probs": torch.zeros(64)}
+        with mock.patch.object(bench, "_same_model"), \
+                mock.patch.object(bench, "_same_transcoders"), \
+                mock.patch.object(bench, "_model", return_value=contextlib.nullcontext(None)), \
+                mock.patch.object(bench, "_held", return_value=(blocks, held, None)), \
+                mock.patch.object(interventions, "run", side_effect=baseline) as passes:
+            with self.assertRaises(attribution.Cancelled):
+                bench.ablate(graph, node, lambda *_args: None, lambda: stopped)
+            self.assertEqual(passes.call_count, 1)
 
     def test_imported_effects_require_every_declared_token(self):
         for where in ("baseline", "ablate", "boost"):

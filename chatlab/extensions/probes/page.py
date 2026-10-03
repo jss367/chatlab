@@ -401,6 +401,8 @@ def build_page(context):
             if not looking_for or not against or looking_for == against:
                 raise ValueError("Give the two sides different labels.")
             for side, examples in ((looking_for, positive), (against, negative)):
+                if any(len(example) > 32768 for example in examples):
+                    raise ValueError("Each training example must be at most 32768 characters.")
                 if not 2 <= len(examples) <= probes.MAX_EXAMPLES:
                     raise ValueError(f"Give 2 to {probes.MAX_EXAMPLES} examples of {side}, one per line; "
                                      f"there are {len(examples)}.")

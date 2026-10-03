@@ -279,8 +279,10 @@ class Workbench:
                 ids = graph["ids"]
                 offset = len(ids) - 1 - node["position"]
                 targets = [n for n in graph["nodes"] if n["kind"] == "target"]
-                before = interventions.run(blocks, held, ids)["log_probs"]
-                after = interventions.run(blocks, held, ids, [(node["layer"], node["feature"], 0.0, [offset])])["log_probs"]
+                before = interventions.run(blocks, held, ids, cancelled=cancelled)["log_probs"]
+                attribution._check_cancelled(cancelled)
+                after = interventions.run(blocks, held, ids, [(node["layer"], node["feature"], 0.0, [offset])],
+                                          cancelled=cancelled)["log_probs"]
                 return {"deltas": [_target_log_odds(t, after) - _target_log_odds(t, before) for t in targets]}
 
     @staticmethod

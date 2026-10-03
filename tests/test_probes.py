@@ -372,6 +372,13 @@ class PageTests(unittest.TestCase):
                 with self.subTest(changes=changes), self.assertRaisesRegex(gr.Error, "200 characters.*60"):
                     self.train(**changes)
 
+    def test_overlong_examples_are_refused_before_any_model_work(self):
+        with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("must not read examples")):
+            for field in ("wanted", "unwanted"):
+                examples = ["valid"] * 63 + ["x" * 32769]
+                with self.subTest(field=field), self.assertRaisesRegex(gr.Error, "at most 32768 characters"):
+                    self.train(**{field: "\n".join(examples)})
+
     def test_invalid_l2_is_refused_before_model_work(self):
         with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("must not read examples")):
             for strength in (0, -1, float("nan"), float("inf")):
