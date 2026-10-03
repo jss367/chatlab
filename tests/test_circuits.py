@@ -502,6 +502,19 @@ class RenderTests(unittest.TestCase):
         self.assertIn("×0.50", card)
         self.assertIn("cg-empty", render.group_view(self.graph, {}))
 
+    def test_visible_prompt_sources_use_node_kind_instead_of_id_prefix(self):
+        graph = dict(self.graph, nodes=[dict(n) for n in self.graph["nodes"]], edges=[dict(e) for e in self.graph["edges"]])
+        mapping = {n["id"]: "imported-" + n["id"] for n in graph["nodes"] if n["kind"] == "embedding"}
+        for node in graph["nodes"]:
+            node["id"] = mapping.get(node["id"], node["id"])
+        for edge in graph["edges"]:
+            for key in ("source", "target"):
+                edge[key] = mapping.get(edge[key], edge[key])
+        before = render.visible(self.graph, 40, False)
+        self.assertGreater(sum(n["kind"] == "embedding" for n in before), 0)
+        after = render.visible(graph, 40, False)
+        self.assertEqual(sum(n["kind"] == "embedding" for n in before), sum(n["kind"] == "embedding" for n in after))
+
     def test_group_names_cannot_collide_with_synthetic_flow_buckets(self):
         members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"]
         normal = render.group_view(self.graph, {"group": members})
@@ -698,7 +711,8 @@ class WorkbenchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "upload.json"
             for change in ({"stats": "bad"}, {"stats": {"active_features": "bad"}},
-                           {"explain": "bad"}, {"explain": {"tokens": [1]}}, {"prompt": "bad"},
+                           {"explain": "bad"}, {"explain": {"tokens": [1]}}, {"prompt": "bad"}, {"prompt": {}},
+                           {"tokens": ["&" * 4097] * len(graph["tokens"])},
                            {"nodes": [{**feature, "promotes": [1]}]}, {"nodes": [{**feature, "suppresses": "bad"}]},
                            {"nodes": [{**graph["nodes"][-1], "text": "&" * 4097}]}):
                 path.write_text(json.dumps(graph | change))

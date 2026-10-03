@@ -425,9 +425,9 @@ def load_graph(path):
             if not isinstance(graph[key], dict):
                 raise ValueError
         for key in ("system", "user", "prefix"):
-            if key in graph["prompt"] and not isinstance(graph["prompt"][key], str):
+            if not isinstance(graph["prompt"].get(key), str):
                 raise ValueError
-        if "raw" in graph["prompt"] and not isinstance(graph["prompt"]["raw"], bool):
+        if not isinstance(graph["prompt"].get("raw"), bool):
             raise ValueError
         for key in ("tokens", "alternatives"):
             values = graph["explain"].get(key, [])
@@ -446,7 +446,7 @@ def load_graph(path):
             raise ValueError
         if not isinstance(tokens, list) or not 2 <= len(tokens) <= attribution.MAX_PREFIX:
             raise ValueError
-        if not all(isinstance(token, str) for token in tokens):
+        if not all(isinstance(token, str) and len(token) <= 4096 for token in tokens):
             raise ValueError
         token_ids = graph["ids"]
         if (not isinstance(token_ids, list) or len(token_ids) != len(tokens)
