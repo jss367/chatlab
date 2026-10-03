@@ -329,18 +329,20 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
     if not groups:
         return ('<div class="cg-root viz-root cg-empty">Select features in the graph (shift-click for several), '
                 'name them, and press <b>Group selected</b>. Groups appear here joined by their summed edges.</div>')
+    prompt_bucket, error_bucket, target_bucket = object(), object(), object()
+    bucket_labels = {prompt_bucket: "prompt", error_bucket: "error", target_bucket: "target"}
     member_of = {m: name for name, members in groups.items() for m in members}
 
     def bucket(node_id):
         if node_id in member_of:
             return member_of[node_id]
         kind = nodes[node_id]["kind"] if node_id in nodes else ""
-        return {"embedding": "@prompt", "error": "@error", "target": "@target"}.get(kind)
+        return {"embedding": prompt_bucket, "error": error_bucket, "target": target_bucket}.get(kind)
 
     flows = defaultdict(float)
     for edge in graph["edges"]:
         a, b = bucket(edge["source"]), bucket(edge["target"])
-        if a and b and a != b and b != "@prompt" and b != "@error" and a != "@target":
+        if a and b and a != b and b != prompt_bucket and b != error_bucket and a != target_bucket:
             flows[(a, b)] += edge["weight"]
     mean_layer = {name: sum(nodes[m]["layer"] for m in members) / len(members) for name, members in groups.items()}
     depth = {}
@@ -361,15 +363,15 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
         for i, name in enumerate(names):
             place[name] = (col_x[d], top + i * (box_h + gap))
     tokens_x = max(col_x.values()) + box_w + 60
-    place["@prompt"] = (40, height * 0.32)
-    place["@error"] = (40, height * 0.72)
+    place[prompt_bucket] = (40, height * 0.32)
+    place[error_bucket] = (40, height * 0.72)
     width = tokens_x + 330
 
     def anchor(name, side):
-        if name in ("@prompt", "@error"):
+        if name in (prompt_bucket, error_bucket):
             x, y = place[name]
             return x + 12, y
-        if name == "@target":
+        if name == target_bucket:
             return tokens_x - 10, 70
         x, y = place[name]
         return (x if side == "in" else x + box_w), y + box_h / 2
@@ -387,10 +389,10 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
         sign = "pos" if weight > 0 else "neg"
         parts.append(f'<path class="cg-edge {sign}" d="M{x1},{y1} C{mid},{y1} {mid},{y2} {x2},{y2}" '
                      f'style="stroke-width:{0.8 + 5 * share:.2f};opacity:{0.3 + 0.55 * share:.2f}">'
-                     f'<title>{_esc(a.lstrip("@"))} → {_esc(b.lstrip("@"))}: {weight:+.3g}</title></path>')
-    for name, label in (("@prompt", "prompt tokens"), ("@error", "unexplained\n(transcoder error)")):
+                     f'<title>{_esc(bucket_labels.get(a, a))} → {_esc(bucket_labels.get(b, b))}: {weight:+.3g}</title></path>')
+    for name, label in ((prompt_bucket, "prompt tokens"), (error_bucket, "unexplained\n(transcoder error)")):
         x, y = place[name]
-        cls = "sq" if name == "@prompt" else "dia"
+        cls = "sq" if name == prompt_bucket else "dia"
         mark = (f'<rect class="mark" x="{x - 9}" y="{y - 9}" width="18" height="18" rx="4"/>' if cls == "sq"
                 else f'<path class="mark" d="M{x},{y - 10} L{x + 10},{y} L{x},{y + 10} L{x - 10},{y} Z"/>')
         lines = "".join(f'<tspan x="{x}" dy="{14 if i else 0}">{_esc(t)}</tspan>'
