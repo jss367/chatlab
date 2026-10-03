@@ -410,8 +410,16 @@ def build_page(context):
                             max_nodes, node_threshold, edge_threshold, batch, nodes_shown, show_errors, trace_request],
                 [progress, status, *graph_outputs], concurrency_id="circuits", show_progress="hidden")
 
+    def redraw(graph, chosen, shown, errors, session_id):
+        fresh, stamp = checked_version(graph, session_id)
+        if not fresh:
+            return gr.skip()
+        frame = draw(graph, chosen, shown, errors)
+        with version_lock:
+            return frame if version(session_id) == stamp and current_graph(graph, session_id) else gr.skip()
+
     for control in (nodes_shown, show_errors):
-        control.change(draw, [graph_state, selection, nodes_shown, show_errors], graph_view, queue=False)
+        control.change(redraw, [graph_state, selection, nodes_shown, show_errors, owner], graph_view, queue=False)
 
     # Selecting, naming and grouping ---------------------------------------------
 
@@ -522,9 +530,10 @@ def build_page(context):
     # Measuring -----------------------------------------------------------------
 
     def ablate_focused(session_id, graph, focused):
-        fresh, stamp = checked_version(graph, session_id)
-        if not fresh:
-            return gr.skip()
+        with version_lock:
+            fresh, stamp = checked_version(graph, session_id)
+            if not fresh or focused_nodes.get(session_id, focused) != focused:
+                return gr.skip()
         node = node_of(graph, focused)
         if node is None or node["kind"] != "feature":
             raise gr.Error("Click a feature in the graph first.")
