@@ -3,10 +3,12 @@ import copy
 import json
 import logging
 import re
+import tempfile
 import threading
 from collections import Counter
 from pathlib import Path
 import time
+from uuid import uuid4
 
 import gradio as gr
 
@@ -282,14 +284,41 @@ def build_page(context):
     outputs = [game_state, chat, check_panel, picker, note, token_state, strip, raw, download]
     inspector = [detail, alternatives]
 
+    staging = {"directory": None, "owner": None}
+
     def save(game):
+        """Save the game and return a copy of it where the interface may serve it.
+
+        Gradio only serves returned files from its temporary directories and
+        the working directory, and the extension's data directory is neither
+        when the app is started from a checkout. Gradio copies a returned
+        file into its own cache before serving it, so the staged copy is only
+        needed until then: the directory keeps the latest copy alone, and each
+        save replaces it whole and retires the ones before it, whichever game
+        or view they came from.
+        """
         text = saved(game)
         if len(text.encode("utf-8")) > MAX_FILE_BYTES:
             raise OSError("the game is larger than a saved game can be opened at")
         path = context.data_dir / f"{game['id']}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         write_private_text(path, text)
-        return str(path)
+        if staging["directory"] is None or not staging["directory"].is_dir():
+            # Keep the owner alive while the page can save. Its finalizer
+            # removes the last copy at page collection or normal process exit.
+            staging["owner"] = tempfile.TemporaryDirectory(prefix="chatlab-hangman-")
+            staging["directory"] = Path(staging["owner"].name)
+        copy_path = staging["directory"] / path.name
+        partial = staging["directory"] / f".{path.name}.{uuid4().hex}.tmp"
+        try:
+            write_private_text(partial, text)
+            partial.replace(copy_path)
+        finally:
+            partial.unlink(missing_ok=True)
+        for earlier in staging["directory"].glob("*.json"):
+            if earlier != copy_path:
+                earlier.unlink(missing_ok=True)
+        return str(copy_path)
 
     def respond(game, session_id, text, temp, random_seed, token_limit, edit=None):
         """Generate one reply to ``text`` at the end of ``game``, streaming frames.

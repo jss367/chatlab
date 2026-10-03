@@ -62,6 +62,22 @@ class SavedRunsTests(unittest.TestCase):
                 runs.read(identifier)
         self.assertEqual(runs.read(item["id"])["id"], item["id"])
 
+    def test_a_readable_experiment_missing_what_the_list_needs_is_skipped(self):
+        item = runs.save(self.run, "Kept")
+        whole = runs.read(item["id"])
+        damaged = {
+            "b" * 32: {"bookmarks": []},
+            "c" * 32: {"title": None},
+            "d" * 32: {"created_at": 5},
+        }
+        for identifier, change in damaged.items():
+            document = {**whole, "id": identifier, **change}
+            runs._path(identifier).write_text(json.dumps(document))
+        missing = {key: value for key, value in whole.items() if key != "title"}
+        runs._path("e" * 32).write_text(json.dumps({**missing, "id": "e" * 32}))
+        self.assertEqual([found["id"] for found in runs.search()], [item["id"]])
+        self.assertEqual([found["id"] for found in runs.search("kept")], [item["id"]])
+
     def test_offline_open_navigation_and_bookmark_selection(self):
         item = runs.save(self.run)
         opened = experiments.open_run(item["id"], "Raw rank")

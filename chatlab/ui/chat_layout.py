@@ -28,7 +28,7 @@ from chatlab.compare import (
 from chatlab.conversation import new_forks
 from chatlab.token_metrics import COLOR_SCALES, DEFAULT_COLOR_SCALE
 from chatlab.trace_export import write_trace_export
-from chatlab.ui import runtime, experiments, experiment_compare, pictures
+from chatlab.ui import runtime, experiments, experiment_compare, pictures, reasoning_check
 from chatlab.ui.activation_patching import build as build_activation_patching
 from chatlab.ui.common import (
     CONVERSATION_PANE_QUEUE,
@@ -413,6 +413,7 @@ class ChatPage:
     prompts: PromptsTab
     tree: ForkTree
     compare: CompareTab
+    reasoning: object
     tabs: gr.Tabs
     experiments_view: object
     inspector_resizer: gr.HTML
@@ -456,6 +457,8 @@ def build_chat_page(saved: settings.Settings, states: SharedState) -> ChatPage:
                     with gr.Tab("Compare", elem_id="compare-tab"):
                         compare = _build_compare_tab(states)
 
+                    reasoning = reasoning_check.build()
+
                     experiments_view = experiments.build()
 
             # The seam between the transcript and the readings is a
@@ -479,6 +482,7 @@ def build_chat_page(saved: settings.Settings, states: SharedState) -> ChatPage:
         prompts=prompts,
         tree=tree,
         compare=compare,
+        reasoning=reasoning,
         inspector=inspector,
         layers=layers,
         tabs=conversation_tabs,

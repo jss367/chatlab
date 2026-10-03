@@ -4,15 +4,18 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import gradio as gr
 
+from chatlab.extension_api import TokenInspector
 from chatlab.extensions.maze_experiments.maze import Maze
-from chatlab.extensions.maze_experiments.page import export_run
+from chatlab.extensions.maze_experiments.page import build_page, export_run
 from chatlab.extensions.maze_experiments.reasoning_check import read_responses
 from chatlab.extensions.maze_experiments.runner import (Episode, context_messages, fork_token_edit, from_payload,
                                                         stream_episode)
-from maze_support import Manager, call
+from maze_support import Manager, call, scored
+from ui_support import listeners_by_name
 
 CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
 ID = CORRIDOR.tool_id()
@@ -202,6 +205,44 @@ class TeamForkTests(unittest.TestCase):
         self.assertEqual(forked.turns[2]["outcome"], "not_applied")
         self.assertNotIn("context_inserts", forked.config)
         self.assertEqual(from_payload(written).phase, "stopped")
+
+    def test_editing_a_fork_that_never_regenerated_leaves_it_unwritten(self):
+        # A fork whose play never started, as when the model is held by Chat,
+        # is edited again. Export refuses to write it, and so does the edit,
+        # since the file would be refused when it was loaded.
+        ep = team()
+        generating = Manager([step("east")] * 4)
+        generating.generate = scored(generating.generate)
+        list(stream_episode(ep, generating, single_step=True))
+        ep.request_insert("tool_note", "Nearly there.", index=1)
+        list(stream_episode(ep, generating, single_step=True))
+        forked = fork(ep, 3, 0, "x", Manager([]))
+        self.assertIsNotNone(forked.edit_insert)
+        inspector = TokenInspector()
+        selections = inspector.selections()
+        inspector.selections = lambda: selections
+        session = selections.new_session()
+        manager = Manager([step("east")] * 4)
+        manager.generate = scored(manager.generate)
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=inspector, models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = listeners_by_name(demo)
+                metrics = callbacks["inspect"].fn(forked, False, 1, session)[7]
+                selected = callbacks["select_token"].fn(forked, session, metrics, SimpleNamespace(index=0))
+                frames = list(callbacks["edit_token"].fn(forked, False, session, metrics, selected[2], "y", "text",
+                                                         None))
+            finally:
+                demo.close()
+            again = frames[-1][0]
+            self.assertEqual(again.token_edit["parent_run_id"], forked.run_id)
+            self.assertFalse((Path(directory) / f"{forked.run_id}.json").exists())
+            # The fork the edit made is autosaved as it regenerates, and reads back.
+            written = json.loads((Path(directory) / f"{again.run_id}.json").read_text())
+            self.assertEqual(from_payload(written).run_id, again.run_id)
 
 
 if __name__ == "__main__":

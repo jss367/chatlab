@@ -10,7 +10,7 @@ import gradio as gr
 
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.hangman.game import (
-    SYSTEM, answer_of, check, finish_turn, fitting_words, guess_of, load, messages_for, new_game,
+    GIVE_UP, SYSTEM, answer_of, check, finish_turn, fitting_words, guess_of, load, messages_for, new_game,
     read_board, read_word, reasoning_of, reopened, rewound, saved,
 )
 from chatlab.extensions.hangman.page import build_page, turn_note
@@ -111,6 +111,41 @@ class CheckTests(unittest.TestCase):
         self.assertIn((4, "The word revealed at response 2 was CAT; this one is DOG."), problems)
         self.assertEqual(check(game_of(("start", "Board: _ _ _"), ("reveal", "Word: cat"),
                                        ("c", "Board: C _ _"), ("t", "Board: C _ T"))), [])
+
+    def test_followup_give_up_confirms_a_full_reveal_board(self):
+        game = game_of(("Begin", "Board: _ _ _ _ _"),
+                       ("z", "Board: C R A N E\nWrong guesses left: 0"),
+                       (GIVE_UP, "Word: crane"))
+        self.assertEqual(check(game), [])
+        game["turns"][-1]["revealed_word"] = "crate"
+        self.assertTrue(any("never guessed" in message for _, message in check(game)))
+
+    def test_a_board_spelling_out_the_revealed_word_needs_no_guesses(self):
+        given_up = game_of(("start", "Board: _ _ _ _ _"), ("c", "Board: C _ _ _ _"),
+                           ("x", "Board: C _ _ _ _"), (GIVE_UP, "Board: c r a n e\nWord: crane"))
+        self.assertEqual(check(given_up), [])
+        lost = game_of(("start", "Board: _ _ _ _ _"), ("x", "Board: _ _ _ _ _\nWrong guesses left: 1"),
+                       ("y", "Board: C R A N E\nWrong guesses left: 0\nWord: crane"))
+        self.assertEqual(check(lost), [])
+        # The board is the reveal, not a claim the letters were guessed, so a
+        # later board may hide them again.
+        self.assertEqual(check(game_of(("start", "Board: _ _ _"), ("?", "Board: C A T\nWord: cat"),
+                                       ("c", "Board: C _ _"))), [])
+
+    def test_a_board_spelling_out_the_revealed_word_still_agrees_with_earlier_boards(self):
+        game = game_of(("start", "Board: _ _ _ _ _"), ("a", "Board: _ _ A _ _"), ("e", "Board: _ _ A _ E"),
+                       ("t", "Board: _ _ A _ E"), (GIVE_UP, "Board: C R A T E\nWord: crate"))
+        problems = check(game)
+        self.assertIn((5, "T was placed at no position and is now at 4."), problems)
+        self.assertIn((5, "The revealed word CRATE has T at 4; the board placed it at no position."), problems)
+        self.assertFalse(any("never guessed" in message for _, message in problems))
+        game = game_of(("start", "Board: _ _ _ _ _"), ("a", "Board: _ _ A _ _"),
+                       (GIVE_UP, "Board: S T O N E\nWord: stone"))
+        self.assertIn((3, "Position 3 showed A and now shows O."), check(game))
+        # A full board that is not the word the reply reveals is a board like any other.
+        game = game_of(("start", "Board: _ _ _ _ _"), ("c", "Board: C _ _ _ _"),
+                       (GIVE_UP, "Board: C R A N E\nWord: crate"))
+        self.assertIn((3, "R is on the board but was never guessed."), check(game))
 
     def test_a_word_guess_confirmed_by_its_word_line_counts_as_guessed(self):
         game = game_of(("start", "Board: _ _ _"), ("cat", "Yes!\nWord: cat"), ("again", "Board: C A T"))
@@ -260,12 +295,49 @@ class PageTests(unittest.TestCase):
         self.assertEqual(frames[1][2], gr.skip())
         self.assertIn("Contradictions:** none", frames[-1][2])
         self.assertTrue(Path(frames[-1][8]).is_file())
+        # The download is a copy where Gradio may serve it, not the saved file itself.
+        download = Path(frames[-1][8]).resolve()
+        self.assertTrue(download.is_relative_to(Path(tempfile.gettempdir()).resolve()))
+        self.assertNotEqual(download.parent, self.data.resolve())
+        self.assertEqual(download.read_text(), (self.data / download.name).read_text())
         game = list(self.fn["play"](game, "a", "owner", 1.0, 7, 64))[-1][0]
         self.assertEqual(self.manager.calls[1]["seed"], 8)
         self.assertEqual([m["role"] for m in self.manager.calls[1]["messages"]],
                          ["system", "user", "assistant", "user"])
         saved_game = json.loads((self.data / f"{game['id']}.json").read_text())
         self.assertEqual([t["guess"] for t in saved_game["turns"]], ["Let's play.", "a"])
+        # A later response replaces the same copy rather than leaving one behind per response.
+        later = list(self.fn["play"](game, "z", "owner", 1.0, 7, 64))[-1]
+        self.assertEqual(Path(later[8]).resolve(), download)
+        self.assertEqual(sorted(p.name for p in download.parent.iterdir()), [download.name])
+        self.assertEqual(download.read_text(), (self.data / download.name).read_text())
+        # A new game's copy retires the last game's, so the directory never grows with games.
+        self.manager.replies.append("Board: _ _ _")
+        another = Path(list(self.fn["start_game"](SYSTEM, "Again.", "owner", 1.0, 7, 64))[-1][8]).resolve()
+        self.assertNotEqual(another.name, download.name)
+        self.assertEqual(sorted(p.name for p in another.parent.iterdir()), [another.name])
+        self.assertTrue((self.data / download.name).is_file())
+
+    def test_staged_download_is_removed_after_normal_process_exit(self):
+        import os
+        import subprocess
+        import sys
+        code = """
+import tempfile
+from pathlib import Path
+from unittest import mock
+import test_hangman
+case = test_hangman.PageTests()
+case.setUp()
+# Avoid writing any actual model state or touching user files.
+frames = list(case.fn['start_game'](test_hangman.SYSTEM, "Let's play.", 'owner', 1.0, 7, 64))
+print('STAGED:' + str(Path(frames[-1][8]).parent))
+"""
+        process = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env={**os.environ, "PYTHONPATH": str(Path(__file__).parent)}, check=True)
+        directory = next(line.removeprefix("STAGED:") for line in process.stdout.splitlines()
+                         if line.startswith("STAGED:"))
+        self.assertFalse(Path(directory).exists())
 
     def test_no_model_leaves_no_empty_turn_behind(self):
         self.manager.busy = True

@@ -44,7 +44,6 @@ import re
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import Future
 from dataclasses import dataclass, field
 from functools import cache, wraps
 from pathlib import Path
@@ -294,22 +293,35 @@ class MlxThread:
                     target=self._serve, name=self.name, daemon=True
                 )
                 self._thread.start()
-        future: Future = Future()
-        self._tasks.put((future, function, args, kwargs))
-        return future.result()
+        done = threading.Event()
+        answer: list[tuple[bool, Any]] = []
+        self._tasks.put((done, answer, function, args, kwargs))
+        done.wait()
+        failed, outcome = answer.pop()
+        if not failed:
+            return outcome
+        try:
+            raise outcome
+        finally:
+            # The traceback holds this frame; keeping the error in it too
+            # would make a cycle only the collector frees.
+            del outcome
 
     def _serve(self) -> None:
         while True:
-            future, function, args, kwargs = self._tasks.get()
+            done, answer, function, args, kwargs = self._tasks.get()
             try:
-                result = function(*args, **kwargs)
+                answer.append((False, function(*args, **kwargs)))
             except BaseException as error:  # noqa: BLE001 - raised again by run()
-                future.set_exception(error)
-            else:
-                future.set_result(result)
-            # Not kept until the next call arrives: an exception's traceback
-            # holds the failed step's arrays.
-            del future, function, args, kwargs
+                answer.append((True, error))
+            # The answer is the caller's alone before the caller wakes. A
+            # value kept here until the next call arrived would keep a
+            # loaded model alive through an Unload, or a read inspection's
+            # cache after it was dropped, and an exception's traceback holds
+            # the failed step's arrays.
+            del answer, function, args, kwargs
+            done.set()
+            del done
 
 
 MLX_THREAD = MlxThread()
@@ -830,7 +842,9 @@ def _recording_attention(original, recorder: _Recorder):
                 return output
             if queries.ndim != 4 or keys.ndim != 4 or queries.shape[2] != 1:
                 return output
-            recorder.attention[layer] = _attention_weights(queries, keys, scale, mask)
+            recorder.attention[layer] = _in_temporal_order(
+                _attention_weights(queries, keys, scale, mask), keys, cache
+            )
         except Exception:  # noqa: BLE001 - a strip is optional, the response is not
             logger.debug("Attention weights could not be recorded", exc_info=True)
         return output
@@ -856,3 +870,22 @@ def _attention_weights(queries, keys, scale, mask):
             scores = scores + mask.astype(mx.float32)
     weights = mx.softmax(scores, axis=-1)
     return weights[0, :, -1, :].mean(axis=0)
+
+
+def _in_temporal_order(weights, keys, cache):
+    """``weights`` over ``keys`` put in the order the keys came, oldest first.
+
+    A ``RotatingKVCache`` that has filled its window writes each new key
+    over the oldest and hands the attention kernel its whole ring as it
+    lies, so the weights come out in ring order. The inspector lays a row
+    out on the right, newest key last, so the row is put through the
+    cache's own ``_temporal_order`` - what :meth:`MlxEngine._cache_arrays`
+    does to the keys for the cache view - and the two views agree. Keys
+    shorter than the ring (a window not yet full) are already in order.
+    """
+
+    order = getattr(cache, "_temporal_order", None)
+    ring = getattr(cache, "keys", None)
+    if order is None or ring is None or keys.shape[2] != ring.shape[2]:
+        return weights
+    return order(weights.reshape(1, 1, -1, 1)).reshape(-1)

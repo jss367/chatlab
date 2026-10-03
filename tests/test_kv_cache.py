@@ -247,7 +247,9 @@ class MlxCacheTests(unittest.TestCase):
 
         cache = make_prompt_cache(model)
         model(mx.array([ids[:5]]), cache=cache)
-        keys, values = cache[1].state
+        layer = cache[1]
+        keys = layer.keys[..., :layer.offset, :]
+        values = layer.values[..., :layer.offset, :]
         self.assertEqual(view["backend"], "mlx")
         self.assertEqual(view["reading"]["positions"], [0, 1, 2, 3, 4])
         np.testing.assert_allclose(

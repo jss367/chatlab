@@ -28,7 +28,7 @@ from chatlab.conversation import MAIN_BRANCH, branch_choices, new_forks
 from chatlab.device_memory import warm_device
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.registry import load_enabled
-from chatlab.ui import runtime
+from chatlab.ui import reasoning_check, runtime
 from chatlab.ui.background import ConversationEvents, ConversationJob
 from chatlab.ui.chat_layout import (
     ChatPage,
@@ -223,7 +223,11 @@ def build_app() -> gr.Blocks:
     # And the ones nothing names any more, taken off a message before it was
     # sent or left by a deleted conversation, are swept out once per start.
     attachments.prune_unreferenced(
-        [library.library_path(), *experiment_runs.directory().glob("*.json")]
+        [
+            library.library_path(),
+            *library.unreadable_copies(),
+            *experiment_runs.directory().glob("*.json"),
+        ]
     )
     # Read the device beside the interface. Nothing here waits for it, and
     # the pages that describe a load - the fit verdicts in both model lists,
@@ -328,6 +332,10 @@ def build_app() -> gr.Blocks:
             settings_page.assistant_prefill, settings_page.thinking_mode,
         )
         wire_prompt_file(chat_page.prompts, states)
+        reasoning_check.wire(
+            chat_page.reasoning, states.conversation, settings_page.system_prompt,
+            settings_page.keep_reasoning, chat_page.sampling.max_new_tokens,
+        )
         wire_inspector(chat_page, states)
     return demo
 

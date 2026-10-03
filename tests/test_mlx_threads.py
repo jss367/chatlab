@@ -15,11 +15,13 @@ attention does. Every thread below touches MLX before the model is read, so
 none of them can inherit the load thread's stream number by accident.
 """
 
+import gc
 import json
 import queue
 import tempfile
 import threading
 import unittest
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -151,6 +153,33 @@ class MlxThreadTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no Stream"):
             owner.run(fail)
         self.assertEqual(owner.run(lambda: 2 + 2), 4)
+
+    def test_nothing_a_call_returned_or_raised_is_kept_once_it_is_handed_back(self):
+        # A loaded model is the last thing the load's call returned: kept on
+        # the thread until the next call, Unload would free none of it.
+        from chatlab.mlx_runtime import MlxThread
+
+        class Held:
+            pass
+
+        owner = MlxThread("test-mlx")
+        returned = weakref.ref(owner.run(Held))
+        gc.collect()
+        self.assertIsNone(returned())
+
+        raised: list = []
+
+        def fail():
+            held = Held()
+            raised.append(weakref.ref(held))
+            raise RuntimeError("failed holding an array")
+
+        try:
+            owner.run(fail)
+        except RuntimeError:
+            pass
+        gc.collect()
+        self.assertIsNone(raised[0]())
 
     def test_a_call_made_from_the_thread_runs_in_place(self):
         # An engine method that calls another must not wait on itself.
