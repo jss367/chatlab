@@ -17,7 +17,7 @@ from chatlab.extension_api import TokenInspector
 from chatlab.token_metrics import unscored_metric
 from chatlab.extensions.maze_experiments.page import board, build_page, context_view, export_run, scenario_values, status, views, timeline, transport_text
 import gradio as gr
-from maze_support import CONFIG, Manager, MAZE, NO_CHECKPOINT, scored
+from maze_support import CONFIG, Manager, MAZE, NO_CHECKPOINT, scenario, scored
 from ui_support import handlers_by_name, listeners_by_name, listeners_named
 
 
@@ -1627,6 +1627,29 @@ class MazeTests(unittest.TestCase):
         self.assertTrue(ep.interrupted)
         self.assertTrue(ep.resumed)
 
+    def test_forbidden_interruption_text_is_refused_before_any_response(self):
+        # Refused when the episode is prepared, one agent or a team, rather
+        # than once responses have been generated and the interruption is due.
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=TokenInspector(), models=Manager([]), data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                prepare = handlers_by_name(demo)['prepare_episode']
+                ep = Episode(MAZE, CONFIG)
+                for agents in (1, 2):
+                    for text in ('Use ```code``` here', '<think>', 'x <tool_call>'):
+                        with self.subTest(agents=agents, text=text):
+                            with self.assertRaisesRegex(gr.Error, 'code fences'):
+                                prepare(ep, False, 's', None, *scenario(interruption_text=text, interrupt_after=2,
+                                                                        agents=agents))
+                    allowed = prepare(ep, False, 's', None, *scenario(interruption_text='Discuss `inline text`.',
+                                                                      agents=agents))[0]
+                    self.assertEqual(allowed.config['interruption_text'], 'Discuss `inline text`.')
+            finally:
+                demo.close()
+
     def test_interruption_rejects_finished_runs_and_replays_without_changing_provenance(self):
         for phase, replay in [(phase, False) for phase in TERMINAL] + [('ready', True), ('paused', True), ('running', True)]:
             with self.subTest(phase=phase, replay=replay):
@@ -2206,6 +2229,50 @@ class MazeTests(unittest.TestCase):
                     with self.assertRaisesRegex(gr.Error, 'Could not load run'):
                         load(str(path), fresh, False, session, None)
                 self.assertIn('broken.json', failed.output[0])
+            finally:
+                demo.close()
+
+    def test_saving_and_loading_agree_on_the_largest_run_file(self):
+        # One cap, read where a run is saved, exported and loaded on either
+        # tab. Lowered under the run's own file here, which is what a large
+        # team run meets at the real cap.
+        from chatlab.extensions.maze_experiments import runner
+        from chatlab.extensions.maze_experiments.reasoning_check import TruncationControl
+        move = call_text(MAZE.maze_id, 'east')
+        manager = Manager([(move, list(move.encode()) + [0])])
+        ep = Episode(MAZE, CONFIG | {'interruption_text': ''})
+        list(stream_episode(ep, manager, single_step=True))
+        session = TokenInspector().selections().new_session()
+        with tempfile.TemporaryDirectory() as directory:
+            size = ep.save(Path(directory)).stat().st_size
+            self.assertNotIn('cannot be loaded back', ep.detail)
+            context = SimpleNamespace(tokens=TokenInspector(), models=manager, data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = handlers_by_name(demo)
+                # A file exactly at the cap is one the cap allows.
+                with mock.patch.object(runner, 'MAX_RUN_BYTES', size):
+                    with mock.patch('chatlab.extensions.maze_experiments.page.gr.Warning') as warned:
+                        exported = export_run(ep, Path(directory))
+                    warned.assert_not_called()
+                    self.assertTrue(callbacks['load'](exported, Episode(MAZE, CONFIG), False, session, None)[0].replay_only)
+                with mock.patch.object(runner, 'MAX_RUN_BYTES', size - 1):
+                    # Written whole all the same, and said once however often it is saved.
+                    path = ep.save(Path(directory))
+                    ep.save(Path(directory))
+                    self.assertEqual(from_payload(json.loads(path.read_text())).run_id, ep.run_id)
+                    self.assertEqual(ep.detail.count('cannot be loaded back'), 1)
+                    with mock.patch('chatlab.extensions.maze_experiments.page.gr.Warning') as warned:
+                        exported = export_run(ep, Path(directory))
+                    self.assertIn('cannot be loaded back', warned.call_args[0][0])
+                    with self.assertRaisesRegex(gr.Error, 'Could not load run: This run file is'):
+                        callbacks['load'](exported, Episode(MAZE, CONFIG), False, session, None)
+                    with mock.patch('chatlab.extensions.maze_experiments.reasoning_page.gr.Warning') as warned:
+                        held = callbacks['reasoning_load']([exported], {}, [], TruncationControl())[0]
+                    self.assertEqual(held, {})
+                    self.assertIn('ChatLab reads back run files of up to', warned.call_args[0][0])
             finally:
                 demo.close()
 

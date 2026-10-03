@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 
 from .maze import Maze, goal_instruction
-from .runner import RECOVERY_DEFAULTS, Episode, check_checkpoint
+from .runner import RECOVERY_DEFAULTS, Episode, check_checkpoint, check_interruption_text, check_supplied_steering
 
 FORMAT = "chatlab-maze-trials-1"
 CONFIG_KEYS = {"supplied_moves", "interrupt_after", "interruption_text", "prefix_tokens",
@@ -93,7 +93,8 @@ def read_trials(path):
             # stand-in, which still covers everything else they set.
             if named in checked:
                 resolved = dict(resolved, steering=dict(resolved["steering"], vector=[0.0]))
-            check_checkpoint(dict(resolved), maze)
+            resolved = dict(resolved)
+            check_checkpoint(resolved, maze)
         except ValueError as exc:
             raise ValueError(f"Trial {item['id']!r}: {exc}") from exc
         if named is not None:
@@ -109,6 +110,14 @@ def read_trials(path):
         for name in ("interruption_text", "goal_mode", "goal_hint", *(PROMPT_KEYS & set(config))):
             if not isinstance(config[name], str):
                 raise ValueError(f"{name} must be text.")
+        # As the page refuses them when it prepares a run, so a batch never
+        # records a trial as steered when nothing steered it, or generates
+        # responses only to end in error where its interruption lands.
+        try:
+            check_supplied_steering(resolved, maze)
+            check_interruption_text(config["interruption_text"])
+        except ValueError as exc:
+            raise ValueError(f"Trial {item['id']!r}: {exc}") from exc
         for value, low, high, name in ((config["temperature"], 0, 2, "temperature"),
                                        (item.get("openness"), .35, .95, "openness")):
             if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
