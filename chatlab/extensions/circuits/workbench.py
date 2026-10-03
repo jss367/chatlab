@@ -586,6 +586,7 @@ def load_graph(path):
                                 if n["kind"] == "target" and n["target_kind"] == "token")
         if token_total > 1 + 1e-6:
             raise ValueError
+        node_by_id = {node["id"]: node for node in nodes}
         edge_pairs = set()
         for edge in graph["edges"]:
             pair = (edge["source"], edge["target"])
@@ -593,6 +594,12 @@ def load_graph(path):
                 raise ValueError
             edge_pairs.add(pair)
             if edge["source"] not in ids or edge["target"] not in ids:
+                raise ValueError
+            source, target = node_by_id[edge["source"]], node_by_id[edge["target"]]
+            if (source["kind"] not in ("embedding", "error", "feature")
+                    or target["kind"] not in ("feature", "target")
+                    or source["layer"] >= target["layer"]
+                    or source["position"] > target["position"]):
                 raise ValueError
             weight = float(edge["weight"])
             if not math.isfinite(weight):
