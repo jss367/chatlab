@@ -231,9 +231,10 @@ def normalize(value):
         raise ValueError("The probe's chat_template and paired must be true or false.")
     examples = value.get("examples")
     if not isinstance(examples, dict) or not all(
-            isinstance(examples.get(side), list) and all(isinstance(e, str) for e in examples[side])
+            isinstance(examples.get(side), list) and 2 <= len(examples[side]) <= MAX_EXAMPLES
+            and all(isinstance(e, str) and len(e) <= 32768 for e in examples[side])
             for side in ("positive", "negative")):
-        raise ValueError("The probe's examples must be two lists of text.")
+        raise ValueError("The probe needs 2–64 examples per side, each at most 32768 characters.")
     layers = value.get("layers")
     if not isinstance(layers, list) or not 1 <= len(layers) <= 256:
         raise ValueError("The probe needs between 1 and 256 layers.")

@@ -68,6 +68,13 @@ def trained(**changes):
 
 
 class FitTests(unittest.TestCase):
+    def test_imported_probe_examples_match_training_bounds(self):
+        value = trained()
+        for examples in ([], ["one"], ["x"] * 65, ["x" * 32769, "y"]):
+            with self.assertRaisesRegex(ValueError, "2–64 examples"):
+                probes.normalize(value | {"examples": {"positive": examples, "negative": ["a", "b"]}})
+
+
     def test_the_fit_is_at_the_penalized_optimum(self):
         rng = np.random.default_rng(3)
         rows = rng.normal(size=(30, 50)) * rng.uniform(0.1, 10, size=50) + rng.normal(size=50)
