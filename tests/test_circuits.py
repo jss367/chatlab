@@ -1763,6 +1763,96 @@ class WorkbenchTests(unittest.TestCase):
             finally:
                 demo.close()
 
+    def test_queued_graph_opens_are_fenced_against_newer_actions(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits import page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                page.build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                path = Path(directory) / "open.json"
+                graph = small_graph()
+                path.write_text(json.dumps(graph))
+                old = handlers["begin_open"](path, "view", 1)
+                newer_trace = handlers["begin_trace"]("view", 2)
+                with mock.patch.object(page, "load_graph", side_effect=AssertionError("stale file parsed")):
+                    stale = handlers["open_path"](path, 40, False, "view", old)
+                self.assertTrue(all(value == gr.skip() for value in stale))
+                late = handlers["begin_open"](path, "view", 1)
+                with mock.patch.object(page, "load_graph", side_effect=AssertionError("late capture parsed")):
+                    self.assertTrue(all(value == gr.skip() for value in handlers["open_path"](path, 40, False, "view", late)))
+                cells = dict(zip(handlers["begin_trace"].__code__.co_freevars, handlers["begin_trace"].__closure__))
+                self.assertEqual(cells["trace_requests"].cell_contents["view"][0], newer_trace)
+                during_parse = handlers["begin_open"](path, "view", 3)
+                def superseded(_path):
+                    handlers["begin_trace"]("view", 4)
+                    return graph
+                with mock.patch.object(page, "load_graph", side_effect=superseded):
+                    self.assertTrue(all(value == gr.skip() for value in handlers["open_path"](
+                        path, 40, False, "view", during_parse)))
+                stopped = handlers["begin_open"](path, "view", 5)
+                handlers["stop_now"]("view", 6)
+                with mock.patch.object(page, "load_graph", side_effect=AssertionError("stopped file parsed")):
+                    self.assertTrue(all(value == gr.skip() for value in handlers["open_path"](path, 40, False, "view", stopped)))
+                latest = handlers["begin_open"](path, "view", 7)
+                handlers["stop_now"]("view", 6)
+                self.assertEqual(handlers["open_path"](path, 40, False, "view", latest)[0]["id"], graph["id"])
+                event = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", None) == "begin_open")
+                self.assertIsInstance(event.outputs[0], gr.Textbox)
+            finally:
+                demo.close()
+
+    def test_queued_edits_cannot_cancel_a_newer_trace(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                rename = handlers["rename_node"]
+                save_cell = dict(zip(rename.__code__.co_freevars, rename.__closure__))["save"]
+                save = save_cell.cell_contents
+                bench = dict(zip(handlers["begin_trace"].__code__.co_freevars, handlers["begin_trace"].__closure__))["bench"].cell_contents
+                graph = small_graph()
+                member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+                save(graph, "view")
+                old = handlers["begin_edit"](graph, "view", 0)
+                handlers["begin_trace"]("view", 1)
+                flag = threading.Event()
+                bench._sessions["view"] = {"cancelled": flag}
+                self.assertEqual(rename(graph, member, "old", [member], 40, False, "view", old), (gr.skip(),) * 7)
+                self.assertFalse(flag.is_set())
+                bench._sessions.clear()
+                pending = handlers["begin_edit"](graph, "view", 1)
+                def delayed_publish(graph, owner, checked=False, action=None):
+                    handlers["begin_trace"](owner, 2)
+                    bench._sessions[owner] = {"cancelled": flag}
+                    return save(graph, owner, checked=checked, action=action)
+                save_cell.cell_contents = delayed_publish
+                try:
+                    self.assertEqual(rename(graph, member, "raced", [member], 40, False, "view", pending), (gr.skip(),) * 7)
+                    self.assertFalse(flag.is_set())
+                finally:
+                    save_cell.cell_contents = save
+                latest = handlers["begin_edit"](graph, "view", 2)
+                with mock.patch.object(workbench.Workbench, "record", return_value=None):
+                    result = rename(graph, member, "latest", [member], 40, False, "view", latest)
+                self.assertEqual(result[0]["labels"][member], "latest")
+                self.assertTrue(flag.is_set())
+                bench._sessions.clear()
+            finally:
+                demo.close()
+
     def test_stop_cancels_all_submitted_gradio_jobs(self):
         import gradio as gr
         from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
@@ -1845,9 +1935,9 @@ class WorkbenchTests(unittest.TestCase):
                     graph["groups"] = {"old": [member]}
                     save(graph, "view")
                     newest = {**graph, "labels": {member: "newer"}}
-                    def concurrent(graph, owner, checked=False):
+                    def concurrent(graph, owner, checked=False, action=None):
                         save(newest, owner)
-                        return save(graph, owner, checked=checked)
+                        return save(graph, owner, checked=checked, action=action)
                     cell.cell_contents = concurrent
                     try:
                         args = {"group_selected": (graph, [member], "new", 40, False, "view"),
