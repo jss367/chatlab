@@ -423,7 +423,7 @@ def _keep_unreadable(target: Path) -> None:
 
     if not target.is_file():
         return
-    kept = target.with_name(f"{target.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}")
+    kept = target.with_name(f"{target.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex}")
     try:
         os.replace(target, kept)
     except OSError as error:

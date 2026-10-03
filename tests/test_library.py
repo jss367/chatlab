@@ -128,6 +128,16 @@ class RoundTripTests(unittest.TestCase):
         self.assertEqual(list(library.read(self.path)["branches"]), [MAIN_BRANCH, "Chat 1"])
         self.assertEqual(library.read(self.path)["branches"]["Chat 1"], [])
 
+    def test_unreadable_backups_do_not_collide_within_one_second(self):
+        self.path.parent.mkdir(parents=True)
+        with mock.patch.object(library.time, "strftime", return_value="20261003-010000"):
+            for raw in ("{first broken", "{second broken"):
+                self.path.write_text(raw)
+                with self.assertLogs(library.logger, level="WARNING"):
+                    library.write(new_forks(), self.path)
+        self.assertEqual({p.read_text() for p in library.unreadable_copies(self.path)},
+                         {"{first broken", "{second broken"})
+
     def test_a_file_from_another_app_is_refused(self):
         with self.assertRaises(ValueError):
             library.parse(json.dumps({"format": "other", "branches": []}))
