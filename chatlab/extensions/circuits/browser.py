@@ -79,14 +79,17 @@ def feature_vector(spec, layer, feature, record, strength, loaded_id):
 
 
 def build_browser(context, bench):
-    pages, page_lock = {}, threading.Lock()
+    pages, page_sequences, page_lock = {}, {}, threading.Lock()
 
     def forget(view):
         with page_lock:
             pages.pop(view, None)
+            page_sequences.pop(view, None)
 
     owner = gr.State(value=lambda: uuid4().hex, delete_callback=forget)
-    request = gr.State(None)
+    request = gr.Textbox(visible=False)
+    page_sequence = gr.Number(value=0, precision=0, visible=False)
+    next_page_sequence = "(window.chatlabFeaturePageSequence = (window.chatlabFeaturePageSequence || 0) + 1)"
     pick_request = gr.Textbox(visible=False)
 
     def current(view, stamp, ready=False):
@@ -128,25 +131,43 @@ def build_browser(context, bench):
     shown = gr.State(None)
     pick = gr.Textbox(elem_id="circuits-feature-pick", elem_classes=[MENU_BRIDGE_CLASS])
 
-    def choose_set(key, view):
+    def choose_set(key, view, sequence=None):
         spec = spec_named(key)
-        return gr.update(maximum=spec.layers - 1, value=min(spec.layers // 2, spec.layers - 1)), 0, *begin_page(view)
+        stamp, accepted = reserve_page(view, None, sequence)
+        if not accepted:
+            return (gr.skip(),) * 6
+        return (gr.update(maximum=spec.layers - 1, value=min(spec.layers // 2, spec.layers - 1)),
+                0, stamp, None, render.feature_detail(), gr.update(interactive=False))
 
-    set_choice.input(choose_set, [set_choice, owner], [layer, start, request, chosen, detail, steer], queue=False)
+    set_choice.input(choose_set, [set_choice, owner, page_sequence],
+                     [layer, start, request, chosen, detail, steer], queue=False,
+                     js="(key, view, _) => [key, view, " + next_page_sequence + "]")
 
-    def begin_page(view):
+    def reserve_page(view, selected, sequence):
         stamp = uuid4().hex
         with page_lock:
-            pages[view] = {"stamp": stamp, "ready": False}
+            previous = page_sequences.get(view, 0)
+            sequence = previous + 1 if sequence is None else sequence
+            if type(sequence) is not int or not previous < sequence < 2**53:
+                return stamp, False
+            page_sequences[view] = sequence
+            pages[view] = {"stamp": stamp, "ready": False, "previous": dict(selected) if selected else None}
+        return stamp, True
+
+    def begin_page(view, sequence=None):
+        stamp, accepted = reserve_page(view, None, sequence)
+        if not accepted:
+            return stamp, gr.skip(), gr.skip(), gr.skip()
         return stamp, None, render.feature_detail(), gr.update(interactive=False)
 
-    layer.input(begin_page, owner, [request, chosen, detail, steer], queue=False)
-    start.input(begin_page, owner, [request, chosen, detail, steer], queue=False)
+    for control in (layer, start):
+        control.input(begin_page, [owner, page_sequence], [request, chosen, detail, steer], queue=False,
+                      js="(view, _) => [view, " + next_page_sequence + "]")
 
-    def begin_refresh(view, selected):
-        stamp = uuid4().hex
-        with page_lock:
-            pages[view] = {"stamp": stamp, "ready": False, "previous": dict(selected) if selected else None}
+    def begin_refresh(view, selected, sequence=None):
+        stamp, accepted = reserve_page(view, selected, sequence)
+        if not accepted:
+            return stamp, gr.skip(), gr.skip(), gr.skip()
         return stamp, None, gr.skip(), gr.update(interactive=False)
 
     def list_page(key, layer_value, start_value, selected, view, stamp, step=0):
@@ -180,7 +201,8 @@ def build_browser(context, bench):
         return frame if current(view, stamp, ready=True) else (gr.skip(),) * 6
 
     for button, step in ((show, 0), (previous, -1), (following, 1)):
-        event = button.click(begin_refresh, [owner, chosen], [request, chosen, detail, steer], queue=False)
+        event = button.click(begin_refresh, [owner, chosen, page_sequence], [request, chosen, detail, steer],
+                             queue=False, js="(view, selected, _) => [view, selected, " + next_page_sequence + "]")
         event.then(partial(list_page, step=step),
                    [set_choice, layer, start, chosen, owner, request],
                    [listing, start, shown, chosen, detail, steer], concurrency_id="circuits-browse")

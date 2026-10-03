@@ -794,6 +794,22 @@ class WorkbenchTests(unittest.TestCase):
         other = bench.prompt_ids(session, model, {**prompt, "prefix": " second reply"})
         self.assertNotEqual(other, ids)
 
+    def test_intervention_group_and_forward_budgets_precede_model_reservation(self):
+        opened = mock.Mock(side_effect=AssertionError("model session acquired"))
+        bench = workbench.Workbench(SimpleNamespace(open_session=opened), tempfile.gettempdir())
+        for groups, prefixes in ((33, 1), (32, 16), (2, 256)):
+            graph = {"groups": {str(i): ["feature"] for i in range(groups)}}
+            with self.subTest(groups=groups, prefixes=prefixes), self.assertRaisesRegex(ValueError, "groups|passes"):
+                bench.group_effects(graph, ["1"], [], ["prefix"] * (prefixes - 1), True, 2, False,
+                                    lambda *_: None, lambda: False)
+        opened.assert_not_called()
+        interventions.check_workload(256, 1)
+        interventions.check_workload(15, 32)
+        with mock.patch.object(interventions, "run", side_effect=AssertionError("model forward")) as run:
+            with self.assertRaisesRegex(ValueError, "32 nonempty groups"):
+                interventions.group_effects(None, None, [[1]], {str(i): [] for i in range(33)}, [1], [])
+            run.assert_not_called()
+
     def test_intervention_raw_bounds_precede_session_and_encoding(self):
         opened = mock.Mock(side_effect=AssertionError("model session acquired"))
         bench = workbench.Workbench(SimpleNamespace(open_session=opened), tempfile.gettempdir())
@@ -1158,6 +1174,14 @@ class WorkbenchTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
                 validate.assert_not_called()
+
+    def test_imported_effect_token_lists_must_be_unique_and_disjoint(self):
+        for pivot, alternatives in (([1, 1], [2]), ([1], [2, 2]), ([1], [1, 2])):
+            summary = dict(tokens={"1": .2, "2": .1}, pivot=.2)
+            effects = dict(prefixes=1, boost=2., every_position=False, pivot=pivot, alternatives=alternatives,
+                           baseline=summary, groups={"g": dict(active_prefixes=1, ablate=summary, boost=summary)})
+            with self.subTest(pivot=pivot, alternatives=alternatives), self.assertRaises(ValueError):
+                workbench._validate_effects(effects, {"g": []})
 
     def test_imported_measured_effects_need_a_pivot(self):
         summary = dict(tokens={"2": .1}, pivot=0.)
@@ -1918,6 +1942,50 @@ class BrowserTests(unittest.TestCase):
                 cleared = fn(key, layer, start, selected)
                 self.assertIsNone(cleared[3])
                 self.assertIn("cg-empty", cleared[4])
+        finally:
+            demo.close()
+
+    def test_page_reservations_obey_click_order_before_queueing(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda *args, **kwargs: None))
+        records = mock.Mock()
+        records.get.return_value = self.record
+        with gr.Blocks() as demo:
+            browser.build_browser(context, SimpleNamespace(records=lambda spec: records))
+        try:
+            handlers = handlers_by_name(demo)
+            refresh = handlers["begin_refresh"]
+            entered, release = threading.Event(), threading.Event()
+            old = []
+            def delayed_stamp():
+                if threading.current_thread().name == "old-page":
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError("new click did not reserve")
+                return SimpleNamespace(hex=threading.current_thread().name)
+            with mock.patch.object(browser, "uuid4", side_effect=delayed_stamp):
+                thread = threading.Thread(target=lambda: old.append(refresh("view", None, 1)), name="old-page")
+                thread.start()
+                self.assertTrue(entered.wait(5))
+                newest = refresh("view", None, 2)
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(old[0][1:], (gr.skip(),) * 3)
+            callbacks = {fn.fn.keywords["step"]: fn.fn for fn in demo.fns.values()
+                         if isinstance(fn.fn, partial) and fn.fn.func.__name__ == "list_page"}
+            stale = callbacks[1](browser.DEFAULT_SET, 3, 20, None, "view", old[0][0])
+            self.assertEqual(stale, (gr.skip(),) * 6)
+            records.get.assert_not_called()
+            current = callbacks[-1](browser.DEFAULT_SET, 3, 20, None, "view", newest[0])
+            self.assertEqual(current[1], 0)
+            self.assertEqual(handlers["begin_page"]("view", 1)[1:], (gr.skip(),) * 3)
+            self.assertEqual(handlers["choose_set"]("gemma-2-2b", "view", 1), (gr.skip(),) * 6)
+            event = next(fn for fn in demo.fns.values() if getattr(fn.fn, "__name__", None) == "begin_refresh")
+            self.assertIsInstance(event.outputs[0], gr.Textbox)
         finally:
             demo.close()
 

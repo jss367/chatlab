@@ -70,6 +70,8 @@ A feature's activation is read from its layer's input on the same forward pass, 
 
 **More replies so far** takes further replies, separated by lines holding only `---`. Each follows the same system prompt and user message. Probabilities are averaged over all of them, and the traced prompt is included unless unchecked. This is how a group found in one graph is tested on many prefixes, for example 60 reasoning traces cut at a paragraph break. Each group's card says how many prefixes it was active in.
 
+A measurement run accepts at most 32 nonempty groups and 1,024 model passes, calculated as the number of prefixes times (1 + twice the number of groups). Reduce groups or prefixes if the limit is exceeded; the limit is checked before reserving the model.
+
 ## Browsing features
 
 The **Features** tab lists every feature of a transcoder set, twenty at a time. No model has to be loaded to browse. Choose the **Transcoders**, a **Layer** and the **First feature**, then press **Show**; **Previous** and **Next** turn the page. Each row gives the feature's index, the tokens it fires on, the tokens its decoder promotes, and how often it is active. *Fires on* counts, over the feature's top-activating examples in the transcoder's training data, which token each example peaked on, most common first. Records are fetched from the Hub as the graph's feature card fetches them, and cached the same way, so a page that was shown once opens offline.

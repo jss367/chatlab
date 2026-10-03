@@ -96,6 +96,13 @@ def run(blocks, transcoders, ids, changes=(), tokens=(), *, cancelled=None):
     return {"probabilities": values, "active": active, "log_probs": log_probs}
 
 
+def check_workload(prefixes, groups):
+    if groups > 32:
+        raise ValueError("Measure at most 32 nonempty groups per run.")
+    if prefixes * (1 + 2 * groups) > 1024:
+        raise ValueError("Use fewer groups or prefixes: a run supports at most 1024 model passes.")
+
+
 def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *, boost=DEFAULT_BOOST,
                   every_position=False, progress=None, cancelled=None, auto_alternatives=False):
     """Ablate and boost each group on every prefix, averaging each token's probability.
@@ -121,6 +128,7 @@ def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *,
     pivot = list(dict.fromkeys(pivot))
     pivot_set = set(pivot)
     alternatives = [t for t in dict.fromkeys(alternatives) if t not in pivot_set]
+    check_workload(len(prefixes), len(groups))
     report = progress or (lambda *_: None)
     stop = cancelled or (lambda: False)
     total = len(prefixes) * (1 + 2 * len(groups))

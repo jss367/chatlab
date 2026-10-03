@@ -338,6 +338,8 @@ class Workbench:
                 raise ValueError(f"Use at most {limit} entries in each intervention list.")
             if any(not isinstance(text, str) or len(text) > 32768 for text in entries):
                 raise ValueError("Intervention entries must be text of at most 32768 characters each.")
+        interventions.check_workload(len(prefix_texts) + bool(include_prompt),
+                                     sum(bool(members) for members in graph["groups"].values()))
         attribution._check_cancelled(cancelled)
         with self.models.open_session() as session:
             self._same_model(graph, session)
@@ -628,6 +630,8 @@ def _validate_effects(effects, groups):
         if not isinstance(values, list) or len(values) > 4096 or any(type(t) is not int or not 0 <= t < 2 ** 31 for t in values):
             raise ValueError
         tokens.extend(values)
+    if (len(set(tokens)) != len(tokens)):
+        raise ValueError
     allowed_token_keys = {str(t) for t in tokens}
     pivot_keys = {str(t) for t in effects["pivot"]}
     def summary(value):
