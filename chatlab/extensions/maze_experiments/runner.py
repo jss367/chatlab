@@ -176,7 +176,7 @@ def check_supplied_steering(config, maze):
     anyone checked.
     """
     cell = (config.get("steer_when") or {}).get("cell")
-    if cell is None:
+    if not steering_active(config) or cell is None:
         return
     walked = [list(c) for c in maze.route()[:config.get("supplied_moves", 0) + 1]]
     if list(cell) in walked and list(cell) != walked[-1]:

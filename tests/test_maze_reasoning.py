@@ -494,10 +494,13 @@ class ReasoningPageTests(unittest.TestCase):
                     with mock.patch.object(reasoning_page, "read_run_file", wraps=reasoning_page.read_run_file) as read:
                         held = load(paths[:2], {}, [], TruncationControl())[0]
                         self.assertEqual(set(held), {episodes[0].run_id})
-                        self.assertEqual(read.call_count, 1)
+                        self.assertEqual(read.call_count, 2)
                         held = load(paths[2:], held, [], TruncationControl())[0]
                         self.assertEqual(set(held), {episodes[0].run_id})
-                        self.assertEqual(read.call_count, 1)
+                        self.assertEqual(read.call_count, 3)
+                        held = load(paths[:1], held, [], TruncationControl())[0]
+                        self.assertEqual(set(held), {episodes[0].run_id})
+                        self.assertEqual(read.call_count, 4)
             finally:
                 demo.close()
 

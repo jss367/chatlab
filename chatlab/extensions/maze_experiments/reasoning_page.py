@@ -143,10 +143,15 @@ def build_reasoning_page(context):
         for path in paths or ():
             try:
                 size = Path(path).stat().st_size
-                if retained_bytes + size > MAX_RUN_BYTES:
+                data = read_run_file(path)
+                if not isinstance(data, dict):
+                    raise ValueError("The saved run must be a JSON object.")
+                previous = held.get(data.get("run_id"))
+                replaced_bytes = getattr(previous, "_reasoning_import_bytes", 0)
+                if retained_bytes - replaced_bytes + size > MAX_RUN_BYTES:
                     raise ValueError(f"Loaded runs together are limited to {megabytes(MAX_RUN_BYTES)}; "
                                      "clear the loaded runs before importing more.")
-                ep = load_run(read_run_file(path))
+                ep = load_run(data)
                 ep._reasoning_import_bytes = size
             except (ValueError, TypeError, KeyError, IndexError, OSError) as exc:
                 logger.warning("Reasoning check could not load %s: %s", path, exc)

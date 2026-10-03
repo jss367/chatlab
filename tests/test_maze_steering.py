@@ -313,6 +313,12 @@ class TrialTests(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, f"Trial 't1': .*{message}"):
                 read_trials(self.write([trial], **extra))
 
+    def test_disabled_control_can_walk_past_a_steering_cell(self):
+        for changes in ({"enabled": False}, {"strength": 0}):
+            trial = self.trial(supplied_moves=2, steering=VECTOR | changes, steer_when={"cell": [0, 1]})
+            episode = prepare_trial(read_trials(self.write([trial])), "t1")
+            self.assertFalse(episode.steers_next())
+
     def test_a_trial_whose_supplied_moves_pass_its_steering_cell_is_refused(self):
         # ROOM's route runs along the top row, so two supplied moves stand on
         # (0, 1) and leave it, and one leaves the start.
