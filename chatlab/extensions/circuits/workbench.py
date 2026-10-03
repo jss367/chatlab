@@ -179,25 +179,34 @@ class Workbench:
 
     def trace(self, prompt, explain, settings, progress, cancelled):
         """A finished graph for the prompt, labelled and ready to save."""
+        settings.check()
         with self.models.open_session() as session:
             revision = session.model_revision
             ids = self.encoded_prompt(session, prompt)
+            token_ids, contrast = None, None
+            if explain["mode"] == "tokens":
+                token_ids = self.single_tokens(session, explain["tokens"], "Tokens to explain")
+                if not token_ids:
+                    raise ValueError("List the tokens to explain, one per line.")
+                if len(set(token_ids)) > attribution.MAX_CHOSEN_TARGETS:
+                    raise ValueError(f"Choose at most {attribution.MAX_CHOSEN_TARGETS:,} distinct target tokens.")
+            elif explain["mode"] == "contrast":
+                positive = self.single_tokens(session, explain["tokens"], "Pivot tokens")
+                negative = self.single_tokens(session, explain["others"], "Other tokens")
+                if not positive or not negative:
+                    raise ValueError("A contrast needs tokens on both sides.")
+                if len(set(positive) | set(negative)) > attribution.MAX_CHOSEN_TARGETS:
+                    raise ValueError(f"A contrast supports at most {attribution.MAX_CHOSEN_TARGETS:,} distinct tokens.")
+                if set(positive) & set(negative):
+                    raise ValueError("A token cannot be on both sides of the contrast.")
+                contrast = {"positive": positive, "negative": negative,
+                            "label": " / ".join(explain["tokens"][:3]) + " vs other"}
             with self._model(session) as model:
                 blocks, held, spec = self._held(model, progress, cancelled, model_revision=session.model_revision)
 
                 def decode(token):
                     return session.decode([int(token)])
 
-                token_ids, contrast = None, None
-                if explain["mode"] == "tokens":
-                    token_ids = self.single_tokens(session, explain["tokens"], "Tokens to explain")
-                    if not token_ids:
-                        raise ValueError("List the tokens to explain, one per line.")
-                elif explain["mode"] == "contrast":
-                    positive = self.single_tokens(session, explain["tokens"], "Pivot tokens")
-                    negative = self.single_tokens(session, explain["others"], "Other tokens")
-                    contrast = {"positive": positive, "negative": negative,
-                                "label": " / ".join(explain["tokens"][:3]) + " vs other"}
                 graph = attribution.attribute(blocks, held, ids, decode, settings=settings, token_ids=token_ids,
                                               contrast=contrast, progress=progress, cancelled=cancelled)
                 self._describe(graph, blocks, held, decode, cancelled)
@@ -309,17 +318,25 @@ class Workbench:
                       every_position, progress, cancelled):
         with self.models.open_session() as session:
             self._same_model(graph, session)
+            pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
+            alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
+            if not pivot:
+                raise ValueError("Name at least one pivot token.")
+            if not graph["groups"]:
+                raise ValueError("Make at least one group from the graph first.")
+            if not 0 <= boost <= 100:
+                raise ValueError("The boost factor must be between 0 and 100.")
             prefixes = [graph["ids"]] if include_prompt else []
             prompt = graph.get("prompt") or {}
             for text in prefix_texts:
                 prefixes.append(self.encoded_prompt(session, {**prompt, "prefix": text}))
+            if not prefixes or len(prefixes) > interventions.MAX_PREFIXES:
+                raise ValueError(f"Use between 1 and {interventions.MAX_PREFIXES} prefixes.")
             with self._model(session) as model:
                 blocks, held, _ = self._held(model, progress, cancelled, revision=graph.get("transcoder_revision"),
                                             model_revision=session.model_revision)
                 self._same_transcoders(graph, held)
                 self._measurement_ids(graph, blocks)
-                pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
-                alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
                 if not alternatives:
                     logits = interventions.run(blocks, held, graph["ids"])["log_probs"]
                     alternatives = automatic_alternatives(logits, pivot)
@@ -349,6 +366,9 @@ class Workbench:
         path = self.graphs_dir() / f"{graph['id']}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         write_private_text(path, text)
+        metadata = path.parent / ".metadata" / path.name
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        write_private_text(metadata, json.dumps({"label": describe(graph)[:2000]}))
         return path
 
     def saved(self):
@@ -358,9 +378,13 @@ class Workbench:
         found = []
         for path in sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:200]:
             try:
-                with path.open(encoding="utf-8") as handle:
-                    head = json.load(handle)
-                found.append((describe(head), str(path)))
+                metadata = directory / ".metadata" / path.name
+                label = f"Saved graph · {path.stem[:128]}"
+                if metadata.exists() and metadata.stat().st_size <= 16384:
+                    head = json.loads(metadata.read_text(encoding="utf-8"))
+                    if isinstance(head, dict) and isinstance(head.get("label"), str):
+                        label = head["label"][:2000]
+                found.append((label, str(path)))
             except (OSError, ValueError, KeyError, TypeError, OverflowError):
                 continue
         return found
@@ -486,7 +510,8 @@ def load_graph(path):
                 elif node["target_kind"] == "contrast":
                     positive, negative = node["positive"], node["negative"]
                     if (not isinstance(positive, list) or not isinstance(negative, list)
-                            or not positive or not negative or set(positive) & set(negative)):
+                            or not positive or not negative or len(positive) + len(negative) > attribution.MAX_CHOSEN_TARGETS
+                            or set(positive) & set(negative)):
                         raise ValueError
                     values = positive + negative
                 else:
