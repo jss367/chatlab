@@ -70,6 +70,8 @@ A feature's activation is read from its layer's input on the same forward pass, 
 
 **More replies so far** takes further replies, separated by lines holding only `---`. Each follows the same system prompt and user message. Probabilities are averaged over all of them, and the traced prompt is included unless unchecked. This is how a group found in one graph is tested on many prefixes, for example 60 reasoning traces cut at a paragraph break. Each group's card says how many prefixes it was active in.
 
+A measurement run accepts at most 32 nonempty groups and 1,024 model passes, calculated as the number of prefixes times (1 + twice the number of groups). Reduce groups or prefixes if the limit is exceeded; the limit is checked before reserving the model.
+
 ## Saved graphs
 
 Every graph is saved when it is traced, and again whenever a feature is renamed, a group changes or interventions are run. Graphs are written as `chatlab-attribution-graph-1` JSON under the extension's data directory, in `graphs/`. Open one from **Saved graphs**, or upload a graph file. The current graph is offered as a download.
