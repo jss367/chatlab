@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from uuid import uuid4
 
 import gradio as gr
 
@@ -93,6 +94,8 @@ def load_with_steering(path, turns, scale_name, forks):
     # leaves the system prompt.
     if skipped(value):
         return frame
+    forks = copy_forks(forks)
+    forks["_view_identity"] = uuid4().hex
     frame.update(
         dict(zip(STEERING_OUTPUT_NAMES, controls(value), strict=True)),
         forks=store(forks, value),

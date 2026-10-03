@@ -544,13 +544,16 @@ class ConversationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "conversation.json"
             path.write_text(conversation.to_json(turns, steering=vector()))
-            loaded = controls.load_with_steering(str(path), [], "Raw rank", conversation.new_forks())
+            loaded = controls.load_with_steering(str(path), [], "Raw rank", {**conversation.new_forks(), "_view_identity": "before-load"})
+            self.assertNotEqual(loaded["forks"]["_view_identity"], "before-load")
             self.assertEqual(conversation.turn_entries(loaded["turns"]), conversation.turn_entries(turns))
             self.assertEqual(steering.expand(loaded["steering_state"]), vector())
             self.assertEqual(steering.expand(controls.steering_updates(loaded["forks"])[0]), vector())
             path.write_text(conversation.to_json(turns))
+            previous_identity = loaded["forks"]["_view_identity"]
             loaded = controls.load_with_steering(str(path), turns, "Raw rank", loaded["forks"])
             self.assertIsNone(loaded["steering_state"])
+            self.assertNotEqual(loaded["forks"]["_view_identity"], previous_identity)
             path.write_text(json.dumps({"format": conversation.SAVE_FORMAT, "turns": [], "steering": {}}))
             refused = controls.load_with_steering(str(path), turns, "Raw rank", loaded["forks"])
             self.assertEqual(conversation.turn_entries(refused["turns"]), conversation.turn_entries(turns))
