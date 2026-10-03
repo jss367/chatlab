@@ -160,7 +160,6 @@ def logit_directions(blocks, recording, targets):
     import torch
 
     weight = blocks.unembed.weight
-    probabilities = torch.softmax(recording.logits, dim=-1)
     # Both centered token logits and contrasts chain through the final cap.
     derivative = torch.ones_like(recording.logits)
     if blocks.final_softcap:
@@ -175,8 +174,7 @@ def logit_directions(blocks, recording, targets):
         vector = torch.zeros_like(mean)
         for side, sign in (("positive", 1.0), ("negative", -1.0)):
             ids = torch.tensor(target[side], dtype=torch.long, device=weight.device)
-            share = probabilities[ids]
-            share = share / share.sum().clamp(min=1e-30)
+            share = torch.softmax(recording.logits[ids], dim=0)
             vector += sign * ((share * derivative[ids])[:, None] * weight[ids].float()).sum(0)
         directions.append(vector)
     return torch.stack(directions)
@@ -472,8 +470,11 @@ def attribute(blocks, transcoders, ids, decode, *, settings=None, token_ids=None
             bias_parts.append(graph.bias_terms(batch))
         biases = torch.cat(bias_parts)
         weights = torch.zeros(rows.shape[0])
-        probabilities = torch.tensor([t["probability"] for t in targets])
-        weights[:len(targets)] = probabilities / probabilities.sum().clamp(min=1e-30)
+        if targets[0]["kind"] == "contrast":
+            weights[0] = 1.0
+        else:
+            selected_logits = recording.logits[[t["token_id"] for t in targets]].cpu()
+            weights[:len(targets)] = torch.softmax(selected_logits, dim=0)
         row_of_column = torch.full((columns,), -1, dtype=torch.long)
         chosen = []
         used = len(targets)
