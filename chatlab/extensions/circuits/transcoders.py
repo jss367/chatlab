@@ -149,7 +149,7 @@ class Transcoders:
 
     def decode(self, layer, acts):
         weights = self.w_dec[layer]
-        return (acts.to(weights.dtype) @ weights).float() + self.b_dec[layer].float()
+        return acts.float() @ weights.float() + self.b_dec[layer].float()
 
     def decoder_rows(self, layer, features):
         return self.w_dec[layer][features].float()

@@ -498,6 +498,13 @@ def load_graph(path):
         for kind, limit in limits.items():
             if sum(n["kind"] == kind for n in nodes) > limit:
                 raise ValueError
+        kept = sum(n["kind"] == "feature" for n in nodes)
+        stats = graph["stats"]
+        recorded_kept = stats.setdefault("kept_features", kept)
+        traced = stats.setdefault("traced_features", recorded_kept)
+        active = stats.setdefault("active_features", traced)
+        if recorded_kept != kept or not kept <= traced <= active:
+            raise ValueError
         feature_coordinates = set()
         residual_coordinates = set()
         target_signatures = set()
@@ -510,7 +517,7 @@ def load_graph(path):
             if node["kind"] == "embedding":
                 valid_layer = layer == -1
             elif node["kind"] == "target":
-                valid_layer = layer == layers
+                valid_layer = layer == layers and position == len(tokens) - 1
             else:
                 valid_layer = 0 <= layer < layers
             if not valid_layer:
@@ -519,6 +526,8 @@ def load_graph(path):
                 node[field] = float(node[field])
                 if not math.isfinite(node[field]):
                     raise ValueError
+            if node["influence"] < 0:
+                raise ValueError
             if "text" in node and (not isinstance(node["text"], str) or len(node["text"]) > 4096):
                 raise ValueError
             for field in ("promotes", "suppresses"):
