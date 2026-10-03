@@ -640,7 +640,7 @@ class PageTests(unittest.TestCase):
     def test_a_new_run_clears_the_last_reading_first(self):
         probe = self.train()[0]
         shown = self.read(probe, READ, WANTED[0])[-1][0]
-        reading, strip, heat, reply, detail, table = self.fn["clear_reading"]("owner")
+        reading, strip, heat, reply, detail, table, request = self.fn["clear_reading"]("owner")
         self.assertIsNone(reading)
         self.assertEqual((strip["value"], strip["visible"]), ([], False))
         self.assertEqual((heat, reply, detail, table), ("", "", "", []))
@@ -659,6 +659,28 @@ class PageTests(unittest.TestCase):
             with self.assertRaisesRegex(gr.Error, "displayed probe changed"):
                 self.read(old, READ, WANTED[0])
         self.assertIsNotNone(self.read(current, READ, WANTED[0])[-1][0])
+
+    def test_queued_read_tickets_do_not_adopt_later_clicks(self):
+        probe = self.train()[0]
+        old = self.fn["clear_reading"]("owner", 1)[-1]
+        newest = self.fn["clear_reading"]("owner", 2)[-1]
+        def queued(ticket):
+            return list(self.fn["read"](probe, READ, WANTED[0], "", 0., 42, 3, False, False, "owner", 1, ticket))
+        with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("obsolete model lease")):
+            self.assertEqual(queued(old), [(gr.skip(),) * 5])
+        self.assertIsInstance(queued(newest)[-1][0], dict)
+        # A late old capture cannot displace the newer click, and Stop also
+        # fences a read that has not reached the model queue yet.
+        current = self.fn["clear_reading"]("owner", 4)[-1]
+        late = self.fn["clear_reading"]("owner", 3)[-1]
+        with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("obsolete model lease")):
+            self.assertEqual(queued(late), [(gr.skip(),) * 5])
+        self.fn["cancel"]("owner", 5)
+        with mock.patch.object(self.manager, "claim_generation", side_effect=AssertionError("stopped model lease")):
+            self.assertEqual(queued(current), [(gr.skip(),) * 5])
+        restarted = self.fn["clear_reading"]("owner", 7)[-1]
+        self.fn["cancel"]("owner", 6)
+        self.assertIsInstance(queued(restarted)[-1][0], dict)
 
     def test_stop_cancels_the_queued_read_dependency(self):
         context = ExtensionContext(ModelService(lambda: self.manager), TokenInspector(), self.data,

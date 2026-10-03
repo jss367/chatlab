@@ -62,13 +62,37 @@ class Runs:
         self._downloads = {}
         self._probes = {}
         self._training = {}
+        self._read_requests = {}
+        self._read_sequences = {}
 
     @staticmethod
     def new_owner():
         return uuid4().hex
 
-    def start(self, owner, probe):
+    def begin_read(self, owner, sequence=None):
         with self._lock:
+            previous = self._read_sequences.get(owner, 0)
+            sequence = previous + 1 if sequence is None else sequence
+            if type(sequence) is not int or not previous < sequence < 2**53:
+                return None
+            self._read_sequences[owner] = sequence
+            self._turns[owner] = self._turns.get(owner, 0) + 1
+            self._shown[owner] = None
+            request = uuid4().hex
+            self._read_requests[owner] = (request, self._turns[owner])
+            active = self._active.get(owner)
+            if active:
+                active[0].set()
+                if active[1] is not None:
+                    active[1].cancel()
+            return request
+
+    def start(self, owner, probe, request=None):
+        with self._lock:
+            if request is not None:
+                captured = self._read_requests.get(owner)
+                if not captured or captured[0] != request or captured[1] != self._turns.get(owner, 0):
+                    return None
             if not probe.get("_view_probe") or self._probes.get(owner) != probe["_view_probe"]:
                 raise ValueError("The displayed probe changed; read with the current probe.")
             if owner in self._active:
@@ -114,8 +138,13 @@ class Runs:
         with self._lock:
             self._active.pop(owner, None)
 
-    def cancel(self, owner):
+    def cancel(self, owner, sequence=None):
         with self._lock:
+            if sequence is not None:
+                if type(sequence) is not int or not self._read_sequences.get(owner, 0) < sequence < 2**53:
+                    return
+                self._read_sequences[owner] = sequence
+            self._read_requests.pop(owner, None)
             active = self._active.get(owner)
             if active:
                 active[0].set()
@@ -173,6 +202,8 @@ class Runs:
             self._turns.pop(owner, None)
             self._probes.pop(owner, None)
             self._training.pop(owner, None)
+            self._read_requests.pop(owner, None)
+            self._read_sequences.pop(owner, None)
             directory = self._downloads.pop(owner, None)
         if directory is not None:
             directory.cleanup()
@@ -502,7 +533,7 @@ def build_page(context):
                 heatmap(probe, reading, chosen, palette))
 
     def read(probe, chosen_mode, message, system_text, temp, random_seed, token_limit, show_prompt,
-             user_turn, view, chosen):
+             user_turn, view, chosen, request=None):
         """Generate a reply or take the text as it is, then read every token with the probe.
 
         The reply streams into its box; the probe's reading arrives once, at
@@ -514,7 +545,11 @@ def build_page(context):
         if not isinstance(message, str) or not message.strip():
             raise gr.Error("Type something to read first.")
         try:
-            cancel, turn = runs.start(view, probe)
+            started = runs.start(view, probe, request)
+            if started is None:
+                yield (gr.skip(),) * 5
+                return
+            cancel, turn = started
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
         reading, note = None, ""
@@ -597,21 +632,27 @@ def build_page(context):
             return
         yield (reading, *rendered(probe, reading, chosen), note, gr.skip())
 
-    def clear_reading(view):
+    def clear_reading(view, sequence=None):
         """Take the last reading off the page before the next run, so it never sits beside other text.
 
         This answers the click at once, outside the queue, and moves the
         view's turn, so a run still finishing from before the click publishes
         nothing after it.
         """
-        runs.turn(view)
-        return None, gr.update(value=[], visible=False), "", "", "", []
+        request = runs.begin_read(view, sequence)
+        if request is None:
+            return (gr.skip(),) * 6 + (uuid4().hex,)
+        return None, gr.update(value=[], visible=False), "", "", "", [], request
 
-    run.click(clear_reading, owner, [reading_state, strip, heat, reply, detail, token_table], queue=False)
-    read_event = run.click(read, [probe_state, mode, text, system, temperature, seed, max_tokens, include_prompt, as_user,
-                     owner, layer], [reading_state, strip, heat, detail, reply],
-              concurrency_id="probes-model", show_progress="hidden")
-    stop.click(runs.cancel, owner, None, queue=False, cancels=[read_event])
+    read_request = gr.Textbox(visible=False)
+    read_sequence = gr.Number(value=0, precision=0, visible=False)
+    next_read_sequence = "(owner, _) => [owner, (window.chatlabProbeReadSequence = (window.chatlabProbeReadSequence || 0) + 1)]"
+    read_capture = run.click(clear_reading, [owner, read_sequence],
+        [reading_state, strip, heat, reply, detail, token_table, read_request], queue=False, js=next_read_sequence)
+    read_event = read_capture.success(read, [probe_state, mode, text, system, temperature, seed, max_tokens, include_prompt, as_user,
+                     owner, layer, read_request], [reading_state, strip, heat, detail, reply],
+              concurrency_id="probes-model", show_progress="hidden", trigger_mode="always_last")
+    stop.click(runs.cancel, [owner, read_sequence], None, queue=False, js=next_read_sequence, cancels=[read_event])
 
     def on_screen(probe, reading, view):
         return probe is not None and reading is not None and reading["probe_id"] == probe["id"] \
