@@ -303,6 +303,28 @@ class AttributionTests(unittest.TestCase):
         self.assertFalse(any("forward" in vars(m) for m in model.modules()))
         self.assertTrue(all(p.requires_grad for p in model.parameters()))
 
+    def test_feature_edges_stop_between_decoder_chunks(self):
+        blocks = architecture.blocks(tiny_model("gemma3"))
+        held = tiny_transcoders(blocks)
+        recording = attribution.record(blocks, held, IDS)
+        stopped = False
+        graph = attribution.FrozenGraph(blocks, held, recording, 4, cancelled=lambda: stopped)
+        class Decoders:
+            def __getitem__(self, key):
+                nonlocal stopped
+                stopped = True
+                return original[key]
+        layer = next(i for i, (start, end) in enumerate(recording.layer_slices) if end - start > 1)
+        original = graph.decoders[layer]
+        graph.decoders[layer] = Decoders()
+        start, end = recording.layer_slices[layer]
+        try:
+            with mock.patch.object(attribution, "CHUNK_BYTES", 1):
+                with self.assertRaises(attribution.Cancelled):
+                    graph._feature_edges(torch.ones(1, graph.n, original.shape[-1]), layer, start, end)
+        finally:
+            graph.close()
+
     def test_recording_cancels_between_transcoder_layers(self):
         blocks = architecture.blocks(tiny_model("gemma3"))
         held = tiny_transcoders(blocks)
@@ -506,6 +528,14 @@ class RenderTests(unittest.TestCase):
                                  labels={feature["id"]: "my <name>"}, groups={"g": [feature["id"]]})
         self.assertIn("cg-node feature sel grouped", page)
         self.assertIn("my &lt;name&gt;", page)
+
+    def test_group_flow_paths_are_bounded_even_with_equal_weights(self):
+        graph = dict(nodes=[dict(id=str(i), kind="feature", layer=i, pos=0, feature=i) for i in range(12)],
+                     edges=[dict(source=str(i), target=str(j), weight=1.) for i in range(12) for j in range(i + 1, 12)])
+        groups = {str(i): [str(i)] for i in range(12)}
+        with mock.patch.object(render, "MAX_GROUP_FLOWS", 5):
+            page = render.group_view(graph, groups)
+        self.assertEqual(page.count('<path class="cg-edge'), 5)
 
     def test_group_view_and_card_show_measured_effects(self):
         members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"][:2]
@@ -846,6 +876,21 @@ class WorkbenchTests(unittest.TestCase):
                 with self.subTest(change=change), self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
 
+    def test_imported_effects_require_every_declared_token(self):
+        for where in ("baseline", "ablate", "boost"):
+            for missing in ("1", "2", "all"):
+                summary = lambda: dict(tokens={"1": .2, "2": .1}, pivot=.2)
+                effects = dict(prefixes=1, boost=2., every_position=False, pivot=[1], alternatives=[2],
+                               baseline=summary(), groups={"g": dict(active_prefixes=1,
+                                                                     ablate=summary(), boost=summary())})
+                value = effects["baseline"] if where == "baseline" else effects["groups"]["g"][where]
+                if missing == "all":
+                    value["tokens"].clear()
+                else:
+                    del value["tokens"][missing]
+                with self.subTest(where=where, missing=missing), self.assertRaises(ValueError):
+                    workbench._validate_effects(effects, {"g": []})
+
     def test_interventions_require_the_traced_weight_snapshot(self):
         session = SimpleNamespace(model_id="test/tiny", model_revision="a" * 40, load_id="test/tiny#2")
         graph = dict(model_id=session.model_id, model_revision="a" * 40)
@@ -929,6 +974,45 @@ class WorkbenchTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "safe filename"):
                         bench.save(bad)
             self.assertFalse(bench.graphs_dir().exists())
+
+    def test_graph_mutations_cannot_save_over_a_newer_publication(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                for name in ("group_selected", "rename_node", "delete_group"):
+                    fn = handlers[name]
+                    cell = dict(zip(fn.__code__.co_freevars, fn.__closure__))["save"]
+                    save = cell.cell_contents
+                    graph = small_graph()
+                    member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+                    graph["groups"] = {"old": [member]}
+                    save(graph, "view")
+                    newest = {**graph, "labels": {member: "newer"}}
+                    def concurrent(graph, owner, checked=False):
+                        save(newest, owner)
+                        return save(graph, owner, checked=checked)
+                    cell.cell_contents = concurrent
+                    try:
+                        args = {"group_selected": (graph, [member], "new", 40, False, "view"),
+                                "rename_node": (graph, member, "stale", [member], 40, False, "view"),
+                                "delete_group": (graph, "old", [member], 40, False, "view")}[name]
+                        result = fn(*args)
+                    finally:
+                        cell.cell_contents = save
+                    with self.subTest(handler=name):
+                        self.assertTrue(all(item == gr.skip() for item in result))
+                        stored = workbench.load_graph(Path(directory) / "graphs" / f"{graph['id']}.json")
+                        self.assertEqual(stored["labels"][member], "newer")
+            finally:
+                demo.close()
 
     def test_regrouping_clears_measured_effects(self):
         import gradio as gr
@@ -1132,6 +1216,15 @@ class WorkbenchTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "broken"):
             list(bench.background("owner", fails))
+
+    def test_stop_before_worker_registration_prevents_work(self):
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        work = mock.Mock(return_value="result")
+        bench.cancel("owner")
+        with self.assertRaises(attribution.Cancelled):
+            list(bench.background("owner", work))
+        work.assert_not_called()
+        self.assertEqual(list(bench.background("owner", work)), [("done", "result")])
 
     def test_one_run_per_view(self):
         bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
