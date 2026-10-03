@@ -126,6 +126,29 @@ class FitTests(unittest.TestCase):
                             self.assertRaisesRegex(ValueError, "folds.*match"):
                         probes.normalize(value | {"examples": examples, "folds": folds})
 
+    def test_imported_paired_examples_require_equal_counts(self):
+        value = trained()
+        for positive, negative in ((2, 3), (6, 3), (7, 12)):
+            examples = dict(positive=["a"] * positive, negative=["b"] * negative)
+            fields = dict(examples=examples, folds=min(probes.FOLDS, positive, negative))
+            with self.subTest(positive=positive, negative=negative), self.assertRaisesRegex(ValueError, "Paired.*equal"):
+                probes.normalize(value | fields | {"paired": True})
+            self.assertFalse(probes.normalize(value | fields | {"paired": False})["paired"])
+        for count in (2, 5, 12):
+            examples = dict(positive=["a"] * count, negative=["b"] * count)
+            self.assertTrue(probes.normalize(value | dict(examples=examples, folds=min(probes.FOLDS, count), paired=True))["paired"])
+
+    def test_imported_examples_reject_blanks_without_stripping_valid_text(self):
+        value = trained()
+        for side in ("positive", "negative"):
+            for blank in ("", " ", "\t\n", "\u2003"):
+                examples = dict(positive=["a", "b"], negative=["c", "d"])
+                examples[side][1] = blank
+                with self.subTest(side=side, blank=blank), self.assertRaisesRegex(ValueError, "nonblank"):
+                    probes.normalize(value | dict(examples=examples, folds=2))
+        examples = dict(positive=[" a ", "\tb"], negative=["c ", " d"])
+        self.assertEqual(probes.normalize(value | dict(examples=examples, folds=2))["examples"], examples)
+
     def test_the_fit_is_at_the_penalized_optimum(self):
         rng = np.random.default_rng(3)
         rows = rng.normal(size=(30, 50)) * rng.uniform(0.1, 10, size=50) + rng.normal(size=50)

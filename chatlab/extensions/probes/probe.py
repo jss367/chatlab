@@ -233,9 +233,11 @@ def normalize(value):
     examples = value.get("examples")
     if not isinstance(examples, dict) or not all(
             isinstance(examples.get(side), list) and 2 <= len(examples[side]) <= MAX_EXAMPLES
-            and all(isinstance(e, str) and len(e) <= 32768 for e in examples[side])
+            and all(isinstance(e, str) and e.strip() and len(e) <= 32768 for e in examples[side])
             for side in ("positive", "negative")):
-        raise ValueError("The probe needs 2–64 examples per side, each at most 32768 characters.")
+        raise ValueError("The probe needs 2–64 examples per side, each nonblank and at most 32768 characters.")
+    if value.get("paired", False) and len(examples["positive"]) != len(examples["negative"]):
+        raise ValueError("Paired probe examples need equal counts on both sides.")
     layers = value.get("layers")
     if not isinstance(layers, list) or not 1 <= len(layers) <= 256:
         raise ValueError("The probe needs between 1 and 256 layers.")
