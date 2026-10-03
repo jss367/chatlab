@@ -408,8 +408,10 @@ def build_page(context):
     # Selecting, naming and grouping ---------------------------------------------
 
     def picked(graph, raw_pick, session_id):
-        if not current_graph(graph, session_id):
-            return (gr.skip(),) * 5
+        with version_lock:
+            if not current_graph(graph, session_id):
+                return (gr.skip(),) * 5
+            stamp = version(session_id)
         try:
             data = json.loads(raw_pick)
             ids = {n["id"] for n in graph["nodes"]}
@@ -417,13 +419,16 @@ def build_page(context):
             focused = data["focus"] if data.get("focus") in ids else None
         except (TypeError, ValueError, KeyError):
             return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
-        with version_lock:
-            focused_nodes[session_id] = focused
         features = sum(1 for n in graph["nodes"] if n["id"] in chosen and n["kind"] == "feature")
         note = (f"{len(chosen)} selected, {features} of them features." if len(chosen) > 1 else "")
         node = node_of(graph, focused)
         name = (graph.get("labels") or {}).get(focused, "") if node and node["kind"] == "feature" else ""
-        return chosen, focused, describe_card(graph, focused), note, name
+        detail = describe_card(graph, focused)
+        with version_lock:
+            if version(session_id) != stamp or not current_graph(graph, session_id):
+                return (gr.skip(),) * 5
+            focused_nodes[session_id] = focused
+            return chosen, focused, detail, note, name
 
     pick.input(picked, [graph_state, pick, owner], [selection, focus, card, selected_note, label],
                concurrency_id="circuits-read", trigger_mode="always_last", show_progress="hidden")
