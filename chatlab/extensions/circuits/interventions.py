@@ -118,6 +118,9 @@ def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *,
         raise ValueError("Make at least one group from the graph first.")
     if not 0 <= boost <= 100:
         raise ValueError("The boost factor must be between 0 and 100.")
+    pivot = list(dict.fromkeys(pivot))
+    pivot_set = set(pivot)
+    alternatives = [t for t in dict.fromkeys(alternatives) if t not in pivot_set]
     report = progress or (lambda *_: None)
     stop = cancelled or (lambda: False)
     total = len(prefixes) * (1 + 2 * len(groups))

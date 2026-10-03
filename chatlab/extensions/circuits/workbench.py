@@ -566,6 +566,10 @@ def load_graph(path):
                 node["probability"] = float(node["probability"])
                 if not isinstance(node["text"], str) or not 0 <= node["probability"] <= 1:
                     raise ValueError
+        token_total = math.fsum(n["probability"] for n in nodes
+                                if n["kind"] == "target" and n["target_kind"] == "token")
+        if token_total > 1 + 1e-6:
+            raise ValueError
         edge_pairs = set()
         for edge in graph["edges"]:
             pair = (edge["source"], edge["target"])
