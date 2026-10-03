@@ -1029,6 +1029,12 @@ class WorkbenchTests(unittest.TestCase):
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     frames = list(handlers["run_interventions"]("view", old, "", "", "", True, 2, False, "group"))
                 self.assertEqual(frames[-1], (gr.skip(),) * 6)
+                ticket = handlers["begin_trace"]("view")
+                handlers["open_path"](path, 40, False, "view")
+                with mock.patch.object(workbench.Workbench, "background", side_effect=AssertionError("stale trace work")):
+                    stale_trace = list(handlers["run_trace"]("view", "", "test", "", False,
+                                       "The likeliest next tokens", "", "", 16, .8, .98, 8, 40, False, ticket))
+                self.assertTrue(all(value == gr.skip() for value in stale_trace[-1]))
                 feature_id = old["groups"]["group"][0]
                 self.assertTrue(all(value == gr.skip() for value in handlers["rename_node"](old, feature_id, "stale", [], 40, False, "view")))
                 self.assertTrue(all(value == gr.skip() for value in handlers["group_selected"](old, [feature_id], "stale", 40, False, "view")))

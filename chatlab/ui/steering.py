@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from uuid import uuid4
 
@@ -12,6 +13,8 @@ from chatlab.steering import compact, from_controls, normalize, read_vector
 from chatlab.ui.conversations import load_conversation
 from chatlab.ui.outputs import STEERED_LOAD_OUTPUT_NAMES, STEERING_OUTPUT_NAMES, Frame, skipped
 
+
+STEERING_LOCK = threading.RLock()
 
 EMPTY_STATUS = "Import a JSON vector to steer this conversation. Layers count from 0."
 
@@ -45,13 +48,14 @@ def steering_updates(forks):
 
 
 def store(forks, value):
-    forks = copy_forks(forks)
-    held = branch_sampling(forks, forks["active"])
-    generations = forks.setdefault("_steering_generation", {})
-    generations[forks["active"]] = generations.get(forks["active"], 0) + 1
-    held["steering"] = compact(value)
-    put_branch_sampling(forks, forks["active"], held)
-    return forks
+    with STEERING_LOCK:
+        forks = copy_forks(forks)
+        held = branch_sampling(forks, forks["active"])
+        generations = forks.setdefault("_steering_generation", {})
+        generations[forks["active"]] = generations.get(forks["active"], 0) + 1
+        held["steering"] = compact(value)
+        put_branch_sampling(forks, forks["active"], held)
+        return forks
 
 
 def import_vector(path, forks):

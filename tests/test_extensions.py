@@ -391,7 +391,8 @@ class RegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(gr.Error, "active conversation changed"):
                 application.fn(new_forks(), payload)
             from chatlab.conversation import copy_forks
-            application.fn(copy_forks(forks), payload)
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(copy_forks(forks), payload)
             from chatlab.ui.steering import store
             with self.assertRaisesRegex(gr.Error, "Steering changed"):
                 application.fn(store(forks, None), payload)
@@ -414,6 +415,43 @@ class RegistryTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=8) as pool:
                 receipts = list(pool.map(lambda _: capture.fn(forks), range(8)))
             self.assertEqual(len({r[-1] for r in receipts}), 8)
+            # Copies returned before State publication retain the live reservation ledger.
+            copied = copy_forks(forks)
+            before = copied["_steering_generation"][forks["active"]]
+            capture.fn(forks)
+            self.assertGreater(copied["_steering_generation"][forks["active"]], before)
+            from threading import Event
+            from chatlab.ui import layout as layout_module
+            entered, release, capture_started, captured_next = Event(), Event(), Event(), Event()
+            valid[0] = True
+            current_receipt = capture.fn(forks, selected)
+            current_payload = (payload[0], *current_receipt)
+            original_apply = layout_module.apply_vector
+            def paused_apply(*args):
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError("application was not released")
+                return original_apply(*args)
+            def later_capture():
+                capture_started.set()
+                receipt = capture.fn(forks, selected)
+                captured_next.set()
+                return receipt
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                with mock.patch.object(layout_module, "apply_vector", side_effect=paused_apply):
+                    applying = pool.submit(application.fn, forks, current_payload)
+                    self.assertTrue(entered.wait(1))
+                    newer = pool.submit(later_capture)
+                    self.assertTrue(capture_started.wait(1))
+                    try:
+                        self.assertFalse(captured_next.wait(0.05))
+                    finally:
+                        release.set()
+                    applied = applying.result(timeout=2)
+                    next_receipt = newer.result(timeout=2)
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(applied[0], current_payload)
+            application.fn(applied[0], (payload[0], *next_receipt))
             with self.assertRaisesRegex(gr.Error, "Steering changed"):
                 application.fn(forks, payload)
         finally:
