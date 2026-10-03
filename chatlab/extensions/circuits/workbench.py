@@ -458,7 +458,7 @@ def load_graph(path):
                 raise ValueError
         if not isinstance(graph["prompt"].get("raw"), bool):
             raise ValueError
-        for key in ("tokens", "alternatives"):
+        for key in ("tokens", "others", "alternatives"):
             values = graph["explain"].get(key, [])
             if not isinstance(values, list) or len(values) > 4096 or any(not isinstance(v, str) or len(v) > 4096 for v in values):
                 raise ValueError
