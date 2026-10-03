@@ -487,7 +487,7 @@ def load_graph(path):
                 node[field] = float(node[field])
                 if not math.isfinite(node[field]):
                     raise ValueError
-            if "text" in node and not isinstance(node["text"], str):
+            if "text" in node and (not isinstance(node["text"], str) or len(node["text"]) > 4096):
                 raise ValueError
             for field in ("promotes", "suppresses"):
                 values = node.get(field, [])

@@ -183,6 +183,25 @@ class AttributionTests(unittest.TestCase):
         grad, = torch.autograd.grad(odds, hidden)
         torch.testing.assert_close(direction, grad, rtol=1e-4, atol=1e-5)
 
+    def test_rare_contrast_sides_do_not_underflow_the_gradient_or_tracing_weight(self):
+        blocks, held, recording = self.frozen("qwen3")
+        with torch.no_grad():
+            blocks.unembed.weight.mul_(1000)
+        recording = attribution.record(blocks, held, IDS)
+        rare = recording.logits.argsort()[:4].tolist()
+        contrast = {"positive": rare[:2], "negative": rare[2:]}
+        targets = attribution.choose_targets(recording, self.decode, contrast=contrast)
+        self.assertEqual(targets[0]["probability"], 0.0)
+        direction = attribution.logit_directions(blocks, recording, targets)[0]
+        hidden = recording.final[-1].clone().requires_grad_(True)
+        logits = blocks.unembed(hidden.to(blocks.dtype)).float()
+        odds = torch.logsumexp(logits[rare[:2]].double(), 0) - torch.logsumexp(logits[rare[2:]].double(), 0)
+        expected, = torch.autograd.grad(odds, hidden)
+        torch.testing.assert_close(direction, expected, rtol=1e-4, atol=1e-5)
+        graph = attribution.attribute(blocks, held, IDS, self.decode, contrast=contrast,
+                                      settings=attribution.Settings(max_feature_nodes=16, batch_size=8))
+        self.assertGreater(sum(node["influence"] for node in graph["nodes"]), 0)
+
     def test_gemma2_saturated_contrast_matches_the_softcapped_log_odds_gradient(self):
         blocks, held, recording = self.frozen("gemma2")
         with torch.no_grad():
@@ -484,6 +503,14 @@ class RenderTests(unittest.TestCase):
         self.assertIn("×0.50", card)
         self.assertIn("cg-empty", render.group_view(self.graph, {}))
 
+    def test_group_names_cannot_collide_with_synthetic_flow_buckets(self):
+        members = [n["id"] for n in self.graph["nodes"] if n["kind"] == "feature"]
+        normal = render.group_view(self.graph, {"group": members})
+        for name in ("@prompt", "@error", "@target"):
+            view = render.group_view(self.graph, {name: members})
+            self.assertEqual(view.count('class="cg-edge '), normal.count('class="cg-edge '))
+            self.assertIn(f'data-group="{name}"', view)
+
     def test_feature_card_marks_the_strongest_token(self):
         feature = next(n for n in self.graph["nodes"] if n["kind"] == "feature")
         record = {"activation_frequency": 0.001, "top_logits": [" a"], "bottom_logits": [" b"],
@@ -673,7 +700,8 @@ class WorkbenchTests(unittest.TestCase):
             path = Path(directory) / "upload.json"
             for change in ({"stats": "bad"}, {"stats": {"active_features": "bad"}},
                            {"explain": "bad"}, {"explain": {"tokens": [1]}}, {"prompt": "bad"},
-                           {"nodes": [{**feature, "promotes": [1]}]}, {"nodes": [{**feature, "suppresses": "bad"}]}):
+                           {"nodes": [{**feature, "promotes": [1]}]}, {"nodes": [{**feature, "suppresses": "bad"}]},
+                           {"nodes": [{**graph["nodes"][-1], "text": "&" * 4097}]}):
                 path.write_text(json.dumps(graph | change))
                 with self.subTest(change=change), self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
