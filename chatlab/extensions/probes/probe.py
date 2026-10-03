@@ -282,6 +282,8 @@ def normalize(value):
     folds = value.get("folds")
     if type(folds) is not int or not 2 <= folds <= FOLDS:
         raise ValueError("Probe folds must be an integer between 2 and 5.")
+    if folds != min(FOLDS, len(examples["positive"]), len(examples["negative"])):
+        raise ValueError("Probe folds must match the number of examples on each side.")
     l2 = number(value.get("l2"), "L2 strength")
     if l2 <= 0:
         raise ValueError("L2 strength must be positive and finite.")

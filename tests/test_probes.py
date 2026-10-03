@@ -62,7 +62,7 @@ def synthetic(count, sign, layers=3, width=16, signal_layer=1, seed=0):
 def trained(**changes):
     layers, folds = probes.train(synthetic(12, 1), synthetic(12, -1))
     fields = dict(name="Test", model_id="test/tiny", positive_label="Yes", negative_label="No",
-                  positive_examples=["a", "b"], negative_examples=["c", "d"], pool="last",
+                  positive_examples=[f"a{i}" for i in range(12)], negative_examples=[f"b{i}" for i in range(12)], pool="last",
                   chat_template=False, l2=1.0, layers=layers, folds=folds)
     return probes.build(**(fields | changes))
 
@@ -111,7 +111,20 @@ class FitTests(unittest.TestCase):
             with self.subTest(folds=folds), self.assertRaisesRegex(ValueError, "folds.*integer"):
                 probes.normalize(value | {"folds": folds})
         for folds in range(2, 6):
-            self.assertEqual(probes.normalize(value | {"folds": folds})["folds"], folds)
+            self.assertEqual(probes.normalize(value | {"folds": folds,
+                "examples": {"positive": ["a"] * folds, "negative": ["b"] * folds}})["folds"], folds)
+
+    def test_imported_folds_match_the_example_counts(self):
+        value = trained()
+        for positive, negative in ((2, 2), (6, 3), (7, 12)):
+            examples = dict(positive=["a"] * positive, negative=["b"] * negative)
+            expected = min(probes.FOLDS, positive, negative)
+            self.assertEqual(probes.normalize(value | {"examples": examples, "folds": expected})["folds"], expected)
+            for folds in range(2, 6):
+                if folds != expected:
+                    with self.subTest(positive=positive, negative=negative, folds=folds), \
+                            self.assertRaisesRegex(ValueError, "folds.*match"):
+                        probes.normalize(value | {"examples": examples, "folds": folds})
 
     def test_the_fit_is_at_the_penalized_optimum(self):
         rng = np.random.default_rng(3)
