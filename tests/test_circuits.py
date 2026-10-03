@@ -148,6 +148,30 @@ class AttributionTests(unittest.TestCase):
             rebuilt = held.decode(layer, acts) + recording.errors[layer]
             torch.testing.assert_close(rebuilt, recording.outputs[layer].float(), rtol=1e-5, atol=1e-5)
 
+    def test_half_precision_decoder_edges_and_error_reconstruct_the_same_output(self):
+        for dtype in (torch.float16, torch.bfloat16):
+            model = tiny_model("gemma3")
+            blocks = architecture.blocks(model)
+            held = tiny_transcoders(blocks)
+            held.w_dec = [weight.to(dtype) for weight in held.w_dec]
+            recording = attribution.record(blocks, held, IDS)
+            for layer, (start, end) in enumerate(recording.layer_slices):
+                acts = torch.zeros(len(IDS), WIDTH)
+                acts[recording.feature_position[start:end], recording.feature_index[start:end]] = recording.activation[start:end]
+                reconstruction = acts @ held.decoder_rows(layer, torch.arange(WIDTH)) + held.b_dec[layer].float()
+                with self.subTest(dtype=dtype, layer=layer):
+                    torch.testing.assert_close(reconstruction + recording.errors[layer], recording.outputs[layer].float(),
+                                               rtol=1e-5, atol=1e-5)
+            targets = attribution.choose_targets(recording, self.decode)
+            directions = attribution.logit_directions(blocks, recording, targets)[:4]
+            graph = attribution.FrozenGraph(blocks, held, recording, batch_size=4)
+            try:
+                vectors = [("vector", direction) for direction in directions]
+                rows, biases = graph.rows(vectors), graph.bias_terms(vectors)
+            finally:
+                graph.close()
+            torch.testing.assert_close(rows.sum(1) + biases, directions @ recording.final[-1], rtol=1e-4, atol=1e-4)
+
     def test_edges_into_a_logit_add_up_to_it(self):
         for kind in ("gemma3", "gemma2", "qwen3"):
             with self.subTest(kind=kind):
@@ -1009,6 +1033,24 @@ class WorkbenchTests(unittest.TestCase):
             path.write_text(json.dumps(graph | {"explain": explain}))
             self.assertEqual(workbench.load_graph(path)["explain"], explain)
 
+    def test_imported_feature_counts_influence_and_target_positions_are_physical(self):
+        graph = small_graph()
+        kept = sum(n["kind"] == "feature" for n in graph["nodes"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for changes in (dict(stats=graph["stats"] | {"kept_features": kept + 1}),
+                            dict(stats=dict(kept_features=kept, traced_features=kept - 1, active_features=kept)),
+                            dict(stats=dict(kept_features=kept, traced_features=kept + 1, active_features=kept)),
+                            dict(nodes=[dict(n, influence=-.1) for n in graph["nodes"]]),
+                            dict(nodes=[dict(n, position=0) if n["kind"] == "target" else n for n in graph["nodes"]])):
+                path.write_text(json.dumps(graph | changes))
+                with self.subTest(fields=list(changes)), self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+            path.write_text(json.dumps(graph | {"stats": {}}))
+            self.assertEqual(workbench.load_graph(path)["stats"], dict(error_share=0., kept_features=kept, traced_features=kept, active_features=kept))
+            path.write_text(json.dumps(graph | {"nodes": [dict(n, effect=-1.) for n in graph["nodes"]]}))
+            self.assertTrue(all(n["effect"] == -1. for n in workbench.load_graph(path)["nodes"]))
+
     def test_imported_targets_cannot_alias_the_same_objective(self):
         graph = small_graph()
         target = next(n for n in graph["nodes"] if n["kind"] == "target")
@@ -1018,10 +1060,10 @@ class WorkbenchTests(unittest.TestCase):
             path = Path(directory) / "upload.json"
             for original, alias in ((token, dict(token, id="alias")),
                                      (contrast, dict(contrast, id="alias", positive=[2, 1], negative=[4, 3]))):
-                path.write_text(json.dumps(graph | {"nodes": [original, alias], "edges": []}))
+                path.write_text(json.dumps(graph | {"nodes": [original, alias], "edges": [], "stats": {}}))
                 with self.subTest(kind=original["target_kind"]), self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
-            path.write_text(json.dumps(graph | {"nodes": [token, dict(token, id="distinct", token_id=2)], "edges": []}))
+            path.write_text(json.dumps(graph | {"nodes": [token, dict(token, id="distinct", token_id=2)], "edges": [], "stats": {}}))
             self.assertEqual(len(workbench.load_graph(path)["nodes"]), 2)
 
     def test_imported_distinct_token_targets_share_one_probability_budget(self):
@@ -1032,7 +1074,7 @@ class WorkbenchTests(unittest.TestCase):
             for a, b, valid in ((.9, .9, False), (.6, .4000005, True), (.6, .400002, False)):
                 nodes = [dict(target, id="a", target_kind="token", token_id=1, probability=a),
                          dict(target, id="b", target_kind="token", token_id=2, probability=b)]
-                path.write_text(json.dumps(graph | {"nodes": nodes, "edges": []}))
+                path.write_text(json.dumps(graph | {"nodes": nodes, "edges": [], "stats": {}}))
                 with self.subTest(probabilities=(a, b)):
                     if valid:
                         self.assertEqual(len(workbench.load_graph(path)["nodes"]), 2)
@@ -1360,7 +1402,7 @@ class WorkbenchTests(unittest.TestCase):
             self.assertTrue(all(isinstance(edge["weight"], float) for edge in loaded["edges"]))
             render.graph_view(loaded)
             # Chosen-token traces can legitimately contain more than the ten default targets.
-            chosen = dict(graph, nodes=[{**graph["nodes"][-1], "id": f"target:{i}", "token_id": i} for i in range(20)], edges=[])
+            chosen = dict(graph, nodes=[{**graph["nodes"][-1], "id": f"target:{i}", "token_id": i} for i in range(20)], edges=[], stats={})
             path.write_text(json.dumps(chosen))
             self.assertEqual(len(workbench.load_graph(path)["nodes"]), 20)
             bad = Path(directory) / "bad.json"
