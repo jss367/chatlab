@@ -204,6 +204,8 @@ def choose_targets(recording, decode, token_ids=None, contrast=None):
     if contrast:
         positive = list(dict.fromkeys(contrast["positive"]))
         negative = list(dict.fromkeys(contrast["negative"]))
+        if len(set(positive) | set(negative)) > MAX_CHOSEN_TARGETS:
+            raise ValueError(f"A contrast supports at most {MAX_CHOSEN_TARGETS:,} distinct tokens.")
         if not positive or not negative:
             raise ValueError("A contrast needs tokens on both sides.")
         if set(positive) & set(negative):
