@@ -799,6 +799,29 @@ class WorkbenchTests(unittest.TestCase):
                                     2., False, lambda *args: None, lambda: stopped[0])
             self.assertEqual(encoding.call_count, 1)
 
+    def test_reusing_group_name_preserves_its_previous_members(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                group = handlers_by_name(demo)["group_selected"]
+                graph = small_graph()
+                members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
+                first = group(graph, members[:1], "named", 40, False, "view")[0]
+                second = group(first, members[1:], "named", 40, False, "view")[0]
+                self.assertEqual(second["groups"]["named"], members)
+                self.assertEqual(first["groups"]["named"], members[:1])
+                repeated = group(second, members[:1], "named", 40, False, "view")[0]
+                self.assertEqual(repeated["groups"]["named"], members)
+            finally:
+                demo.close()
+
     def test_invalid_target_and_intervention_tokens_fail_before_model_loading(self):
         session = SimpleNamespace(model_revision=None, encode=lambda text: [1, 2] if text == "multi" else [int(text)])
         models = SimpleNamespace(open_session=lambda: contextlib.nullcontext(session))
@@ -1032,6 +1055,13 @@ class WorkbenchTests(unittest.TestCase):
             loaded = workbench.load_graph(path)
             self.assertEqual(loaded["effects"]["baseline"]["pivot"], 0.2)
             render.group_view(loaded, {}, loaded["effects"])
+            for boost in (-1., 100.1):
+                path.write_text(json.dumps(graph | {"effects": effects | {"boost": boost}}))
+                with self.subTest(boost=boost), self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+            for boost in (0., 100.):
+                path.write_text(json.dumps(graph | {"effects": effects | {"boost": boost}}))
+                self.assertEqual(workbench.load_graph(path)["effects"]["boost"], boost)
             for change in ({"labels": {feature["id"]: 1}}, {"labels": {"missing": "name"}},
                            {"effects": "bad"}, {"effects": {"groups": [], "baseline": "bad"}}):
                 path.write_text(json.dumps(graph | change))
