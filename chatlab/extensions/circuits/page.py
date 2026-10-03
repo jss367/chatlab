@@ -177,6 +177,7 @@ def build_page(context):
         graph_state = gr.State(None)
         trace_request = gr.Textbox(visible=False)
         open_request = gr.Textbox(visible=False)
+        intervention_request = gr.Textbox(visible=False)
         rename_request = gr.Textbox(visible=False)
         group_request = gr.Textbox(visible=False)
         delete_request = gr.Textbox(visible=False)
@@ -446,6 +447,8 @@ def build_page(context):
             if not stale:
                 path = save(graph, session_id)
                 stamp = version(session_id)
+                if request is not None:
+                    trace_requests[session_id] = (request, stamp)
         if stale:
             yield (gr.skip(), gr.skip(), *skip)
             return
@@ -643,9 +646,9 @@ def build_page(context):
     ablate_event = ablate.click(ablate_focused, [owner, graph_state, focus], card, concurrency_id="circuits")
 
     def run_interventions(session_id, graph, pivot_text, alternative_text, prefix_text, include, factor, everywhere,
-                          name):
+                          name, request=None):
         fresh, stamp = checked_version(graph, session_id)
-        if not fresh:
+        if not fresh or not edit_current(graph, session_id, request):
             yield (gr.skip(),) * 6
             return
         if not graph:
@@ -661,6 +664,9 @@ def build_page(context):
                 raise ValueError("Include the traced prompt or add replies to average over.")
 
             def work(report, cancelled):
+                with version_lock:
+                    if version(session_id) != stamp or not edit_current(graph, session_id, request):
+                        raise Cancelled()
                 return bench.group_effects(graph, parse_tokens(pivot_text), parse_tokens(alternative_text),
                                            extra, include, factor, bool(everywhere), report, cancelled)
 
@@ -670,25 +676,35 @@ def build_page(context):
                 else:
                     effects = item[1]
         except Cancelled:
-            yield ("Stopped.", *skip)
+            yield ("Stopped.", *skip) if (version(session_id) == stamp and edit_current(graph, session_id, request)) else (gr.skip(),) * 6
             return
         except (TypeError, ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
         with version_lock:
-            stale = version(session_id) != stamp
+            stale = version(session_id) != stamp or not edit_current(graph, session_id, request)
             if not stale:
                 graph = {**graph, "effects": effects}
-                path = save(graph, session_id)
+                path = save(graph, session_id, checked=True, action=request)
                 stamp = version(session_id)
         if stale:
             yield (gr.skip(),) * 6
             return
         frame = (f"Measured {len(graph['groups'])} group{'s' * (len(graph['groups']) != 1)} on "
                f"{effects['prefixes']} prefix{'es' * (effects['prefixes'] != 1)}.", graph, *draw_groups(graph, name), path)
-        yield frame if version(session_id) == stamp else (gr.skip(),) * 6
+        yield frame if version(session_id) == stamp and edit_current(graph, session_id, request) else (gr.skip(),) * 6
 
-    intervention_event = run.click(run_interventions, [owner, graph_state, pivot, alternatives, prefixes, include_prompt, boost,
-                                  every_position, group_pick],
+    def begin_interventions(graph, session_id, sequence=None):
+        with version_lock:
+            if not reserve_action(session_id, sequence):
+                return "invalid"
+            trace_requests.pop(session_id, None)
+            open_requests.pop(session_id, None)
+            bench.cancel(session_id)
+            return begin_edit(graph, session_id, action_sequences[session_id])
+
+    intervention_event = run.click(begin_interventions, [graph_state, owner, action_sequence], intervention_request,
+                                   queue=False, js="(graph, owner, _) => [graph, owner, " + next_action_sequence + "]").success(run_interventions, [owner, graph_state, pivot, alternatives, prefixes, include_prompt, boost,
+                                  every_position, group_pick, intervention_request],
               [run_progress, graph_state, groups_view, group_pick, group_card, download],
               concurrency_id="circuits", show_progress="hidden")
 
@@ -744,10 +760,13 @@ def build_page(context):
                 open_requests.pop(session_id, None)
                 trace_requests.pop(session_id, None)
                 bench.cancel(session_id)
+                sequence = action_sequences.get(session_id, 0)
                 offered = staged(path, graph, session_id)
         except OSError:
             offered = None
-        return show_graph(graph, offered, shown, errors)
+        frame = show_graph(graph, offered, shown, errors)
+        with version_lock:
+            return frame if current_graph(graph, session_id) and action_sequences.get(session_id, 0) == sequence else skip
 
     for control, submit in ((saved, saved.input), (upload, upload.upload)):
         event = submit(begin_open, [control, owner, action_sequence], open_request, queue=False,
