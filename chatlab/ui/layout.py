@@ -563,18 +563,31 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
             return (*applied, CHAT_PAGE, *show_page(CHAT_PAGE),
                     *(gr.update(visible=False) for _ in pages.extensions))
         outputs = [states.forks, *chat_page.steering.outputs, *page_outputs]
+        captured = gr.State(None)
+        def capture_steering(forks, *values):
+            # Reserve only ephemeral request metadata on the live view;
+            # returning a copied conversation here could overwrite a queued reply.
+            identity = forks.setdefault("_view_identity", uuid4().hex)
+            branch = forks.get("active", MAIN_BRANCH)
+            generations = forks.setdefault("_steering_generation", {})
+            generations[branch] = generations.get(branch, 0) + 1
+            return (deepcopy(values), branch, identity, generations[branch])
+        def validate_receipt(forks, branch, identity, generation):
+            if ((forks or {}).get("active", MAIN_BRANCH) != branch
+                    or (forks or {}).get("_view_identity") != identity):
+                raise gr.Error("The active conversation changed while preparing steering. Try again on the intended conversation.")
+            if (forks.get("_steering_generation") or {}).get(branch) != generation:
+                raise gr.Error("Steering changed while this request was preparing. Keep the newer choice or try again.")
+        event = button.click(capture_steering, [states.forks, *inputs], captured, queue=False)
         if prepare is None:
-            button.click(steer, [states.forks, *inputs], outputs, concurrency_id=CONVERSATION_PANE_QUEUE)
+            def apply_captured_steering(forks, receipt, apply=steer):
+                values, branch, identity, generation = receipt
+                validate_receipt(forks, branch, identity, generation)
+                return apply(forks, *values)
+            event.success(apply_captured_steering, [states.forks, captured], outputs,
+                          concurrency_id=CONVERSATION_PANE_QUEUE)
         else:
-            captured, prepared = gr.State(None), gr.State(None)
-            def capture_steering(forks, *values):
-                # Reserve only ephemeral request metadata on the live view;
-                # returning a copied conversation here could overwrite a queued reply.
-                identity = forks.setdefault("_view_identity", uuid4().hex)
-                branch = forks.get("active", MAIN_BRANCH)
-                generations = forks.setdefault("_steering_generation", {})
-                generations[branch] = generations.get(branch, 0) + 1
-                return (deepcopy(values), branch, identity, generations[branch])
+            prepared = gr.State(None)
             def prepare_steering(receipt, build=prepare):
                 values, branch, identity, generation = receipt
                 try:
@@ -583,13 +596,8 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
                     raise gr.Error(str(error)) from error
             def apply_prepared_steering(forks, payload, apply=steer):
                 value, values, branch, identity, generation = payload
-                if ((forks or {}).get("active", MAIN_BRANCH) != branch
-                        or (forks or {}).get("_view_identity") != identity):
-                    raise gr.Error("The active conversation changed while preparing steering. Try again on the intended conversation.")
-                if (forks.get("_steering_generation") or {}).get(branch) != generation:
-                    raise gr.Error("Steering changed while this request was preparing. Keep the newer choice or try again.")
+                validate_receipt(forks, branch, identity, generation)
                 return apply(forks, value, *values)
-            event = button.click(capture_steering, [states.forks, *inputs], captured, queue=False)
             prepared_event = event.success(prepare_steering, captured, prepared,
                                            concurrency_id="extension-steering-prepare")
             prepared_event.success(apply_prepared_steering, [states.forks, prepared], outputs,

@@ -311,12 +311,12 @@ class RegistryTests(unittest.TestCase):
         buttons = []
         def build(context):
             button = gr.Button("Steer")
-            strength = gr.Number(2.0)
+            strength = gr.State({"strength": 2.0})
             def vector(amount):
                 if amount is None:
                     raise ValueError("Pick a feature first.")
                 return {"format": "chatlab-steering-1", "model_id": "org/model", "layer": 3,
-                        "vector": [1.0, 0.0], "strength": amount}
+                        "vector": [1.0, 0.0], "strength": amount["strength"]}
             context.navigation.steer_chat(button, vector, [strength])
             buttons.append(button)
         extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
@@ -324,24 +324,32 @@ class RegistryTests(unittest.TestCase):
             demo = app.build_app()
         try:
             listener = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
-            self.assertEqual(listener.concurrency_id, 'conversation-pane')
+            self.assertFalse(listener.queue)
+            application = next(fn for fn in demo.fns.values()
+                               if fn.fn and fn.fn.__name__ == "apply_captured_steering")
+            self.assertEqual(application.concurrency_id, 'conversation-pane')
+            forks = new_forks()
+            selected = {"strength": 2.0}
+            receipt = listener.fn(forks, selected)
+            selected["strength"] = 9.0
             with mock.patch('gradio.Info') as info:
-                updates = listener.fn(new_forks(), 2.0)
+                updates = application.fn(forks, receipt)
             self.assertIn("layer 3", info.call_args.args[0])
             forks = updates[0]
             held = branch_sampling(forks, MAIN_BRANCH)["steering"]
             self.assertEqual((held["model_id"], held["layer"], held["strength"]), ("org/model", 3, 2.0))
             self.assertEqual(held["format"], "chatlab-steering-reference-1")
-            labelled = dict(zip(listener.outputs, updates, strict=True))
+            labelled = dict(zip(application.outputs, updates, strict=True))
             nav = next(b for b in labelled if getattr(b, 'elem_id', None) == 'nav')
             self.assertEqual(labelled[nav], 'Chat')
             chat = next(b for b in labelled if getattr(b, 'elem_id', None) == 'chat-page')
             self.assertTrue(labelled[chat]['visible'])
-            self.assertFalse(labelled[listener.outputs[-1]]['visible'])
+            self.assertFalse(labelled[application.outputs[-1]]['visible'])
             enabled = next(b for b in labelled if getattr(b, 'label', None) == 'Enable steering')
             self.assertEqual(labelled[enabled]['value'], True)
             with self.assertRaisesRegex(gr.Error, "Pick a feature"):
-                listener.fn(new_forks(), None)
+                empty = new_forks()
+                application.fn(empty, listener.fn(empty, None))
         finally:
             demo.close()
 
