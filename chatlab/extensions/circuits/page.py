@@ -40,6 +40,7 @@ JS = r"""
     Object.getOwnPropertyDescriptor(prototype, 'value').set.call(field, value);
     field.dispatchEvent(new Event('input', {bubbles: true}));
   };
+  let featureClick = 0;
   document.addEventListener('click', event => {
     const node = event.target.closest('#circuits-graph .cg-node[data-node]');
     if (node) {
@@ -59,7 +60,7 @@ JS = r"""
     if (row) {
       row.closest('tbody').querySelectorAll('tr.sel').forEach(r => r.classList.remove('sel'));
       row.classList.add('sel');
-      write('#circuits-feature-pick', JSON.stringify({feature: Number(row.dataset.feature), page_id: row.closest(".cf-list").dataset.page, nonce: Date.now()}));
+      write('#circuits-feature-pick', JSON.stringify({feature: Number(row.dataset.feature), page_id: row.closest(".cf-list").dataset.page, nonce: ++featureClick}));
       return;
     }
     const group = event.target.closest('#circuits-groups .cg-group[data-group]');

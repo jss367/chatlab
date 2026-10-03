@@ -87,7 +87,7 @@ def build_browser(context, bench):
 
     owner = gr.State(value=lambda: uuid4().hex, delete_callback=forget)
     request = gr.State(None)
-    pick_request = gr.State(None)
+    pick_request = gr.Textbox(visible=False)
 
     def current(view, stamp, ready=False):
         with page_lock:
@@ -189,7 +189,8 @@ def build_browser(context, bench):
         try:
             payload = json.loads(raw)
             feature = payload["feature"]
-            if (not page or payload.get("page_id") != page["stamp"] or type(feature) is not int
+            nonce = payload.get("nonce")
+            if (type(nonce) is not int or not 0 < nonce < 2**53 or not page or payload.get("page_id") != page["stamp"] or type(feature) is not int
                     or not page["start"] <= feature < page["start"] + page["count"]):
                 return (gr.skip(),) * 3
         except (TypeError, ValueError, KeyError):
@@ -198,15 +199,18 @@ def build_browser(context, bench):
             state = pages.get(view)
             if not state or state["stamp"] != page["stamp"] or not state["ready"]:
                 return (gr.skip(),) * 3
+            if nonce <= state.get("selection_nonce", 0):
+                return (gr.skip(),) * 3
             stamp = uuid4().hex
-            state.update(selection_stamp=stamp, selection_ready=False)
+            state.update(selection_stamp=stamp, selection_ready=False, selection_nonce=nonce)
         return stamp, None, gr.update(interactive=False)
 
     def picked(page, raw, view, stamp):
         try:
             payload = json.loads(raw)
             feature = payload["feature"]
-            if (not page or not current(view, page["stamp"], ready=True)
+            nonce = payload.get("nonce")
+            if (type(nonce) is not int or not 0 < nonce < 2**53 or not page or not current(view, page["stamp"], ready=True)
                     or payload.get("page_id") != page["stamp"] or type(feature) is not int
                     or not page["start"] <= feature < page["start"] + page["count"]):
                 return (gr.skip(),) * 3
@@ -214,7 +218,7 @@ def build_browser(context, bench):
             return (gr.skip(),) * 3
         with page_lock:
             state = pages.get(view)
-            if not state or state.get("selection_stamp") != stamp:
+            if not state or state.get("selection_stamp") != stamp or state.get("selection_nonce") != nonce:
                 return (gr.skip(),) * 3
         try:
             record, error = bench.records(spec_named(page["set"])).get(page["layer"], feature), None
@@ -224,7 +228,8 @@ def build_browser(context, bench):
         detail_frame = render.feature_detail(page["layer"], feature, record, error)
         with page_lock:
             state = pages.get(view)
-            if not state or state["stamp"] != page["stamp"] or state.get("selection_stamp") != stamp:
+            if (not state or state["stamp"] != page["stamp"] or state.get("selection_stamp") != stamp
+                    or state.get("selection_nonce") != nonce):
                 return (gr.skip(),) * 3
             state["selection_ready"] = True
         return detail_frame, selected, gr.update(interactive=True)

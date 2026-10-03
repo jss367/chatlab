@@ -1120,6 +1120,25 @@ class WorkbenchTests(unittest.TestCase):
                 with self.subTest(change=change), self.assertRaisesRegex(ValueError, "not a valid"):
                     workbench.load_graph(path)
 
+    def test_oversized_group_map_is_rejected_before_effect_validation(self):
+        graph = small_graph()
+        graph["groups"] = {f"g{i}": [] for i in range(4097)}
+        graph["effects"] = {"groups": {name: {} for name in graph["groups"]}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            path.write_text(json.dumps(graph))
+            with mock.patch.object(workbench, "_validate_effects", side_effect=AssertionError("effects traversed")) as validate:
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+                validate.assert_not_called()
+
+    def test_imported_measured_effects_need_a_pivot(self):
+        summary = dict(tokens={"2": .1}, pivot=0.)
+        effects = dict(prefixes=1, boost=2., every_position=False, pivot=[], alternatives=[2],
+                       baseline=summary, groups={"g": dict(active_prefixes=1, ablate=summary, boost=summary)})
+        with self.assertRaises(ValueError):
+            workbench._validate_effects(effects, {"g": []})
+
     def test_imported_token_probability_sets_are_consistent_distributions(self):
         for where in ("baseline", "ablate", "boost"):
             def summary():
@@ -1930,10 +1949,10 @@ class BrowserTests(unittest.TestCase):
             old = show(browser.DEFAULT_SET, 3, 0, None)[2]
             new = show(browser.DEFAULT_SET, 4, 0, None)[2]
             records.get.reset_mock()
-            self.assertEqual(pick(new, json.dumps(dict(feature=2, page_id=old["stamp"]))), (gr.skip(),) * 3)
-            self.assertEqual(pick(new, json.dumps(dict(feature=99, page_id=new["stamp"]))), (gr.skip(),) * 3)
+            self.assertEqual(pick(new, json.dumps(dict(feature=2, page_id=old["stamp"], nonce=1))), (gr.skip(),) * 3)
+            self.assertEqual(pick(new, json.dumps(dict(feature=99, page_id=new["stamp"], nonce=2))), (gr.skip(),) * 3)
             records.get.assert_not_called()
-            card, selected, _ = pick(new, json.dumps(dict(feature=2, page_id=new["stamp"])))
+            card, selected, _ = pick(new, json.dumps(dict(feature=2, page_id=new["stamp"], nonce=3)))
             self.assertEqual((selected["layer"], selected["feature"]), (4, 2))
             self.assertIn("feature 2", card)
             html = show(browser.DEFAULT_SET, 4, 0, None)[0]
@@ -1958,7 +1977,7 @@ class BrowserTests(unittest.TestCase):
             show = next(listener.fn for listener in demo.fns.values()
                         if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
             page = show(browser.DEFAULT_SET, 3, 0, None, "view", callbacks["begin_page"]("view")[0])[2]
-            raw = json.dumps(dict(feature=2, page_id=page["stamp"]))
+            raw = json.dumps(dict(feature=2, page_id=page["stamp"], nonce=1))
             selected = callbacks["picked"](page, raw, "view", callbacks["begin_pick"](page, raw, "view")[0])[1]
             records.get.side_effect = OSError("range unavailable")
             with mock.patch.object(transcoders, "decoder_row", return_value=[0.5, -1.0]) as row:
@@ -2001,6 +2020,49 @@ class BrowserTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_late_old_row_reservation_cannot_replace_newer_click(self):
+        import gradio as gr
+        from functools import partial
+        from ui_support import handlers_by_name
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        vectors = []
+        context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
+        bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
+        with gr.Blocks() as demo:
+            browser.build_browser(context, bench)
+        try:
+            handlers = handlers_by_name(demo)
+            show = next(fn.fn for fn in demo.fns.values() if isinstance(fn.fn, partial) and fn.fn.func.__name__ == "list_page")
+            page = show(browser.DEFAULT_SET, 3, 0, None, "view", handlers["begin_page"]("view")[0])[2]
+            older = json.dumps(dict(feature=1, page_id=page["stamp"], nonce=1))
+            newer = json.dumps(dict(feature=2, page_id=page["stamp"], nonce=2))
+            entered, release = Event(), Event()
+            parse = json.loads
+            def delayed(raw):
+                if raw == older:
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("old selection was not released")
+                return parse(raw)
+            with mock.patch.object(browser.json, "loads", side_effect=delayed), ThreadPoolExecutor(max_workers=2) as pool:
+                old = pool.submit(handlers["begin_pick"], page, older, "view")
+                self.assertTrue(entered.wait(1))
+                try:
+                    ticket = handlers["begin_pick"](page, newer, "view")[0]
+                finally:
+                    release.set()
+                self.assertEqual(old.result(timeout=2), (gr.skip(),) * 3)
+            self.assertEqual(handlers["picked"](page, older, "view", ticket), (gr.skip(),) * 3)
+            selected = handlers["picked"](page, newer, "view", ticket)[1]
+            self.assertEqual(selected["feature"], 2)
+            listener = next(fn for fn in demo.fns.values() if fn.name == "begin_pick")
+            self.assertIsInstance(listener.outputs[0], gr.Textbox)
+            self.assertFalse(listener.queue)
+        finally:
+            demo.close()
+
     def test_steering_is_refused_when_another_row_is_picked(self):
         import gradio as gr
         from functools import partial
@@ -2017,7 +2079,7 @@ class BrowserTests(unittest.TestCase):
             show = next(listener.fn for listener in demo.fns.values()
                         if isinstance(listener.fn, partial) and listener.fn.func.__name__ == "list_page")
             page = show(browser.DEFAULT_SET, 3, 0, None, "view", begin("view")[0])[2]
-            raw = lambda feature: json.dumps(dict(feature=feature, page_id=page["stamp"]))
+            raw = lambda feature: json.dumps(dict(feature=feature, page_id=page["stamp"], nonce=feature))
             stamp = handlers["begin_pick"](page, raw(1), "view")[0]
             selected = handlers["picked"](page, raw(1), "view", stamp)[1]
             changed = handlers["begin_pick"](page, raw(2), "view")

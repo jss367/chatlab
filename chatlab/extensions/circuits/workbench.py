@@ -592,10 +592,10 @@ def load_graph(path):
                 key not in feature_ids or not isinstance(value, str) or len(value) > 4096
                 for key, value in graph["labels"].items()):
             raise ValueError
-        if graph["effects"] is not None:
-            _validate_effects(graph["effects"], graph["groups"])
         if len(graph["groups"]) > 4096:
             raise ValueError
+        if graph["effects"] is not None:
+            _validate_effects(graph["effects"], graph["groups"])
         memberships = set()
         for name, members in graph["groups"].items():
             if (not isinstance(name, str) or not 1 <= len(name) <= 60 or not isinstance(members, list) or len(members) > 4096
@@ -617,6 +617,8 @@ def _validate_effects(effects, groups):
     if not math.isfinite(effects["boost"]) or not 0 <= effects["boost"] <= 100 or not isinstance(effects["every_position"], bool):
         raise ValueError
     tokens = []
+    if not effects["pivot"]:
+        raise ValueError
     for key in ("pivot", "alternatives"):
         values = effects[key]
         if not isinstance(values, list) or len(values) > 4096 or any(type(t) is not int or not 0 <= t < 2 ** 31 for t in values):
