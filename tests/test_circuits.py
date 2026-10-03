@@ -1247,6 +1247,26 @@ class WorkbenchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "vocabulary"):
                 workbench.Workbench._measurement_ids(changed, blocks)
 
+    def test_imported_edges_follow_causal_node_layers_and_positions(self):
+        graph = small_graph()
+        features = [node for node in graph["nodes"] if node["kind"] == "feature"]
+        target = next(node for node in graph["nodes"] if node["kind"] == "target")
+        embedding = next(node for node in graph["nodes"] if node["kind"] == "embedding")
+        error = next(node for node in graph["nodes"] if node["kind"] == "error")
+        pairs = [(target, features[0]), (features[0], embedding), (features[0], error),
+                 (features[0], features[0])]
+        pairs.extend((a, b) for a in features for b in features if a["layer"] >= b["layer"] or a["position"] > b["position"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "graph.json"
+            path.write_text(json.dumps(graph))
+            self.assertEqual(len(workbench.load_graph(path)["edges"]), len(graph["edges"]))
+            for source, target in pairs:
+                with self.subTest(source=source["id"], target=target["id"]):
+                    altered = {**graph, "edges": [{"source": source["id"], "target": target["id"], "weight": 1.}]}
+                    path.write_text(json.dumps(altered))
+                    with self.assertRaises(ValueError):
+                        workbench.load_graph(path)
+
     def test_malformed_saved_labels_and_effects_are_rejected(self):
         graph = small_graph()
         feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
@@ -1850,6 +1870,58 @@ class WorkbenchTests(unittest.TestCase):
                 self.assertEqual(result[0]["labels"][member], "latest")
                 self.assertTrue(flag.is_set())
                 bench._sessions.clear()
+            finally:
+                demo.close()
+
+    def test_model_action_tickets_survive_own_publication_and_fence_older_work(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits import page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                page.build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                graph = small_graph()
+                graph["groups"] = {"group": [next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")]}
+                path = Path(directory) / "open.json"
+                path.write_text(json.dumps(graph))
+                current = handlers["open_path"](path, 40, False, "view")[0]
+                old = handlers["begin_interventions"](current, "view")
+                trace_ticket = handlers["begin_trace"]("view")
+                with mock.patch.object(workbench.Workbench, "background", side_effect=AssertionError("queued stale intervention ran")):
+                    frames = list(handlers["run_interventions"]("view", current, "", "", "", True, 2, False, "group", old))
+                self.assertEqual(frames, [(gr.skip(),) * 6])
+                def traced(*args):
+                    yield "result", small_graph()
+                with mock.patch.object(workbench.Workbench, "background", traced):
+                    frames = list(handlers["run_trace"]("view", "", "hi", "", False,
+                                  "The likeliest next tokens", "", "", 16, .8, .98, 8, 40, False, trace_ticket))
+                self.assertIsInstance(frames[-1][2], dict)
+                self.assertEqual(frames[-1][2]["id"], graph["id"])
+                current = handlers["open_path"](path, 40, False, "view")[0]
+                ticket = handlers["begin_interventions"](current, "view")
+                def superseded(*args):
+                    handlers["begin_trace"]("view")
+                    yield "result", {"groups": {}, "prefixes": 1, "pivot": [], "alternatives": [], "baseline": {"tokens": {}}}
+                with mock.patch.object(workbench.Workbench, "background", superseded):
+                    self.assertEqual(list(handlers["run_interventions"]("view", current, "", "", "", True, 2, False, "group", ticket)), [(gr.skip(),) * 6])
+                current = handlers["open_path"](path, 40, False, "view")[0]
+                ticket = handlers["begin_interventions"](current, "view")
+                def measured(*args):
+                    yield "result", {"groups": {}, "prefixes": 1, "pivot": [], "alternatives": [], "baseline": {"tokens": {}}}
+                with mock.patch.object(workbench.Workbench, "background", measured):
+                    self.assertIsInstance(list(handlers["run_interventions"]("view", current, "", "", "", True, 2, False, "group", ticket))[-1][1], dict)
+                # Supersession during expensive rendering must suppress every graph-derived output.
+                original = page.render.graph_view
+                def rendered(*args, **kwargs):
+                    handlers["begin_trace"]("view")
+                    return original(*args, **kwargs)
+                with mock.patch.object(page.render, "graph_view", rendered):
+                    self.assertTrue(all(value == gr.skip() for value in handlers["open_path"](path, 40, False, "view")))
             finally:
                 demo.close()
 
