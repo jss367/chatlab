@@ -982,6 +982,18 @@ class WorkbenchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "32768 characters"):
                 bench.encoded_prompt(SimpleNamespace(), graph["prompt"] | {"user": "x" * 32769})
 
+    def test_imported_contrast_others_text_is_bounded_and_preserved(self):
+        graph = small_graph()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for others in ("malformed", [1], ["x"] * 4097, ["x" * 4097]):
+                path.write_text(json.dumps(graph | {"explain": dict(mode="contrast", tokens=[" yes"], others=others)}))
+                with self.subTest(others_type=type(others).__name__), self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+            explain = dict(mode="contrast", tokens=[" yes"], others=[" no"])
+            path.write_text(json.dumps(graph | {"explain": explain}))
+            self.assertEqual(workbench.load_graph(path)["explain"], explain)
+
     def test_imported_targets_cannot_alias_the_same_objective(self):
         graph = small_graph()
         target = next(n for n in graph["nodes"] if n["kind"] == "target")
