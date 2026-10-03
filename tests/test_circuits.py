@@ -479,6 +479,17 @@ class InterventionTests(unittest.TestCase):
                 expected = torch.tensor(-120., dtype=torch.float64).exp().item()
                 self.assertAlmostEqual(result["probabilities"][0] / expected, 1.)
 
+    def test_duplicate_measurement_tokens_are_saved_once_in_first_seen_order(self):
+        member = (int(self.recording.feature_layer[0]), int(self.recording.feature_index[0]), 0)
+        result = interventions.group_effects(self.blocks, self.held, [IDS], {"g": [member]},
+                                              pivot=[3, 5, 3], alternatives=[7, 3, 7, 9, 5])
+        expected = interventions.group_effects(self.blocks, self.held, [IDS], {"g": [member]},
+                                                pivot=[3, 5], alternatives=[7, 9])
+        self.assertEqual(result, expected)
+        self.assertEqual(result["pivot"], [3, 5])
+        self.assertEqual(result["alternatives"], [7, 9])
+        self.assertEqual(list(result["baseline"]["tokens"]), [3, 5, 7, 9])
+
     def test_automatic_alternatives_reuse_each_prefix_baseline(self):
         member = (int(self.recording.feature_layer[0]), int(self.recording.feature_index[0]), 0)
         prefixes = [IDS, IDS[:5]]
@@ -970,6 +981,22 @@ class WorkbenchTests(unittest.TestCase):
                     workbench.load_graph(path)
             path.write_text(json.dumps(graph | {"nodes": [token, dict(token, id="distinct", token_id=2)], "edges": []}))
             self.assertEqual(len(workbench.load_graph(path)["nodes"]), 2)
+
+    def test_imported_distinct_token_targets_share_one_probability_budget(self):
+        graph = small_graph()
+        target = next(n for n in graph["nodes"] if n["kind"] == "target")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for a, b, valid in ((.9, .9, False), (.6, .4000005, True), (.6, .400002, False)):
+                nodes = [dict(target, id="a", target_kind="token", token_id=1, probability=a),
+                         dict(target, id="b", target_kind="token", token_id=2, probability=b)]
+                path.write_text(json.dumps(graph | {"nodes": nodes, "edges": []}))
+                with self.subTest(probabilities=(a, b)):
+                    if valid:
+                        self.assertEqual(len(workbench.load_graph(path)["nodes"]), 2)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "not a valid"):
+                            workbench.load_graph(path)
 
     def test_feature_aliases_cannot_duplicate_imported_coordinates(self):
         graph = small_graph()
