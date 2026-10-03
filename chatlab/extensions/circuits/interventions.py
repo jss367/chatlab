@@ -22,7 +22,7 @@ MAX_PREFIXES = 256
 DEFAULT_BOOST = 2.0
 
 
-def run(blocks, transcoders, ids, changes=(), tokens=()):
+def run(blocks, transcoders, ids, changes=(), tokens=(), *, cancelled=None):
     """Probabilities at the last position after scaling features as ``changes`` say.
 
     ``changes`` is a list of ``(layer, feature, factor, positions)``, where
@@ -34,6 +34,11 @@ def run(blocks, transcoders, ids, changes=(), tokens=()):
 
     if not 1 <= len(ids) <= MAX_PREFIX:
         raise ValueError(f"A prefix must hold between 1 and {MAX_PREFIX} tokens.")
+    def check_cancelled(*_args):
+        if cancelled and cancelled():
+            raise _cancelled()
+
+    check_cancelled()
     n = len(ids)
     by_layer = defaultdict(list)
     for layer, feature, factor, positions in changes:
@@ -72,10 +77,15 @@ def run(blocks, transcoders, ids, changes=(), tokens=()):
 
     tensor = torch.tensor([ids], dtype=torch.long, device=blocks.device)
     with contextlib.ExitStack() as stack, torch.no_grad():
+        if cancelled is not None:
+            for block in blocks.layers:
+                stack.callback(block.register_forward_pre_hook(check_cancelled).remove)
+        check_cancelled()
         for layer in by_layer:
             stack.callback(blocks.mlp_input(layer).register_forward_hook(keep(layer)).remove)
             stack.callback(blocks.mlp_output(layer).register_forward_hook(change(layer)).remove)
         hidden = blocks.inner(input_ids=tensor, use_cache=False).last_hidden_state
+        check_cancelled()
         logits = blocks.unembed(hidden[:, -1])[0].float()
         if blocks.final_softcap:
             logits = torch.tanh(logits / blocks.final_softcap) * blocks.final_softcap
@@ -119,7 +129,7 @@ def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *,
         for ids in prefixes:
             if stop():
                 raise _cancelled()
-            values = run(blocks, transcoders, ids)["log_probs"].cpu().double().exp()
+            values = run(blocks, transcoders, ids, cancelled=stop)["log_probs"].cpu().double().exp()
             distribution = values if distribution is None else distribution + values
             done += 1
             report(done, total)
@@ -148,7 +158,7 @@ def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *,
         if stop():
             raise _cancelled()
         if not auto_alternatives:
-            result = run(blocks, transcoders, ids, (), tokens)
+            result = run(blocks, transcoders, ids, (), tokens, cancelled=stop)
             sums["baseline"] = [a + b for a, b in zip(sums["baseline"], result["probabilities"])]
             done += 1
             report(done, total)
@@ -156,7 +166,7 @@ def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *,
             for kind, factor in (("ablate", 0.0), ("boost", boost)):
                 if stop():
                     raise _cancelled()
-                result = run(blocks, transcoders, ids, changes(members, factor), tokens)
+                result = run(blocks, transcoders, ids, changes(members, factor), tokens, cancelled=stop)
                 sums[(name, kind)] = [a + b for a, b in zip(sums[(name, kind)], result["probabilities"])]
                 if kind == "ablate" and result["active"]:
                     activity[name] += 1
