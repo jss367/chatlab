@@ -478,7 +478,7 @@ class NavigationService:
         """
         self._register_models_button(button, model_id)
 
-    def steer_chat(self, button, vector, inputs=()):
+    def steer_chat(self, button, vector, inputs=(), *, prepare=None):
         """Make this button put a steering vector on the Chat conversation and open Chat.
 
         ``vector`` is called at the click with the values of ``inputs`` and
@@ -489,9 +489,17 @@ class NavigationService:
         changes. Whether the loaded model can take the vector is checked
         before the next response, as it is for an imported one.
         """
+        # The optional preparation callback runs outside the conversation
+        # queue. Its result is passed first to vector, followed by inputs,
+        # so vector can cheaply revalidate the selection before applying it.
         if self._register_steering_button is None:
             raise ValueError("This host cannot hand steering vectors to Chat.")
-        self._register_steering_button(button, vector, list(inputs))
+        # Expensive preparation runs separately; vector then validates and
+        # returns the prepared value under the host conversation queue.
+        if prepare is None:
+            self._register_steering_button(button, vector, list(inputs))
+        else:
+            self._register_steering_button(button, vector, list(inputs), prepare)
 
 
 @dataclass(frozen=True)

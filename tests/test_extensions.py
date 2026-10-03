@@ -345,6 +345,38 @@ class RegistryTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_expensive_steering_preparation_runs_outside_conversation_queue(self):
+        from chatlab.conversation import new_forks
+        prepare = mock.Mock(return_value={"format": "chatlab-steering-1", "model_id": "org/model", "layer": 3,
+                                         "vector": [1.0, 0.0], "strength": 2.0})
+        valid = [True]
+        buttons = []
+        def build(context):
+            button = gr.Button("Prepared steering")
+            def validate(value):
+                if not valid[0]:
+                    raise ValueError("Selection changed")
+                return value
+            context.navigation.steer_chat(button, validate, prepare=prepare)
+            buttons.append(button)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            preparation = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            application = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "apply_prepared_steering")
+            self.assertNotEqual(preparation.concurrency_id, "conversation-pane")
+            self.assertEqual(application.concurrency_id, "conversation-pane")
+            payload = preparation.fn()
+            application.fn(new_forks(), payload)
+            prepare.assert_called_once()
+            valid[0] = False
+            with self.assertRaisesRegex(gr.Error, "Selection changed"):
+                application.fn(new_forks(), payload)
+            prepare.assert_called_once()
+        finally:
+            demo.close()
+
     def test_a_host_without_steering_refuses_the_button(self):
         with self.assertRaisesRegex(ValueError, "cannot hand"):
             NavigationService(lambda *args: None).steer_chat(object(), lambda: None)

@@ -1039,7 +1039,7 @@ class BrowserTests(unittest.TestCase):
         import gradio as gr
         from functools import partial
         context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
-                                  navigation=SimpleNamespace(steer_chat=lambda *args: None))
+                                  navigation=SimpleNamespace(steer_chat=lambda *args, **kwargs: None))
         records = SimpleNamespace(get=lambda layer, feature: self.record)
         bench = SimpleNamespace(records=lambda spec: records)
         with gr.Blocks() as demo:
@@ -1068,7 +1068,7 @@ class BrowserTests(unittest.TestCase):
         from functools import partial
         from ui_support import handlers_by_name
         context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
-                                  navigation=SimpleNamespace(steer_chat=lambda *args: None))
+                                  navigation=SimpleNamespace(steer_chat=lambda *args, **kwargs: None))
         records = mock.Mock()
         records.get.return_value = self.record
         bench = SimpleNamespace(records=lambda spec: records)
@@ -1103,7 +1103,7 @@ class BrowserTests(unittest.TestCase):
         from ui_support import handlers_by_name
         vectors = []
         context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
-                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs: vectors.append(fn)))
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
         bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
         with gr.Blocks() as demo:
             browser.build_browser(context, bench)
@@ -1137,7 +1137,7 @@ class BrowserTests(unittest.TestCase):
         from ui_support import handlers_by_name
         vectors = []
         context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None),
-                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs: vectors.append(fn)))
+                                  navigation=SimpleNamespace(steer_chat=lambda button, fn, inputs, prepare=None: vectors.append(prepare or fn)))
         bench = SimpleNamespace(records=lambda spec: SimpleNamespace(get=lambda *args: self.record))
         with gr.Blocks() as demo:
             browser.build_browser(context, bench)

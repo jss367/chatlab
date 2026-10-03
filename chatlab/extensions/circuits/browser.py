@@ -240,4 +240,9 @@ def build_browser(context, bench):
             raise ValueError("The feature page changed; click a feature again.")
         return result
 
-    context.navigation.steer_chat(steer, vector, [chosen, strength, owner])
+    def apply_prepared(value, selected, amount, view):
+        if not selected or not current(view, selected.get("stamp"), ready=True) or not selection_current(view, selected):
+            raise ValueError("The selected feature changed; click it again before steering.")
+        return value
+
+    context.navigation.steer_chat(steer, apply_prepared, [chosen, strength, owner], prepare=vector)

@@ -524,7 +524,7 @@ def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tup
     extension_steering_buttons = []
     navigation = NavigationService(
         lambda button, model_id: extension_model_buttons.append((button, model_id)),
-        lambda button, vector, inputs: extension_steering_buttons.append((button, vector, inputs)))
+        lambda button, vector, inputs, prepare=None: extension_steering_buttons.append((button, vector, inputs, prepare)))
     for extension in extensions:
         with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
             context = ExtensionContext(
@@ -547,7 +547,9 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
 
     page_outputs = [pages.nav, pages.conversations, pages.chat, pages.images, pages.models,
                     pages.settings, *(page for _, page in pages.extensions)]
-    for button, vector, inputs in buttons:
+    for entry in buttons:
+        button, vector, inputs = entry[:3]
+        prepare = entry[3] if len(entry) > 3 else None
         def steer(forks, *values, build=vector):
             try:
                 value = build(*values)
@@ -557,10 +559,23 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
             gr.Info(steering_description(applied[1]))
             return (*applied, CHAT_PAGE, *show_page(CHAT_PAGE),
                     *(gr.update(visible=False) for _ in pages.extensions))
-        button.click(
-            steer, [states.forks, *inputs], [states.forks, *chat_page.steering.outputs, *page_outputs],
-            concurrency_id=CONVERSATION_PANE_QUEUE,
-        )
+        outputs = [states.forks, *chat_page.steering.outputs, *page_outputs]
+        if prepare is None:
+            button.click(steer, [states.forks, *inputs], outputs, concurrency_id=CONVERSATION_PANE_QUEUE)
+        else:
+            prepared = gr.State(None)
+            def prepare_steering(*values, build=prepare):
+                try:
+                    return build(*values), values
+                except ValueError as error:
+                    raise gr.Error(str(error)) from error
+            def apply_prepared_steering(forks, payload, apply=steer):
+                value, values = payload
+                return apply(forks, value, *values)
+            event = button.click(prepare_steering, inputs, prepared,
+                                 concurrency_id="extension-steering-prepare")
+            event.success(apply_prepared_steering, [states.forks, prepared], outputs,
+                          concurrency_id=CONVERSATION_PANE_QUEUE)
 
 
 def _wire_pages(
