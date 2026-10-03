@@ -466,6 +466,21 @@ class InterventionTests(unittest.TestCase):
                 expected = torch.tensor(-120., dtype=torch.float64).exp().item()
                 self.assertAlmostEqual(result["probabilities"][0] / expected, 1.)
 
+    def test_automatic_alternatives_reuse_each_prefix_baseline(self):
+        member = (int(self.recording.feature_layer[0]), int(self.recording.feature_index[0]), 0)
+        prefixes = [IDS, IDS[:5]]
+        updates = []
+        with mock.patch.object(interventions, "run", wraps=interventions.run) as passes:
+            result = interventions.group_effects(self.blocks, self.held, prefixes, {"g": [member]},
+                                                  pivot=[3], alternatives=[], auto_alternatives=True,
+                                                  progress=lambda done, total: updates.append((done, total)))
+            self.assertEqual(passes.call_count, 6)
+        self.assertEqual(updates, [(i, 6) for i in range(1, 7)])
+        self.assertNotIn(3, result["alternatives"])
+        explicit = interventions.group_effects(self.blocks, self.held, prefixes, {"g": [member]},
+                                                pivot=[3], alternatives=result["alternatives"])
+        self.assertEqual(result, explicit)
+
     def test_scaling_by_one_changes_nothing(self):
         k = 0
         layer, feature = int(self.recording.feature_layer[k]), int(self.recording.feature_index[k])
@@ -1096,6 +1111,44 @@ class WorkbenchTests(unittest.TestCase):
                 with mock.patch.object(render, "graph_view") as drawn:
                     self.assertEqual(handlers["redraw"](graph, members, 40, False, "view"), gr.skip())
                 drawn.assert_not_called()
+            finally:
+                demo.close()
+
+    def test_group_selection_does_not_repaint_replaced_graphs(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None, lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                original = render.group_card
+                for name in ("choose_group", "group_clicked"):
+                    graph = small_graph()
+                    member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+                    handlers["group_selected"](graph, [member], "old", 40, False, "view")
+                    newer = small_graph()
+                    newer["id"] = "newer"
+                    path = Path(directory) / "newer.json"
+                    path.write_text(json.dumps(newer))
+                    opened = False
+                    def rendering(*args, **kwargs):
+                        nonlocal opened
+                        if not opened:
+                            opened = True
+                            handlers["open_path"](path, 40, False, "view")
+                        return original(*args, **kwargs)
+                    args = (graph, "old" if name == "choose_group" else json.dumps({"name": "old"}), "view")
+                    expected = gr.skip() if name == "choose_group" else (gr.skip(), gr.skip())
+                    with mock.patch.object(render, "group_card", side_effect=rendering):
+                        self.assertEqual(handlers[name](*args), expected)
+                    with mock.patch.object(render, "group_card") as drawn:
+                        self.assertEqual(handlers[name](*args), expected)
+                    drawn.assert_not_called()
             finally:
                 demo.close()
 

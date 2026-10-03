@@ -87,7 +87,7 @@ def run(blocks, transcoders, ids, changes=(), tokens=()):
 
 
 def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *, boost=DEFAULT_BOOST,
-                  every_position=False, progress=None, cancelled=None):
+                  every_position=False, progress=None, cancelled=None, auto_alternatives=False):
     """Ablate and boost each group on every prefix, averaging each token's probability.
 
     ``groups`` maps a name to ``(layer, feature, offset)`` members, where the
@@ -108,12 +108,26 @@ def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *,
         raise ValueError("Make at least one group from the graph first.")
     if not 0 <= boost <= 100:
         raise ValueError("The boost factor must be between 0 and 100.")
-    tokens = list(dict.fromkeys([*pivot, *alternatives]))
     report = progress or (lambda *_: None)
     stop = cancelled or (lambda: False)
     total = len(prefixes) * (1 + 2 * len(groups))
     done = 0
-    sums = {"baseline": [0.0] * len(tokens)}
+    distribution = None
+    if auto_alternatives:
+        # Keep one aggregate vocabulary vector, rather than every prefix's
+        # distribution; these passes also supply the measured baseline.
+        for ids in prefixes:
+            if stop():
+                raise _cancelled()
+            values = run(blocks, transcoders, ids)["log_probs"].cpu().double().exp()
+            distribution = values if distribution is None else distribution + values
+            done += 1
+            report(done, total)
+        excluded = set(pivot)
+        alternatives = [int(t) for t in distribution.argsort(descending=True).tolist() if t not in excluded][:8]
+    tokens = list(dict.fromkeys([*pivot, *alternatives]))
+    sums = {"baseline": ([float(distribution[t]) for t in tokens] if auto_alternatives
+                         else [0.0] * len(tokens))}
     activity = {}
     for name in groups:
         sums[(name, "ablate")] = [0.0] * len(tokens)
@@ -133,10 +147,11 @@ def group_effects(blocks, transcoders, prefixes, groups, pivot, alternatives, *,
     for ids in prefixes:
         if stop():
             raise _cancelled()
-        result = run(blocks, transcoders, ids, (), tokens)
-        sums["baseline"] = [a + b for a, b in zip(sums["baseline"], result["probabilities"])]
-        done += 1
-        report(done, total)
+        if not auto_alternatives:
+            result = run(blocks, transcoders, ids, (), tokens)
+            sums["baseline"] = [a + b for a, b in zip(sums["baseline"], result["probabilities"])]
+            done += 1
+            report(done, total)
         for name, members in groups.items():
             for kind, factor in (("ablate", 0.0), ("boost", boost)):
                 if stop():
