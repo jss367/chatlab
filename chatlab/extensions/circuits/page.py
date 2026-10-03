@@ -142,6 +142,15 @@ def build_page(context):
     def begin_edit(graph, session_id, sequence):
         return json.dumps({"graph_id": (graph or {}).get("id"), "sequence": sequence})
 
+    def begin_model_action(graph, session_id, sequence=None):
+        with version_lock:
+            if not reserve_action(session_id, sequence):
+                return "invalid"
+            trace_requests.pop(session_id, None)
+            open_requests.pop(session_id, None)
+            bench.cancel(session_id)
+            return begin_edit(graph, session_id, action_sequences[session_id])
+
     def edit_current(graph, session_id, request):
         if request is None:
             return True
@@ -186,6 +195,8 @@ def build_page(context):
         trace_request = gr.Textbox(visible=False)
         open_request = gr.Textbox(visible=False)
         intervention_request = gr.Textbox(visible=False)
+        ablation_request = gr.Textbox(visible=False)
+        load_request = gr.Textbox(visible=False)
         rename_request = gr.Textbox(visible=False)
         group_request = gr.Textbox(visible=False)
         delete_request = gr.Textbox(visible=False)
@@ -378,19 +389,30 @@ def build_page(context):
 
     refresh.click(lambda: status_text(bench.status()), None, status, queue=False)
 
-    def load_now(session_id):
+    def begin_load(session_id, sequence=None):
+        return begin_model_action(None, session_id, sequence)
+
+    def load_now(session_id, request=None):
+        if not edit_current(None, session_id, request):
+            yield gr.skip(), gr.skip()
+            return
+        def work(report, cancelled):
+            if not edit_current(None, session_id, request):
+                raise Cancelled()
+            return bench.load_transcoders(report, cancelled)
         try:
-            for item in bench.background(session_id, bench.load_transcoders):
+            for item in bench.background(session_id, work):
                 if item[0] == "progress":
-                    yield _progress_text(*item[1:]), gr.skip()
+                    yield (_progress_text(*item[1:]), gr.skip()) if edit_current(None, session_id, request) else (gr.skip(), gr.skip())
         except Cancelled:
-            yield "Stopped.", status_text(bench.status())
+            yield ("Stopped.", status_text(bench.status())) if edit_current(None, session_id, request) else (gr.skip(), gr.skip())
             return
         except (ValueError, OSError) as exc:
             raise gr.Error(str(exc)) from exc
-        yield "", status_text(bench.status())
+        yield ("", status_text(bench.status())) if edit_current(None, session_id, request) else (gr.skip(), gr.skip())
 
-    load_event = load_button.click(load_now, owner, [progress, status], concurrency_id="circuits", show_progress="hidden")
+    load_event = load_button.click(begin_load, [owner, action_sequence], load_request, queue=False,
+                                   js="(owner, _) => [owner, " + next_action_sequence + "]").success(load_now, [owner, load_request], [progress, status], concurrency_id="circuits", show_progress="hidden")
 
     def unload_now():
         transcoders.unload()
@@ -632,17 +654,23 @@ def build_page(context):
 
     # Measuring -----------------------------------------------------------------
 
-    def ablate_focused(session_id, graph, focused):
+    def ablate_focused(session_id, graph, focused, request=None):
         with version_lock:
             fresh, stamp = checked_version(graph, session_id)
-            if not fresh or focused_nodes.get(session_id, focused) != focused:
+            if not fresh or not edit_current(graph, session_id, request) or focused_nodes.get(session_id, focused) != focused:
                 return gr.skip()
         node = node_of(graph, focused)
         if node is None or node["kind"] != "feature":
             raise gr.Error("Click a feature in the graph first.")
         result = None
         try:
-            for item in bench.background(session_id, lambda p, c: bench.ablate(graph, node, p, c)):
+            def work(report, cancelled):
+                with version_lock:
+                    if (version(session_id) != stamp or not edit_current(graph, session_id, request)
+                            or focused_nodes.get(session_id, focused) != focused):
+                        raise Cancelled()
+                return bench.ablate(graph, node, report, cancelled)
+            for item in bench.background(session_id, work):
                 if item[0] == "done":
                     result = item[1]
         except Cancelled:
@@ -652,10 +680,13 @@ def build_page(context):
             raise gr.Error(str(exc)) from exc
         card = describe_card(graph, focused, result)
         with version_lock:
-            fresh = version(session_id) == stamp and focused_nodes.get(session_id, focused) == focused
+            fresh = (version(session_id) == stamp and edit_current(graph, session_id, request)
+                     and focused_nodes.get(session_id, focused) == focused)
         return card if fresh else gr.skip()
 
-    ablate_event = ablate.click(ablate_focused, [owner, graph_state, focus], card, concurrency_id="circuits")
+    ablate_event = ablate.click(begin_model_action, [graph_state, owner, action_sequence], ablation_request,
+                                 queue=False, js="(graph, owner, _) => [graph, owner, " + next_action_sequence + "]").success(
+        ablate_focused, [owner, graph_state, focus, ablation_request], card, concurrency_id="circuits")
 
     def run_interventions(session_id, graph, pivot_text, alternative_text, prefix_text, include, factor, everywhere,
                           name, request=None):
@@ -706,13 +737,7 @@ def build_page(context):
         yield frame if version(session_id) == stamp and edit_current(graph, session_id, request) else (gr.skip(),) * 6
 
     def begin_interventions(graph, session_id, sequence=None):
-        with version_lock:
-            if not reserve_action(session_id, sequence):
-                return "invalid"
-            trace_requests.pop(session_id, None)
-            open_requests.pop(session_id, None)
-            bench.cancel(session_id)
-            return begin_edit(graph, session_id, action_sequences[session_id])
+        return begin_model_action(graph, session_id, sequence)
 
     intervention_event = run.click(begin_interventions, [graph_state, owner, action_sequence], intervention_request,
                                    queue=False, js="(graph, owner, _) => [graph, owner, " + next_action_sequence + "]").success(run_interventions, [owner, graph_state, pivot, alternatives, prefixes, include_prompt, boost,

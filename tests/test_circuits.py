@@ -1926,6 +1926,44 @@ class WorkbenchTests(unittest.TestCase):
             finally:
                 demo.close()
 
+    def test_queued_ablation_and_load_recheck_action_after_registration(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None, lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                graph = small_graph()
+                path = Path(directory) / "graph.json"
+                path.write_text(json.dumps(graph))
+                graph = handlers["open_path"](path, 40, False, "view")[0]
+                feature = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+                ticket = handlers["begin_model_action"](graph, "view")
+                handlers["begin_trace"]("view")
+                with mock.patch.object(workbench.Workbench, "background", side_effect=AssertionError("stale ablation registered")):
+                    self.assertEqual(handlers["ablate_focused"]("view", graph, feature, ticket), gr.skip())
+                ticket = handlers["begin_model_action"](graph, "view")
+                def registered(self, owner, work):
+                    handlers["begin_trace"](owner)
+                    work(lambda *args: None, threading.Event())
+                    yield "done", {"deltas": []}
+                with mock.patch.object(workbench.Workbench, "background", registered), mock.patch.object(workbench.Workbench, "ablate", side_effect=AssertionError("stale ablation ran")):
+                    self.assertEqual(handlers["ablate_focused"]("view", graph, feature, ticket), gr.skip())
+                ticket = handlers["begin_load"]("view")
+                handlers["begin_trace"]("view")
+                with mock.patch.object(workbench.Workbench, "background", side_effect=AssertionError("stale load registered")):
+                    self.assertEqual(list(handlers["load_now"]("view", ticket)), [(gr.skip(), gr.skip())])
+                ticket = handlers["begin_load"]("view")
+                with mock.patch.object(workbench.Workbench, "background", registered), mock.patch.object(workbench.Workbench, "load_transcoders", side_effect=AssertionError("stale load ran")):
+                    self.assertEqual(list(handlers["load_now"]("view", ticket)), [(gr.skip(), gr.skip())])
+            finally:
+                demo.close()
+
     def test_stop_cancels_all_submitted_gradio_jobs(self):
         import gradio as gr
         from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
