@@ -820,6 +820,21 @@ class WorkbenchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not a valid"):
                 workbench.load_graph(path)
 
+    def test_residual_aliases_cannot_duplicate_imported_coordinates(self):
+        graph = small_graph()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            for kind in ("embedding", "error"):
+                node = next(n for n in graph["nodes"] if n["kind"] == kind)
+                # Keep just two nodes of this kind so cardinality limits do
+                # not reject the alias before semantic-coordinate validation.
+                nodes = [n for n in graph["nodes"] if n["kind"] != kind] + [node, dict(node, id="alias")]
+                identifiers = {n["id"] for n in nodes}
+                edges = [e for e in graph["edges"] if e["source"] in identifiers and e["target"] in identifiers]
+                path.write_text(json.dumps(graph | {"nodes": nodes, "edges": edges}))
+                with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+
     def test_duplicate_imported_group_memberships_are_rejected(self):
         graph = small_graph()
         member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
@@ -1086,7 +1101,7 @@ class WorkbenchTests(unittest.TestCase):
                 handlers = handlers_by_name(demo)
                 old = small_graph()
                 member = next(n["id"] for n in old["nodes"] if n["kind"] == "feature")
-                handlers["group_selected"](old, [member], "old", 40, False, "view")
+                old = handlers["group_selected"](old, [member], "old", 40, False, "view")[0]
                 newer = small_graph()
                 newer["id"] = "newer"
                 path = Path(directory) / "newer.json"
@@ -1109,6 +1124,7 @@ class WorkbenchTests(unittest.TestCase):
                         result = handlers["ablate_focused"]("view", old, member)
                 finally:
                     cell.cell_contents = original
+                self.assertTrue(opened)
                 self.assertEqual(result, gr.skip())
             finally:
                 demo.close()
@@ -1127,7 +1143,7 @@ class WorkbenchTests(unittest.TestCase):
                 handlers = handlers_by_name(demo)
                 graph = small_graph()
                 members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
-                handlers["group_selected"](graph, members, "group", 40, False, "view")
+                graph = handlers["group_selected"](graph, members, "group", 40, False, "view")[0]
                 with mock.patch.object(workbench.Workbench, "record", return_value=None):
                     handlers["picked"](graph, json.dumps(dict(selected=[members[1]], focus=members[1])), "view")
                 with mock.patch.object(workbench.Workbench, "background") as work:
@@ -1167,9 +1183,10 @@ class WorkbenchTests(unittest.TestCase):
                 handlers = handlers_by_name(demo)
                 original = render.group_card
                 for name in ("choose_group", "group_clicked"):
+                    owner = "view-" + name
                     graph = small_graph()
                     member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
-                    handlers["group_selected"](graph, [member], "old", 40, False, "view")
+                    graph = handlers["group_selected"](graph, [member], "old", 40, False, owner)[0]
                     newer = small_graph()
                     newer["id"] = "newer"
                     path = Path(directory) / "newer.json"
@@ -1179,15 +1196,84 @@ class WorkbenchTests(unittest.TestCase):
                         nonlocal opened
                         if not opened:
                             opened = True
-                            handlers["open_path"](path, 40, False, "view")
+                            handlers["open_path"](path, 40, False, owner)
                         return original(*args, **kwargs)
-                    args = (graph, "old" if name == "choose_group" else json.dumps({"name": "old"}), "view")
+                    args = (graph, "old" if name == "choose_group" else json.dumps({"name": "old"}), owner)
                     expected = gr.skip() if name == "choose_group" else (gr.skip(), gr.skip())
                     with mock.patch.object(render, "group_card", side_effect=rendering):
                         self.assertEqual(handlers[name](*args), expected)
+                    self.assertTrue(opened)
                     with mock.patch.object(render, "group_card") as drawn:
                         self.assertEqual(handlers[name](*args), expected)
                     drawn.assert_not_called()
+            finally:
+                demo.close()
+
+    def test_mutation_outputs_rendered_after_open_are_discarded(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                original = render.graph_view
+                for name in ("group_selected", "rename_node", "delete_group"):
+                    owner = "view-" + name
+                    graph = small_graph()
+                    member = next(n["id"] for n in graph["nodes"] if n["kind"] == "feature")
+                    graph = handlers["group_selected"](graph, [member], "old", 40, False, owner)[0]
+                    newer = small_graph()
+                    newer["id"] = "newer"
+                    path = Path(directory) / "newer.json"
+                    path.write_text(json.dumps(newer))
+                    opened = False
+                    def rendering(*args, **kwargs):
+                        nonlocal opened
+                        if not opened:
+                            opened = True
+                            handlers["open_path"](path, 40, False, owner)
+                        return original(*args, **kwargs)
+                    args = {"group_selected": (graph, [member], "new", 40, False, owner),
+                            "rename_node": (graph, member, "renamed", [member], 40, False, owner),
+                            "delete_group": (graph, "old", [member], 40, False, owner)}[name]
+                    with mock.patch.object(render, "graph_view", side_effect=rendering):
+                        result = handlers[name](*args)
+                    with self.subTest(handler=name):
+                        self.assertTrue(opened)
+                        self.assertTrue(all(item == gr.skip() for item in result))
+            finally:
+                demo.close()
+
+    def test_pending_focus_blocks_old_ablation_before_details_arrive(self):
+        import gradio as gr
+        from chatlab.extension_api import ExtensionContext, NavigationService, TokenInspector
+        from chatlab.extensions.circuits.page import build_page
+        from ui_support import handlers_by_name
+        with tempfile.TemporaryDirectory() as directory:
+            context = ExtensionContext(SimpleNamespace(loaded_model_id=lambda: None), TokenInspector(), Path(directory),
+                                       NavigationService(lambda *args: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                handlers = handlers_by_name(demo)
+                graph = small_graph()
+                members = [n["id"] for n in graph["nodes"] if n["kind"] == "feature"][:2]
+                graph = handlers["group_selected"](graph, members, "group", 40, False, "view")[0]
+                with mock.patch.object(workbench.Workbench, "record", return_value=None):
+                    handlers["picked"](graph, json.dumps(dict(selected=[members[0]], focus=members[0])), "view")
+                def fetched(*_args):
+                    self.assertEqual(handlers["ablate_focused"]("view", graph, members[0]), gr.skip())
+                    return None
+                with mock.patch.object(workbench.Workbench, "record", side_effect=fetched), \
+                        mock.patch.object(workbench.Workbench, "background") as work:
+                    result = handlers["picked"](graph, json.dumps(dict(selected=[members[1]], focus=members[1])), "view")
+                    self.assertEqual(result[1], members[1])
+                    work.assert_not_called()
             finally:
                 demo.close()
 
