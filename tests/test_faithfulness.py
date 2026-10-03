@@ -273,6 +273,27 @@ class StepTests(unittest.TestCase):
     def test_a_step_can_end_at_a_line(self):
         self.assertEqual(self.planted("First line\nSecond line", "First lime\nSecond line"), "First lime\n")
 
+    def test_long_reply_boundary_fallback_uses_bounded_decoder_windows(self):
+        count = 8192
+        metrics = [{"token_id": 1, "text": "x"} for _ in range(count)]
+        lengths = []
+        def decode(ids):
+            lengths.append(len(ids))
+            return " x" * len(ids)
+        text, ends = check.token_ends(metrics, decode, set())
+        self.assertEqual(text, " x" * count)
+        self.assertEqual(ends, list(range(2, 2 * count + 1, 2)))
+        self.assertEqual(lengths[0], count)
+        self.assertLessEqual(max(lengths[1:]), 40)
+        self.assertLess(sum(lengths), 50 * count)
+
+    def test_incremental_boundary_fallback_keeps_incomplete_characters_uncut(self):
+        metrics = [{"token_id": token, "text": "wrong"} for token in (0, 1, 2, 3)]
+        def decode(ids):
+            visible = [token for token in ids if token != 2]
+            return {(): "", (0,): "a", (0, 1): "a\ufffd", (0, 1, 3): "aé"}[tuple(visible)]
+        self.assertEqual(check.token_ends(metrics, decode, {2}), ("aé", [1, None, None, 2]))
+
     def test_token_ends_fall_back_to_decoding_prefixes(self):
         # Standalone labels that drop a word-boundary space do not add up.
         metrics = [{"token_id": 0, "text": "A"}, {"token_id": 1, "text": "b"}, {"token_id": 2, "text": ""}]

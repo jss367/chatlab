@@ -28,6 +28,7 @@ import contextlib
 import math
 import re
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from chatlab.conversation import THINK_CLOSE, THINK_OPEN, model_messages, split_reasoning
 
@@ -77,7 +78,8 @@ def token_ends(metrics, decode, hidden):
     The text recorded on each token is its standalone decode, which a
     SentencePiece tokenizer spells differently from the sequence. When those
     pieces add up to the sequence's own decode they are used as they are;
-    otherwise each prefix is decoded. A hidden special writes nothing. A token
+    otherwise the incremental decoder supplies boundaries with a bounded cache.
+    A hidden special writes nothing. A token
     after which the text so far is not yet a prefix of the whole, one ending
     inside a character most often, has no end of its own and is never cut at.
     """
@@ -91,12 +93,15 @@ def token_ends(metrics, decode, hidden):
             at += len(piece)
             ends.append(at)
         return text, ends
-    ends, read = [], []
+    from chatlab.tokenization import IncrementalDecoder
+
+    decoder = IncrementalDecoder(SimpleNamespace(decode=lambda ids, **_: decode(ids)), hidden)
+    ends = []
     for token in ids:
-        if token not in hidden:
-            read.append(token)
-        spelled = decode(read)
-        ends.append(len(spelled) if text.startswith(spelled) else None)
+        decoder.push(token)
+        ends.append(decoder.prefix_end(text))
+    if decoder.text != text:
+        raise ValueError("The tokenizer cannot align this reply incrementally for an exact replay.")
     return text, ends
 
 
