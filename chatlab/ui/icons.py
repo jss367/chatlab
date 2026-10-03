@@ -65,6 +65,11 @@ ICONS: dict[str, str] = {
         '0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>'
         '<circle cx="12" cy="12" r="3"/>'
     ),
+    "network": (
+        '<rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/>'
+        '<rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/>'
+        '<path d="M12 12V8"/>'
+    ),
     "spell-check": '<path d="m6 16 6-12 6 12"/><path d="M8 12h8"/><path d="m16 20 2 2 4-4"/>',
     "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
     "paperclip": (
