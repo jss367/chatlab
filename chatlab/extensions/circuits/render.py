@@ -26,6 +26,7 @@ EDGES_PER_NODE = 10
 MAX_GROUP_FLOWS = 1000
 MAX_GROUP_CHIPS = 64
 MAX_CHIP_LABEL = 160
+MAX_DISPLAY_TOKENS = 64
 
 
 def token_text(text):
@@ -442,7 +443,8 @@ def _token_bars_height(effects):
     if not effects:
         return 96
     lists = [effects["pivot"], effects["alternatives"]]
-    return 50 + sum(38 + 22 * len(ids) for ids in lists if ids) + 20
+    return 50 + sum(38 + 22 * (min(len(ids), MAX_DISPLAY_TOKENS) + (len(ids) > MAX_DISPLAY_TOKENS))
+                    for ids in lists if ids) + 20
 
 
 def _token_bars(effects, x, decode):
@@ -459,12 +461,15 @@ def _token_bars(effects, x, decode):
             continue
         parts.append(f'<text class="cg-head {cls}" x="{x}" y="{y}">{heading}</text>')
         y += 20
-        for token in ids:
+        for token in ids[:MAX_DISPLAY_TOKENS]:
             p = float(baseline.get(token, baseline.get(str(token), 0.0)))
             length = 110 * p / biggest
             parts.append(f'<text class="cg-label" x="{x}" y="{y + 4}">{_esc(_short(token_text(decode(token)), 12))}</text>'
                          f'<rect class="bar {cls}" x="{x + 96}" y="{y - 6}" width="{max(length, 1.5):.1f}" height="11" rx="2"/>'
                          f'<text class="cg-tick" x="{x + 100 + length:.1f}" y="{y + 4}">{p:.3f}</text>')
+            y += 22
+        if len(ids) > MAX_DISPLAY_TOKENS:
+            parts.append(f'<text class="cg-tick" x="{x}" y="{y}">Showing {MAX_DISPLAY_TOKENS} of {len(ids):,} tokens</text>')
             y += 22
         y += 18
     where = "every position" if effects.get("every_position") else "the positions the graph found them at"
@@ -506,7 +511,7 @@ def _multipliers(effects, after, decode):
     base = effects["baseline"]["tokens"]
     rows = []
     pivot = set(effects["pivot"])
-    ids = [*effects["pivot"], *effects["alternatives"]]
+    ids = [*effects["pivot"][:MAX_DISPLAY_TOKENS], *effects["alternatives"][:MAX_DISPLAY_TOKENS]]
     ratios = []
     for token in ids:
         before = float(base.get(token, base.get(str(token), 0.0)))
@@ -521,8 +526,11 @@ def _multipliers(effects, after, decode):
             share = 50 * math.log(ratio) / span
             left = 50 + min(share, 0)
             bar = f'<i class="{cls}" style="left:{left:.1f}%;width:{abs(share):.1f}%"></i>'
-        rows.append(f'<div class="cg-mult"><span>{_esc(token_text(decode(token)))}</span>'
+        rows.append(f'<div class="cg-mult"><span>{_esc(_short(token_text(decode(token)), 80))}</span>'
                     f'<b>{bar}<u></u></b><em>{_times(ratio)}</em></div>')
+    total = len(effects["pivot"]) + len(effects["alternatives"])
+    if total > len(ids):
+        rows.append(f'<p class="cg-muted">Showing {len(ids)} of {total:,} measured tokens.</p>')
     return "".join(rows)
 
 
