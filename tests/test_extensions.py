@@ -403,6 +403,19 @@ class RegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(gr.Error, "Selection changed"):
                 application.fn(forks, payload)
             prepare.assert_called_once()
+            from concurrent.futures import ThreadPoolExecutor
+            import time
+            class SlowGenerations(dict):
+                def get(self, key, default=None):
+                    value = super().get(key, default)
+                    time.sleep(0.01)
+                    return value
+            forks["_steering_generation"] = SlowGenerations(forks["_steering_generation"])
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                receipts = list(pool.map(lambda _: capture.fn(forks), range(8)))
+            self.assertEqual(len({r[-1] for r in receipts}), 8)
+            with self.assertRaisesRegex(gr.Error, "Steering changed"):
+                application.fn(forks, payload)
         finally:
             demo.close()
 

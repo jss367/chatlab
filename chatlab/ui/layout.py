@@ -19,6 +19,7 @@ from copy import deepcopy
 
 import html
 import logging
+import threading
 from dataclasses import dataclass
 from functools import partial
 from uuid import uuid4
@@ -550,6 +551,7 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
 
     page_outputs = [pages.nav, pages.conversations, pages.chat, pages.images, pages.models,
                     pages.settings, *(page for _, page in pages.extensions)]
+    capture_lock = threading.Lock()
     for entry in buttons:
         button, vector, inputs = entry[:3]
         prepare = entry[3] if len(entry) > 3 else None
@@ -567,11 +569,13 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
         def capture_steering(forks, *values):
             # Reserve only ephemeral request metadata on the live view;
             # returning a copied conversation here could overwrite a queued reply.
-            identity = forks.setdefault("_view_identity", uuid4().hex)
-            branch = forks.get("active", MAIN_BRANCH)
-            generations = forks.setdefault("_steering_generation", {})
-            generations[branch] = generations.get(branch, 0) + 1
-            return (deepcopy(values), branch, identity, generations[branch])
+            with capture_lock:
+                identity = forks.setdefault("_view_identity", uuid4().hex)
+                branch = forks.get("active", MAIN_BRANCH)
+                generations = forks.setdefault("_steering_generation", {})
+                generations[branch] = generations.get(branch, 0) + 1
+                generation = generations[branch]
+            return (deepcopy(values), branch, identity, generation)
         def validate_receipt(forks, branch, identity, generation):
             if ((forks or {}).get("active", MAIN_BRANCH) != branch
                     or (forks or {}).get("_view_identity") != identity):
