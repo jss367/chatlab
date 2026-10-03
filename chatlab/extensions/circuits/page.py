@@ -485,6 +485,7 @@ def build_page(context):
         if not members:
             raise gr.Error("Select features in the graph first: click one, shift-click more.")
         name = (name or "").strip()[:60] or f"group {len(graph['groups']) + 1}"
+        members = list(dict.fromkeys([*graph["groups"].get(name, []), *members]))
         groups = {g: [m for m in ms if m not in members] for g, ms in graph["groups"].items()}
         groups = {g: ms for g, ms in groups.items() if ms}
         groups[name] = members

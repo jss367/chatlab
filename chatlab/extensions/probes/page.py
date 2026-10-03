@@ -608,10 +608,10 @@ def build_page(context):
         return None, gr.update(value=[], visible=False), "", "", "", []
 
     run.click(clear_reading, owner, [reading_state, strip, heat, reply, detail, token_table], queue=False)
-    run.click(read, [probe_state, mode, text, system, temperature, seed, max_tokens, include_prompt, as_user,
+    read_event = run.click(read, [probe_state, mode, text, system, temperature, seed, max_tokens, include_prompt, as_user,
                      owner, layer], [reading_state, strip, heat, detail, reply],
               concurrency_id="probes-model", show_progress="hidden")
-    stop.click(runs.cancel, owner, None, queue=False)
+    stop.click(runs.cancel, owner, None, queue=False, cancels=[read_event])
 
     def on_screen(probe, reading, view):
         return probe is not None and reading is not None and reading["probe_id"] == probe["id"] \

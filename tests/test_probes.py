@@ -624,6 +624,17 @@ class PageTests(unittest.TestCase):
                 self.read(old, READ, WANTED[0])
         self.assertIsNotNone(self.read(current, READ, WANTED[0])[-1][0])
 
+    def test_stop_cancels_the_queued_read_dependency(self):
+        context = ExtensionContext(ModelService(lambda: self.manager), TokenInspector(), self.data,
+                                   NavigationService(lambda *args: None))
+        with gr.Blocks() as demo:
+            build_page(context)
+        try:
+            read = next(fn for fn in demo.fns.values() if fn.name == "read")
+            self.assertTrue(any(read._id in event.get("cancels", []) for event in demo.config["dependencies"]))
+        finally:
+            demo.close()
+
     def test_stopped_projection_reports_stop_and_releases_the_session(self):
         probe = self.train()[0]
         block = steering.decoder_layers(self.manager.model)[0]
