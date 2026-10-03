@@ -25,6 +25,7 @@ SMALL = 0.05
 EDGES_PER_NODE = 10
 MAX_GROUP_FLOWS = 1000
 MAX_GROUP_CHIPS = 64
+MAX_GROUP_BOXES = 64
 MAX_CHIP_LABEL = 160
 MAX_DISPLAY_TOKENS = 64
 MAX_DISPLAY_TARGETS = 64
@@ -340,6 +341,8 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
     if not groups:
         return ('<div class="cg-root viz-root cg-empty">Select features in the graph (shift-click for several), '
                 'name them, and press <b>Group selected</b>. Groups appear here joined by their summed edges.</div>')
+    total_groups = len(groups)
+    groups = dict(list(groups.items())[:MAX_GROUP_BOXES])
     prompt_bucket, error_bucket, target_bucket = object(), object(), object()
     bucket_labels = {prompt_bucket: "prompt", error_bucket: "error", target_bucket: "target"}
     member_of = {m: name for name, members in groups.items() for m in members}
@@ -442,7 +445,9 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
     legend = ('<div class="cg-legend"><span><i class="dot promotes"></i>boosting raises P(pivot)</span>'
               '<span><i class="dot suppresses"></i>boosting lowers P(pivot)</span>'
               '<span><i class="dot mixed"></i>small / mixed, or not measured</span></div>')
-    return f'<div class="cg-root viz-root"><div class="cg-scroll">{"".join(parts)}</div>{legend}</div>'
+    omitted = (f'<p class="cg-muted">Showing {len(groups)} of {total_groups:,} groups.</p>'
+               if total_groups > len(groups) else "")
+    return f'<div class="cg-root viz-root"><div class="cg-scroll">{"".join(parts)}</div>{legend}{omitted}</div>'
 
 
 def _token_bars_height(effects):
