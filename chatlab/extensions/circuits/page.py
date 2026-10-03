@@ -439,9 +439,14 @@ def build_page(context):
         note = (f"{len(chosen)} selected, {features} of them features." if len(chosen) > 1 else "")
         node = node_of(graph, focused)
         name = (graph.get("labels") or {}).get(focused, "") if node and node["kind"] == "feature" else ""
-        detail = describe_card(graph, focused)
         with version_lock:
             if version(session_id) != stamp or not current_graph(graph, session_id):
+                return (gr.skip(),) * 5
+            focused_nodes[session_id] = focused
+        detail = describe_card(graph, focused)
+        with version_lock:
+            if (version(session_id) != stamp or not current_graph(graph, session_id)
+                    or focused_nodes.get(session_id) != focused):
                 return (gr.skip(),) * 5
             focused_nodes[session_id] = focused
             return chosen, focused, detail, note, name
@@ -464,7 +469,8 @@ def build_page(context):
         path = save(graph, session_id, checked=True)
         if path is False:
             return (gr.skip(),) * 7
-        return graph, draw(graph, chosen, shown, errors), describe_card(graph, focused), *draw_groups(graph, None), path
+        frame = (graph, draw(graph, chosen, shown, errors), describe_card(graph, focused), *draw_groups(graph, None), path)
+        return frame if current_graph(graph, session_id) else (gr.skip(),) * 7
 
     rename.click(rename_node, [graph_state, focus, label, selection, nodes_shown, show_errors, owner],
                  [graph_state, graph_view, card, groups_view, group_pick, group_card, download], concurrency_id="circuits-read")
@@ -487,7 +493,8 @@ def build_page(context):
         if path is False:
             return (gr.skip(),) * 7
         gr.Info(f"Grouped {len(members)} feature{'s' * (len(members) != 1)} as {name}.")
-        return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, name), "", path
+        frame = (graph, draw(graph, chosen, shown, errors), *draw_groups(graph, name), "", path)
+        return frame if current_graph(graph, session_id) else (gr.skip(),) * 7
 
     make_group.click(group_selected, [graph_state, selection, group_name, nodes_shown, show_errors, owner],
                      [graph_state, graph_view, groups_view, group_pick, group_card, group_name, download],
@@ -535,7 +542,8 @@ def build_page(context):
         path = save(graph, session_id, checked=True)
         if path is False:
             return (gr.skip(),) * 6
-        return graph, draw(graph, chosen, shown, errors), *draw_groups(graph, None), path
+        frame = (graph, draw(graph, chosen, shown, errors), *draw_groups(graph, None), path)
+        return frame if current_graph(graph, session_id) else (gr.skip(),) * 6
 
     remove_group.click(delete_group, [graph_state, group_pick, selection, nodes_shown, show_errors, owner],
                        [graph_state, graph_view, groups_view, group_pick, group_card, download], concurrency_id="circuits-read")
