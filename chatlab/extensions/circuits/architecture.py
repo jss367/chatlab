@@ -80,8 +80,21 @@ def blocks(model):
     if unembed is None or getattr(unembed, "bias", None) is not None:
         raise ValueError("Circuit tracing needs an output head without a bias.")
     embed = model.get_input_embeddings()
-    if embed.weight.device.type == "meta":
-        raise ValueError("Circuit tracing does not support models with offloaded weights.")
+    import torch
+
+    device = embed.weight.device
+    if device.type == "meta" or any(parameter.device != device for parameter in model.parameters()):
+        raise ValueError("Circuit tracing requires all weights on one device; sharded or offloaded models are unsupported.")
+    for target in (getattr(model, "hf_device_map", None) or {}).values():
+        if target == "disk":
+            raise ValueError("Circuit tracing does not support offloaded weights.")
+        mapped = torch.device(f"cuda:{target}" if type(target) is int else target)
+        if mapped.type == "cpu":
+            mapped = torch.device("cpu")
+        elif mapped.type == device.type and mapped.index is None and device.index is not None:
+            mapped = torch.device(mapped.type, device.index)
+        if mapped != device:
+            raise ValueError("Circuit tracing requires one device and does not support sharded or offloaded weights.")
     input_name, output_name = SITES[kind]
     return Blocks(
         model=model, inner=inner, layers=list(layers), embed=embed, final_norm=norm, unembed=unembed,

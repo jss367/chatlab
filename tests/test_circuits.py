@@ -107,6 +107,19 @@ class FrozenModelTests(unittest.TestCase):
                 grad, = torch.autograd.grad(output, embeddings)
         torch.testing.assert_close((grad * embeddings).sum(), output, rtol=1e-4, atol=1e-4)
 
+    def test_sharded_and_offloaded_maps_are_refused_before_transcoder_load(self):
+        model = tiny_model("gemma3")
+        bench = workbench.Workbench(SimpleNamespace(), tempfile.gettempdir())
+        for mapping in ({"embed": 0, "layer": 1}, {"embed": "cpu", "layer": "disk"},
+                        {"embed": "cpu", "layer": "cuda:0"}):
+            model.hf_device_map = mapping
+            with self.subTest(mapping=mapping), mock.patch.object(transcoders, "load") as load:
+                with self.assertRaisesRegex(ValueError, "sharded|offloaded"):
+                    bench._held(model, lambda *_args: None)
+                load.assert_not_called()
+        model.hf_device_map = {"": "cpu"}
+        self.assertEqual(architecture.blocks(model).device, torch.device("cpu"))
+
     def test_unsupported_models_are_refused(self):
         model = SimpleNamespace(config=SimpleNamespace(model_type="gpt2"))
         with self.assertRaisesRegex(ValueError, "does not support gpt2"):
@@ -988,6 +1001,16 @@ class WorkbenchTests(unittest.TestCase):
             with self.assertRaises(attribution.Cancelled):
                 bench.ablate(graph, node, lambda *_args: None, lambda: stopped)
             self.assertEqual(passes.call_count, 1)
+
+    def test_duplicate_trace_entries_are_bounded_before_tokenization(self):
+        models = SimpleNamespace(open_session=mock.Mock(side_effect=AssertionError("must not tokenize")))
+        bench = workbench.Workbench(models, tempfile.gettempdir())
+        for field in ("tokens", "others"):
+            explain = dict(mode="tokens", tokens=["same"], others=[])
+            explain[field] = ["same"] * 4097
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "4,096 explanation entries"):
+                bench.trace({}, explain, attribution.Settings(), lambda *_args: None, lambda: False)
+        models.open_session.assert_not_called()
 
     def test_imported_effects_require_every_declared_token(self):
         for where in ("baseline", "ablate", "boost"):
