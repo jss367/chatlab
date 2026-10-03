@@ -279,6 +279,9 @@ def normalize(value):
     if type(best) is not int or not 0 <= best < len(clean):
         raise ValueError("The probe's best layer is not one of its layers.")
     best = best_layer(clean)
+    folds = value.get("folds")
+    if type(folds) is not int or not 2 <= folds <= FOLDS:
+        raise ValueError("Probe folds must be an integer between 2 and 5.")
     l2 = number(value.get("l2"), "L2 strength")
     if l2 <= 0:
         raise ValueError("L2 strength must be positive and finite.")
@@ -288,7 +291,7 @@ def normalize(value):
         "precision": precision,
         "positive_label": positive_label, "negative_label": negative_label,
         "pool": value["pool"], "chat_template": value["chat_template"],
-        "l2": l2, "folds": int(number(value.get("folds"), "folds")),
+        "l2": l2, "folds": folds,
         "paired": value.get("paired", False),
         "created": created,
         "examples": {side: list(examples[side]) for side in ("positive", "negative")},

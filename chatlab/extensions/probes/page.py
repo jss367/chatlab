@@ -99,6 +99,10 @@ class Runs:
             stamp = self._probes[owner] = uuid4().hex
             return {**probe, "_view_probe": stamp}
 
+    def probe_current(self, owner, probe):
+        with self._lock:
+            return self._probes.get(owner) == probe.get("_view_probe")
+
     def attach(self, owner, session):
         with self._lock:
             active = self._active[owner]
@@ -149,6 +153,8 @@ class Runs:
         """One owned download directory per view, with one current named copy."""
         name = re.sub(r"[^A-Za-z0-9_-]+", "-", probe["name"]).strip("-")[:60] or "probe"
         with self._lock:
+            if probe.get("_view_probe") and self._probes.get(owner) != probe["_view_probe"]:
+                return None
             directory = self._downloads.get(owner)
             if directory is None:
                 directory = self._downloads[owner] = tempfile.TemporaryDirectory(prefix="chatlab-probe-")
@@ -375,13 +381,14 @@ def build_page(context):
         choices = saved_choices(context.data_dir)
         listed = any(value == probe["id"] for _label, value in choices)
         examples = probe["examples"]
-        return (probe, probe_summary(probe), layer_rows(probe),
+        result = (probe, probe_summary(probe), layer_rows(probe),
                 gr.update(choices=choices, value=probe["id"] if listed else None), runs.stage(view, probe),
                 gr.update(maximum=len(probe["layers"]) - 1, value=probe["best_layer"], visible=True),
                 probe["chat_template"], None, gr.update(value=[], visible=False), "", [], "",
                 probe["name"], probe["positive_label"], probe["negative_label"],
                 "\n".join(examples["positive"]), "\n".join(examples["negative"]),
                 probe["chat_template"], probe["paired"], probe["pool"], probe["l2"])
+        return result if runs.probe_current(view, probe) else (gr.skip(),) * len(probe_outputs)
 
     probe_outputs = [probe_state, summary, layers_table, picker, download, layer, as_user,
                      reading_state, strip, detail, token_table, heat,
@@ -435,28 +442,50 @@ def build_page(context):
     train.click(runs.begin_training, owner, train_request, queue=False).success(train_probe, [name, positive_label, negative_label, positive_text, negative_text,
                               chat_template, paired, pool, l2, owner, train_request], probe_outputs, concurrency_id="probes-model")
 
-    def open_saved(probe_id, view):
+    def begin_open(view):
+        turn = runs.turn(view)
+        runs.cancel(view)
+        return str(turn)
+
+    def open_turn(view, request):
+        return runs.turn(view) if request is None else int(request)
+
+    def open_saved(probe_id, view, request=None):
         if not probe_id:
+            return (gr.skip(),) * len(probe_outputs)
+        turn = open_turn(view, request)
+        if not runs.live(view, turn):
             return (gr.skip(),) * len(probe_outputs)
         try:
             probe = probes.read(context.data_dir / f"{probe_id}.json")
         except (OSError, ValueError) as exc:
             raise gr.Error(f"That probe could not be opened: {exc}") from exc
-        return shown_probe(probe, view)
+        return shown_probe(probe, view, turn)
 
-    picker.input(open_saved, [picker, owner], probe_outputs, show_progress="hidden")
+    open_request = gr.Textbox(visible=False)
+    picker.input(begin_open, owner, open_request, queue=False).success(
+        open_saved, [picker, owner, open_request], probe_outputs,
+        concurrency_id="probes-files", show_progress="hidden")
 
-    def import_probe(path, view):
+    def import_probe(path, view, request=None):
         if not path:
+            return (gr.skip(),) * len(probe_outputs)
+        turn = open_turn(view, request)
+        if not runs.live(view, turn):
             return (gr.skip(),) * len(probe_outputs)
         try:
             probe = probes.read(path)
+            if not runs.live(view, turn):
+                return (gr.skip(),) * len(probe_outputs)
             save(probe)
         except (OSError, ValueError) as exc:
             raise gr.Error(str(exc)) from exc
-        return shown_probe(probe, view)
+        return shown_probe(probe, view, turn)
 
-    upload.upload(import_probe, [upload, owner], probe_outputs, show_progress="hidden")
+    import_request = gr.Textbox(visible=False)
+    upload.upload(begin_open, owner, import_request, queue=False).success(
+        import_probe, [upload, owner, import_request], probe_outputs,
+        concurrency_id="probes-files", show_progress="hidden")
 
     def switch_mode(chosen):
         generating = chosen == GENERATE

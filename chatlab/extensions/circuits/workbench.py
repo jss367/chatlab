@@ -172,9 +172,11 @@ class Workbench:
                 return self.prompt_ids(session, model, prompt)
         return self.prompt_ids(session, None, prompt)
 
-    def single_tokens(self, session, texts, what):
+    def single_tokens(self, session, texts, what, cancelled=None):
         ids = []
         for text in texts:
+            if cancelled is not None:
+                attribution._check_cancelled(cancelled)
             encoded = session.encode(text)
             if len(encoded) != 1:
                 raise ValueError(f"{what}: {text!r} is {len(encoded)} tokens, not one. "
@@ -327,10 +329,17 @@ class Workbench:
 
     def group_effects(self, graph, pivot_texts, alternative_texts, prefix_texts, include_prompt, boost,
                       every_position, progress, cancelled):
+        for entries, limit in ((pivot_texts, 4096), (alternative_texts, 4096),
+                               (prefix_texts, interventions.MAX_PREFIXES - bool(include_prompt))):
+            if not isinstance(entries, list) or len(entries) > limit:
+                raise ValueError(f"Use at most {limit} entries in each intervention list.")
+            if any(not isinstance(text, str) or len(text) > 32768 for text in entries):
+                raise ValueError("Intervention entries must be text of at most 32768 characters each.")
+        attribution._check_cancelled(cancelled)
         with self.models.open_session() as session:
             self._same_model(graph, session)
-            pivot = self.single_tokens(session, pivot_texts, "Pivot tokens")
-            alternatives = self.single_tokens(session, alternative_texts, "Alternatives")
+            pivot = self.single_tokens(session, pivot_texts, "Pivot tokens", cancelled)
+            alternatives = self.single_tokens(session, alternative_texts, "Alternatives", cancelled)
             if len(pivot) > 4096 or len(alternatives) > 4096:
                 raise ValueError("Use at most 4096 distinct pivot tokens and 4096 alternatives.")
             if not pivot:
@@ -342,6 +351,7 @@ class Workbench:
             prefixes = [graph["ids"]] if include_prompt else []
             prompt = graph.get("prompt") or {}
             for text in prefix_texts:
+                attribution._check_cancelled(cancelled)
                 prefixes.append(self.encoded_prompt(session, {**prompt, "prefix": text}))
             if not prefixes or len(prefixes) > interventions.MAX_PREFIXES:
                 raise ValueError(f"Use between 1 and {interventions.MAX_PREFIXES} prefixes.")

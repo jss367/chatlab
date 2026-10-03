@@ -105,6 +105,14 @@ class FitTests(unittest.TestCase):
                       for layer, accuracy, loss in zip(value["layers"], accuracies, losses)]
             self.assertEqual(probes.normalize(value | {"layers": layers, "best_layer": 2})["best_layer"], expected)
 
+    def test_imported_folds_require_supported_integer_counts(self):
+        value = trained()
+        for folds in (2.9, 2., 0, -5, 6, True, "3", None):
+            with self.subTest(folds=folds), self.assertRaisesRegex(ValueError, "folds.*integer"):
+                probes.normalize(value | {"folds": folds})
+        for folds in range(2, 6):
+            self.assertEqual(probes.normalize(value | {"folds": folds})["folds"], folds)
+
     def test_the_fit_is_at_the_penalized_optimum(self):
         rng = np.random.default_rng(3)
         rows = rng.normal(size=(30, 50)) * rng.uniform(0.1, 10, size=50) + rng.normal(size=50)
@@ -341,7 +349,7 @@ class PageTests(unittest.TestCase):
 
     def test_probe_downloads_reuse_and_clean_up_the_owned_view_directory(self):
         runs = page_module.Runs()
-        probe = self.train()[0]
+        probe = probes.normalize(self.train()[0])
         first = Path(runs.stage("view", probe))
         second = Path(runs.stage("view", {**probe, "name": "Different"}))
         self.assertEqual(first.parent, second.parent)
@@ -353,6 +361,12 @@ class PageTests(unittest.TestCase):
         self.assertTrue(other.exists())
         runs.forget("other")
         self.assertFalse(other.parent.exists())
+        older = runs.replace_probe("fenced", probe)
+        newer = runs.replace_probe("fenced", {**probe, "name": "Latest"})
+        latest_path = Path(runs.stage("fenced", newer))
+        self.assertIsNone(runs.stage("fenced", older))
+        self.assertTrue(latest_path.exists())
+        runs.forget("fenced")
 
     def test_queued_training_cannot_replace_a_later_opened_probe(self):
         probe = self.train()[0]
@@ -534,6 +548,41 @@ class PageTests(unittest.TestCase):
             self.read(probe, READ, "Hello")
         self.assertIsNone(self.manager.claim_generation())
         self.manager.release_generation()
+
+    def test_later_probe_open_wins_when_older_file_read_finishes_last(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        old = self.train()[0]
+        newer = dict(old, id="f" * 32, name="Newer")
+        path = self.data.parent / "import.json"
+        path.write_text(probes.dumps(newer))
+        original_read = probes.read
+        for older_import in (False, True):
+            entered, release = Event(), Event()
+            old_request = self.fn["begin_open"]("owner")
+            old_path = self.data / f"{old['id']}.json"
+            def read_file(candidate):
+                if Path(candidate) == old_path and not entered.is_set():
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("old read was not released")
+                return original_read(candidate)
+            with self.subTest(importing=older_import), mock.patch.object(probes, "read", side_effect=read_file), \
+                    ThreadPoolExecutor(max_workers=2) as pool:
+                handler = self.fn["import_probe"] if older_import else self.fn["open_saved"]
+                older = pool.submit(handler, str(old_path) if older_import else old["id"], "owner", old_request)
+                self.assertTrue(entered.wait(1))
+                try:
+                    request = self.fn["begin_open"]("owner")
+                    selected = self.fn["import_probe"](str(path), "owner", request)[0]
+                finally:
+                    release.set()
+                self.assertTrue(all(value == gr.skip() for value in older.result(timeout=2)))
+                self.assertEqual(selected["name"], "Newer")
+                self.assertIsNotNone(self.read(selected, READ, WANTED[0])[-1][0])
+            with mock.patch.object(probes, "read", side_effect=AssertionError("obsolete queued open")):
+                self.assertTrue(all(value == gr.skip() for value in handler(
+                    str(old_path) if older_import else old["id"], "owner", old_request)))
 
     def test_saved_and_imported_probes_open(self):
         probe = self.train()[0]
