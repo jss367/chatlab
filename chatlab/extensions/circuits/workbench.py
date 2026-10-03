@@ -605,7 +605,7 @@ def _validate_effects(effects, groups):
     if not isinstance(effects, dict) or type(effects["prefixes"]) is not int or not 1 <= effects["prefixes"] <= 4096:
         raise ValueError
     effects["boost"] = float(effects["boost"])
-    if not math.isfinite(effects["boost"]) or not isinstance(effects["every_position"], bool):
+    if not math.isfinite(effects["boost"]) or not 0 <= effects["boost"] <= 100 or not isinstance(effects["every_position"], bool):
         raise ValueError
     tokens = []
     for key in ("pivot", "alternatives"):

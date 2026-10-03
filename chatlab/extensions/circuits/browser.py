@@ -143,7 +143,18 @@ def build_browser(context, bench):
     layer.input(begin_page, owner, [request, chosen, detail, steer], queue=False)
     start.input(begin_page, owner, [request, chosen, detail, steer], queue=False)
 
+    def begin_refresh(view, selected):
+        stamp = uuid4().hex
+        with page_lock:
+            pages[view] = {"stamp": stamp, "ready": False, "previous": dict(selected) if selected else None}
+        return stamp, None, gr.skip(), gr.update(interactive=False)
+
     def list_page(key, layer_value, start_value, selected, view, stamp, step=0):
+        with page_lock:
+            state = pages.get(view)
+            if state is None or state["stamp"] != stamp:
+                return (gr.skip(),) * 6
+            selected = selected or state.get("previous")
         try:
             spec = spec_named(key)
             first_feature = page_start(spec, int(start_value or 0) + step * PAGE_SIZE)
@@ -169,7 +180,7 @@ def build_browser(context, bench):
         return frame if current(view, stamp, ready=True) else (gr.skip(),) * 6
 
     for button, step in ((show, 0), (previous, -1), (following, 1)):
-        event = button.click(begin_page, owner, [request, chosen, detail, steer], queue=False)
+        event = button.click(begin_refresh, [owner, chosen], [request, chosen, detail, steer], queue=False)
         event.then(partial(list_page, step=step),
                    [set_choice, layer, start, chosen, owner, request],
                    [listing, start, shown, chosen, detail, steer], concurrency_id="circuits-browse")
