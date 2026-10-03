@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from types import SimpleNamespace
 
 import gradio as gr
@@ -13,6 +14,7 @@ from chatlab.extensions.maze_experiments.page import build_page
 from chatlab.extensions.maze_experiments.reasoning_check import (
     FRACTIONS, TruncationControl, direction_probabilities, load_run, read_responses, response_rows, stated_direction,
     recorded_spans, summary_rows, truncated_ids, truncation_summary, truncation_test)
+from chatlab.extensions.maze_experiments import reasoning_page
 from chatlab.extensions.maze_experiments.reasoning_page import parse_responses
 from chatlab.extensions.maze_experiments.runner import Episode, context_messages, stream_episode
 from chatlab.extensions.maze_experiments.maze import Maze
@@ -477,6 +479,28 @@ class ReadingManager(SteeringManager):
 
 
 class ReasoningPageTests(unittest.TestCase):
+    def test_loaded_runs_share_a_budget_across_uploads(self):
+        episodes = [Episode(MAZE, CONFIG | {"interruption_text": ""}) for _ in range(3)]
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [ep.save(Path(directory)) for ep in episodes]
+            sizes = [p.stat().st_size for p in paths]
+            context = SimpleNamespace(tokens=TokenInspector(), models=ReadingManager(), data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                load = handlers_by_name(demo)["reasoning_load"]
+                with mock.patch.object(reasoning_page, "MAX_RUN_BYTES", sum(sizes[:2]) - 1):
+                    with mock.patch.object(reasoning_page, "read_run_file", wraps=reasoning_page.read_run_file) as read:
+                        held = load(paths[:2], {}, [], TruncationControl())[0]
+                        self.assertEqual(set(held), {episodes[0].run_id})
+                        self.assertEqual(read.call_count, 1)
+                        held = load(paths[2:], held, [], TruncationControl())[0]
+                        self.assertEqual(set(held), {episodes[0].run_id})
+                        self.assertEqual(read.call_count, 1)
+            finally:
+                demo.close()
+
     def test_loaded_runs_are_scored_and_tested_from_the_tab(self):
         team = team_run(TEAM_REPLIES)
         single = Episode(MAZE, CONFIG | {"interruption_text": ""})
