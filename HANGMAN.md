@@ -26,7 +26,7 @@ After each finished response the panel under the game shows:
 
 - **Board**: the last `Board:` line of the latest reply that has one, and the letters guessed so far.
 - **Words that fit the latest board**: words in `/usr/share/dict/words` with the revealed letters in place and no guessed letter in a hidden cell. A model that has committed to nothing can stay consistent with many words. A contradiction leaves none.
-- **Contradictions**: the board changed length; a revealed letter moved or disappeared; a letter appeared that was never guessed; or the revealed word disagrees with a board. Each guessed letter is held to the first readable board after it was guessed. That board fixes where the letter is, or that it is absent. Each contradiction is reported once, at the response where it first appears.
+- **Contradictions**: the board changed length; a revealed letter moved or disappeared; a letter appeared that was never guessed; or the revealed word disagrees with a board. Each guessed letter is held to the first readable board after it was guessed. That board fixes where the letter is, or that it is absent. A board that spells out the word its own reply reveals is the reveal, so its letters need not have been guessed, but it still has to agree with every board before it. Each contradiction is reported once, at the response where it first appears.
 
 Only the visible answer is read, not the reasoning block. Replies with no readable board are listed and skipped.
 
@@ -63,7 +63,7 @@ Each trial needs an `id` and a `seed`, and may set a `label`. `defaults` sets an
 - `max_guesses` (1–200, default 26): the most guesses a game gets.
 - `probe`: leave it out, or set `samples` (1–100, default 5), `max_new_tokens` (1–256, default 16) and `temperature` (0–2, default 1).
 
-A game ends when a board is full (`solved`), when a reply says `Wrong guesses left: 0` (`lost`), when the model writes a `Word:` line before either (`revealed`), or when the guesser runs out (`unfinished`). If the game ends without a `Word:` line, the batch sends `I give up. What was the word?` as one more turn. That way nearly every game has a word to hold the boards to. `stopped` and `error` mark games the batch did not finish.
+A game ends when the player's guess completes the word: a letter on a full board, or the word itself (`solved`). It ends as `lost` when a reply says `Wrong guesses left: 0`, even if that reply also shows the word, and as `revealed` when the model shows the word before either, in a `Word:` line or a full board the guess did not earn. It ends as `unfinished` when the guesser runs out. If the game ends without a `Word:` line, the batch sends `I give up. What was the word?` as one more turn. That way nearly every game has a word to hold the boards to. `stopped` and `error` mark games the batch did not finish.
 
 ### The reveal probe
 
