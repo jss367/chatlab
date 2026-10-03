@@ -511,6 +511,7 @@ def load_graph(path):
                     positive, negative = node["positive"], node["negative"]
                     if (not isinstance(positive, list) or not isinstance(negative, list)
                             or not positive or not negative or len(positive) + len(negative) > attribution.MAX_CHOSEN_TARGETS
+                            or len(set(positive)) != len(positive) or len(set(negative)) != len(negative)
                             or set(positive) & set(negative)):
                         raise ValueError
                     values = positive + negative

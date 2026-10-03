@@ -133,6 +133,9 @@ def build_page(context):
         with version_lock:
             return versions.get(session_id)
 
+    def current_graph(graph, session_id):
+        return graph is not None and graph.get("_view_version") == version(session_id)
+
     def forget(session_id):
         bench.cancel(session_id)
         with version_lock:
@@ -302,7 +305,7 @@ def build_page(context):
         """Save the graph, and refresh the current view's download copy."""
         try:
             with version_lock:
-                versions[session_id] = uuid4().hex
+                versions[session_id] = graph["_view_version"] = uuid4().hex
                 return staged(bench.save(graph), graph, session_id)
         except OSError as exc:
             logger.warning("Could not save graph %s: %s", graph.get("id"), exc)
@@ -405,8 +408,8 @@ def build_page(context):
     # Selecting, naming and grouping ---------------------------------------------
 
     def picked(graph, raw_pick, session_id):
-        if not graph:
-            return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+        if not current_graph(graph, session_id):
+            return (gr.skip(),) * 5
         try:
             data = json.loads(raw_pick)
             ids = {n["id"] for n in graph["nodes"]}
@@ -426,6 +429,8 @@ def build_page(context):
                concurrency_id="circuits-read", trigger_mode="always_last", show_progress="hidden")
 
     def rename_node(graph, focused, text, chosen, shown, errors, session_id):
+        if not current_graph(graph, session_id):
+            return (gr.skip(),) * 7
         node = node_of(graph, focused)
         if node is None or node["kind"] != "feature":
             raise gr.Error("Click a feature in the graph first.")
@@ -442,6 +447,8 @@ def build_page(context):
                  [graph_state, graph_view, card, groups_view, group_pick, group_card, download], concurrency_id="circuits-read")
 
     def group_selected(graph, chosen, name, shown, errors, session_id):
+        if graph and not current_graph(graph, session_id):
+            return (gr.skip(),) * 7
         if not graph:
             raise gr.Error("Trace a graph first.")
         feature_ids = {n["id"] for n in graph["nodes"] if n["kind"] == "feature"}
@@ -481,6 +488,8 @@ def build_page(context):
     group_pick_bridge.input(group_clicked, [graph_state, group_pick_bridge], [group_pick, group_card], queue=False)
 
     def delete_group(graph, name, chosen, shown, errors, session_id):
+        if graph and not current_graph(graph, session_id):
+            return (gr.skip(),) * 6
         if not graph or name not in graph["groups"]:
             raise gr.Error("Choose a group first.")
         groups = {g: m for g, m in graph["groups"].items() if g != name}
@@ -573,7 +582,7 @@ def build_page(context):
             raise gr.Error(str(exc)) from exc
         try:
             with version_lock:
-                versions[session_id] = uuid4().hex
+                versions[session_id] = graph["_view_version"] = uuid4().hex
                 offered = staged(path, graph, session_id)
         except OSError:
             offered = None

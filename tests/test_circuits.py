@@ -706,6 +706,16 @@ class WorkbenchTests(unittest.TestCase):
         with mock.patch.object(bench, "_model", side_effect=AssertionError("model lock taken")):
             self.assertEqual(bench.encoded_prompt(session, dict(raw=False, user="hello", system="", prefix=" world")), [1, 2, 3])
 
+    def test_imported_contrast_sides_cannot_double_count_a_token(self):
+        graph = small_graph()
+        target = next(n for n in graph["nodes"] if n["kind"] == "target")
+        node = {**target, "target_kind": "contrast", "positive": [1, 1, 2], "negative": [3]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "upload.json"
+            path.write_text(json.dumps({**graph, "nodes": [node], "edges": []}))
+            with self.assertRaisesRegex(ValueError, "not a valid"):
+                workbench.load_graph(path)
+
     def test_imported_metadata_and_measurement_token_bounds(self):
         graph = small_graph()
         feature = next(n for n in graph["nodes"] if n["kind"] == "feature")
@@ -902,6 +912,11 @@ class WorkbenchTests(unittest.TestCase):
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     frames = list(handlers["run_interventions"]("view", old, "", "", "", True, 2, False, "group"))
                 self.assertEqual(frames[-1], (gr.skip(),) * 6)
+                feature_id = old["groups"]["group"][0]
+                self.assertTrue(all(value == gr.skip() for value in handlers["rename_node"](old, feature_id, "stale", [], 40, False, "view")))
+                self.assertTrue(all(value == gr.skip() for value in handlers["group_selected"](old, [feature_id], "stale", 40, False, "view")))
+                self.assertTrue(all(value == gr.skip() for value in handlers["delete_group"](old, "group", [], 40, False, "view")))
+                self.assertFalse((Path(directory) / "graphs" / f"{old['id']}.json").exists())
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     trace_frames = list(handlers["run_trace"]("view", "", "test", "", False,
                                       "The likeliest next tokens", "", "", 16, .8, .98, 8, 40, False))
@@ -921,10 +936,10 @@ class WorkbenchTests(unittest.TestCase):
 
                 features = [n["id"] for n in old["nodes"] if n["kind"] == "feature"]
                 def changed_focus(*args):
-                    handlers["picked"](old, json.dumps({"selected": [features[1]], "focus": features[1]}), "view")
+                    handlers["picked"](old, json.dumps({"selected": [features[1]], "focus": features[1]}), "focus-view")
                     yield "result", {"deltas": []}
                 with mock.patch.object(workbench.Workbench, "background", changed_focus):
-                    self.assertEqual(handlers["ablate_focused"]("view", old, features[0]), gr.skip())
+                    self.assertEqual(handlers["ablate_focused"]("focus-view", old, features[0]), gr.skip())
                 feature = next(n["id"] for n in old["nodes"] if n["kind"] == "feature")
                 with mock.patch.object(workbench.Workbench, "background", completed):
                     self.assertEqual(handlers["ablate_focused"]("view", old, feature), gr.skip())
