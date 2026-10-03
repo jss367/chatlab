@@ -80,7 +80,7 @@ def run(blocks, transcoders, ids, changes=(), tokens=()):
         if blocks.final_softcap:
             logits = torch.tanh(logits / blocks.final_softcap) * blocks.final_softcap
         log_probs = torch.log_softmax(logits, dim=-1)
-    values = log_probs[list(tokens)].exp().cpu().tolist() if tokens else []
+    values = log_probs[list(tokens)].cpu().double().exp().tolist() if tokens else []
     if any(not math.isfinite(v) for v in values):
         raise ValueError("The model returned a non-finite probability.")
     return {"probabilities": values, "active": active, "log_probs": log_probs}
