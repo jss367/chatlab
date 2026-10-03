@@ -18,6 +18,7 @@ import numpy as np
 FORMAT = "chatlab-probe-1"
 # A 7B probe holds 32 rows of 4,096 weights, about 2.5 MB written out.
 MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_COEFFICIENTS = 1024 * 1024
 # Each example is a forward pass and a row of every block's output held until
 # the fit, as for a steering extraction.
 MAX_EXAMPLES = 64
@@ -238,6 +239,9 @@ def normalize(value):
     layers = value.get("layers")
     if not isinstance(layers, list) or not 1 <= len(layers) <= 256:
         raise ValueError("The probe needs between 1 and 256 layers.")
+    if sum(len(item.get("weights", [])) for item in layers
+           if isinstance(item, dict) and isinstance(item.get("weights"), list)) > MAX_COEFFICIENTS:
+        raise ValueError("The probe exceeds the total coefficient limit.")
     width = None
     clean = []
     for index, item in enumerate(layers):

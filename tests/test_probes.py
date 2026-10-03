@@ -75,6 +75,16 @@ class FitTests(unittest.TestCase):
                 probes.normalize(value | {"examples": {"positive": examples, "negative": ["a", "b"]}})
 
 
+    def test_imported_probe_coefficient_limit_is_checked_before_conversion(self):
+        value = trained()
+        count = sum(len(layer["weights"]) for layer in value["layers"])
+        # A deliberately unconvertible coefficient proves the total limit is
+        # checked before allocating a second set of normalized float lists.
+        value["layers"][0]["weights"][0] = object()
+        with mock.patch.object(probes, "MAX_COEFFICIENTS", count - 1):
+            with self.assertRaisesRegex(ValueError, "total coefficient limit"):
+                probes.normalize(value)
+
     def test_the_fit_is_at_the_penalized_optimum(self):
         rng = np.random.default_rng(3)
         rows = rng.normal(size=(30, 50)) * rng.uniform(0.1, 10, size=50) + rng.normal(size=50)

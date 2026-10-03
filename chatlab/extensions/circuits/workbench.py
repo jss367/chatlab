@@ -58,6 +58,7 @@ class Workbench:
         self._records = {}
         self._lock = threading.Lock()
         self._sessions = {}
+        self._pending_cancellations = set()
 
     # Status -------------------------------------------------------------
 
@@ -73,8 +74,10 @@ class Workbench:
     def cancel(self, owner):
         with self._lock:
             session = self._sessions.get(owner)
-        if session is not None:
-            session["cancelled"].set()
+            if session is None:
+                self._pending_cancellations.add(owner)
+            else:
+                session["cancelled"].set()
 
     def background(self, owner, work):
         """Run ``work(progress, cancelled)`` on a thread, yielding its progress text.
@@ -87,6 +90,9 @@ class Workbench:
         with self._lock:
             if owner in self._sessions:
                 raise ValueError("This view is already running something. Wait for it or press Stop.")
+            if owner in self._pending_cancellations:
+                self._pending_cancellations.remove(owner)
+                cancelled.set()
             self._sessions[owner] = {"cancelled": cancelled}
 
         def progress(stage, done, total):
@@ -94,6 +100,8 @@ class Workbench:
 
         def run():
             try:
+                if cancelled.is_set():
+                    raise attribution.Cancelled("Stopped before queued work started.")
                 updates.put(("done", work(progress, cancelled.is_set)))
             except BaseException as exc:  # handed to the generator
                 updates.put(("error", exc))
@@ -593,6 +601,8 @@ def _validate_effects(effects, groups):
     allowed_token_keys = {str(t) for t in tokens}
     def summary(value):
         if not isinstance(value, dict) or not isinstance(value["tokens"], dict) or len(value["tokens"]) > 8192:
+            raise ValueError
+        if {str(key) for key in value["tokens"]} != allowed_token_keys:
             raise ValueError
         for key, number in value["tokens"].items():
             if str(key) not in allowed_token_keys:

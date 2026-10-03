@@ -339,6 +339,7 @@ class FrozenGraph:
         row = torch.zeros(count, self.columns, dtype=torch.float32, device=self.recording.activation.device)
         features = len(recording.activation)
         for layer in range(self.layers):
+            _check_cancelled(self.cancelled)
             grad = output_grads[layer]
             if grad is None:
                 continue
@@ -364,6 +365,7 @@ class FrozenGraph:
         chunk = max(1, CHUNK_BYTES // (4 * grad.shape[0] * grad.shape[-1]))
         out = []
         for begin in range(0, end - start, chunk):
+            _check_cancelled(self.cancelled)
             stop = min(end - start, begin + chunk)
             picked = grad[:, positions[begin:stop], :]
             out.append((picked * decoders[begin:stop][None]).sum(-1))
