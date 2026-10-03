@@ -161,7 +161,7 @@ def next_guess(game, guesser, asked):
     return next((letter for letter in ENGLISH if letter not in guessed), None)
 
 
-def ended(turn):
+def ended(turn, previous_board=None):
     """How the game stands after ``turn``: solved, lost, revealed, or None to play on.
 
     Solved is the player's guess completing the word: a letter on a full
@@ -175,7 +175,11 @@ def ended(turn):
     board, word = turn.get("board"), turn.get("revealed_word")
     full = board is not None and HIDDEN not in board
     kind, value = guess_of(turn["guess"])
-    if (kind == "letter" and full and value in board
+    letter_completed = (kind == "letter" and full and previous_board is not None
+                        and len(previous_board) == len(board) and HIDDEN in previous_board
+                        and all(before == after or before == HIDDEN and after == value
+                                for before, after in zip(previous_board, board)))
+    if (letter_completed
             or kind == "word" and value in (full and "".join(board), word)):
         return "solved"
     if read_left(turn.get("answer", "")) == 0:
@@ -262,7 +266,8 @@ def play(trial, session, control, save, stamp=None):
         if outcome is not None:
             # The answer to the question that ended the game.
             return game, outcome, None
-        state = ended(turn)
+        previous_board = next((t["board"] for t in reversed(game["turns"][:-1]) if t.get("board") is not None), None)
+        state = ended(turn, previous_board)
         if turn.get("revealed_word"):
             return game, state, None
         guess = None if state else next_guess(game, trial["guesser"], asked)

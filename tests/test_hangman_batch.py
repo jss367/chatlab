@@ -283,12 +283,15 @@ class BatchTests(Fixture):
         self.assertEqual((row["outcome"], row["responses"], row["contradictions"]), ("solved", 7, 0))
 
     def test_how_a_game_ended_follows_what_the_guess_did(self):
-        def ended(guess, reply):
-            return batch.ended(finish_turn(dict(guess=guess, text=reply)))
+        def ended(guess, reply, previous=("c", "r", "a", "n", "_")):
+            return batch.ended(finish_turn(dict(guess=guess, text=reply)), previous)
         self.assertEqual(ended("z", "Board: C R A N E\nWrong guesses left: 0\nWord: crane"), "lost")
         self.assertEqual(ended("e", "Board: C R A N E\nWrong guesses left: 1\nWord: crane"), "solved")
         # A host that miscounts a right guess still saw it solve the word.
         self.assertEqual(ended("e", "Board: C R A N E\nWrong guesses left: 0"), "solved")
+        self.assertEqual(ended("c", "Board: C R A N E\nWrong guesses left: 3\nWord: crane",
+                               ("_",) * 5), "revealed")
+        self.assertEqual(ended("e", "Board: C R A N E\nWrong guesses left: 3", None), "revealed")
         self.assertEqual(ended("crane", "Right!\nWord: crane"), "solved")
         self.assertEqual(ended("crate", "No.\nBoard: C R A N E\nWrong guesses left: 0\nWord: crane"), "lost")
         self.assertEqual(ended("z", "Board: C R A N E\nWrong guesses left: 3"), "revealed")
