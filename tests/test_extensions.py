@@ -550,6 +550,50 @@ class RegistryTests(unittest.TestCase):
         finally:
             demo.close()
 
+    def test_prepared_selection_is_rechecked_after_vector_compaction(self):
+        from contextlib import contextmanager
+        from chatlab.conversation import new_forks, branch_sampling, MAIN_BRANCH
+        from chatlab.ui import steering as steering_ui
+        selected = [True]
+        buttons = []
+        value = {"format": "chatlab-steering-1", "model_id": "org/model", "layer": 0,
+                 "vector": [1., 0.], "strength": 1.}
+        def build(context):
+            button = gr.Button("Guarded steering")
+            buttons.append(button)
+            def validate(prepared):
+                if not selected[0]:
+                    raise ValueError("Selection changed")
+                return prepared
+            @contextmanager
+            def commit(prepared):
+                validate(prepared)
+                yield
+            context.navigation.steer_chat(button, validate, prepare=lambda: value, commit=commit)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            capture = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            prepare = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "prepare_steering")
+            apply = next(fn for fn in demo.fns.values() if fn.fn and fn.fn.__name__ == "apply_prepared_steering")
+            forks = new_forks()
+            ticket = prepare.fn(forks, capture.fn(forks))
+            generation = dict(forks["_steering_generation"])
+            compact = steering_ui.compact
+            def changed(value):
+                result = compact(value)
+                selected[0] = False
+                return result
+            with mock.patch.object(steering_ui, "compact", side_effect=changed), self.assertRaisesRegex(gr.Error, "Selection changed"):
+                apply.fn(forks, ticket)
+            self.assertEqual(forks["_steering_generation"], generation)
+            self.assertIsNone(branch_sampling(forks, MAIN_BRANCH).get("steering"))
+            selected[0] = True
+            self.assertIsNotNone(branch_sampling(apply.fn(forks, ticket)[0], MAIN_BRANCH)["steering"])
+        finally:
+            demo.close()
+
     def test_a_host_without_steering_refuses_the_button(self):
         with self.assertRaisesRegex(ValueError, "cannot hand"):
             NavigationService(lambda *args: None).steer_chat(object(), lambda: None)

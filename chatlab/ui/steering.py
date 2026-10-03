@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import deepcopy
 import threading
 import time
@@ -100,15 +101,16 @@ def import_vector(path, forks):
     return store(forks, value), *controls(value)
 
 
-def apply_vector(forks, value):
-    """Put a vector an extension built on the active conversation, as an import would."""
+def apply_vector(forks, value, *, commit=None):
+    """Prepare immutable vector data, then commit while its selection is guarded."""
     try:
         value = compact(normalize(value))
+        if value is None:
+            raise ValueError("There is no vector to steer with.")
+        with commit() if commit is not None else nullcontext():
+            return store(forks, value), *controls(value)
     except (OSError, ValueError, TypeError) as error:
         raise gr.Error(str(error)) from error
-    if value is None:
-        raise gr.Error("There is no vector to steer with.")
-    return store(forks, value), *controls(value)
 
 
 def remove_vector(forks):
