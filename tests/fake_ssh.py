@@ -1,15 +1,19 @@
 """Stands in for ``ssh`` in the remote session tests.
 
 It ignores the host. Given a command, it runs it here through ``sh``, the
-way sshd would run it on the far side. Given ``-L``, it listens on the
-local end and relays each connection to the target itself, the way a real
-forward would, and exits with SSH's status when it cannot listen.
+way sshd would run it on the far side, and exits when it does. Given
+``-L``, it also listens on the local end and relays each connection to the
+target itself, the way a real forward would, and exits with SSH's status
+when it cannot listen.
 """
 
 import os
 import socket
+import subprocess
 import sys
 import threading
+
+_listening = threading.Event()
 
 
 def _relay(source: socket.socket, sink: socket.socket) -> None:
@@ -33,8 +37,9 @@ def _forward(spec: str) -> None:
     except OSError as error:
         print(f"bind [{bind_host}]:{bind_port}: {error.strerror}", file=sys.stderr)
         print("Could not request local forwarding.", file=sys.stderr)
-        sys.exit(255)
+        os._exit(255)
     listener.listen()
+    _listening.set()
     while True:
         client, _ = listener.accept()
         try:
@@ -71,9 +76,13 @@ def main(arguments: list[str]) -> None:
             for index in range(1024):
                 print(f"diagnostic {index}: " + "x" * 512, file=sys.stderr)
             sys.stderr.flush()
-        _forward(forward)
-    else:
-        os.execvp("sh", ["sh", "-c", " ".join(command)])
+        threading.Thread(target=_forward, args=(forward,), daemon=True).start()
+        if not _listening.wait(5):
+            sys.exit(255)
+        if not command:
+            threading.Event().wait()
+        sys.exit(subprocess.call(["sh", "-c", " ".join(command)]))
+    os.execvp("sh", ["sh", "-c", " ".join(command)])
 
 
 if __name__ == "__main__":

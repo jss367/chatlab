@@ -101,13 +101,18 @@ class SSHConfigurationTests(unittest.TestCase):
                     session._start_tunnel("http://127.0.0.1:8123/")
             # -G only expands this controlled fixture config: it makes no connection.
             server = subprocess.check_output(["ssh", "-G", "-F", str(config), *captured[0]], text=True).splitlines()
-            tunnel = subprocess.check_output(["ssh", "-G", "-F", str(config), *captured[1]], text=True).splitlines()
+            # -G takes no command, so the forward's is checked apart.
+            *tunnel_arguments, tunnel_command = captured[1]
+            tunnel = subprocess.check_output(["ssh", "-G", "-F", str(config), *tunnel_arguments], text=True).splitlines()
             self.assertFalse(any(line.startswith(("localforward ", "dynamicforward ")) for line in server))
             self.assertIn("clearallforwardings yes", server)
             self.assertIn("stdinnull no", server)
             self.assertIn("sessiontype default", server)
             self.assertIn("clearallforwardings no", tunnel)
-            self.assertIn("sessiontype none", tunnel)
+            # A session reading stdin, so the forward ends with the app.
+            self.assertIn("sessiontype default", tunnel)
+            self.assertIn("stdinnull no", tunnel)
+            self.assertEqual(tunnel_command, remote.TUNNEL_COMMAND)
             self.assertEqual(len([line for line in tunnel if line.startswith("localforward ")]), 2)
             self.assertEqual(len([line for line in tunnel if line.startswith("dynamicforward ")]), 1)
             self.assertTrue(any("18082" in line and "8123" in line for line in tunnel if line.startswith("localforward ")))
@@ -273,6 +278,42 @@ class SessionTests(unittest.TestCase):
                 self.assertEqual(session.start(), f"http://127.0.0.1:{session.local_port}/")
             finally:
                 session.close()
+
+    def test_an_app_killed_mid_session_leaves_nothing_running(self):
+        # Killed rather than quit, as the memory killer does: nothing gets
+        # to call close, and both connections have to end on their own.
+        port = find_available_port()
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys\n"
+                "from chatlab import remote\n"
+                f"target = remote.RemoteTarget('gpu-box', {str(self.checkout)!r})\n"
+                f"session = remote.RemoteSession(target, local_port={port}, ssh={str(self.ssh)!r})\n"
+                "session.start()\n"
+                "print(session._tunnel.pid, flush=True)\n"
+                "sys.stdin.read()\n",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            tunnel_pid = int(holder.stdout.readline())
+            server_pid = self.server_pid()
+
+            holder.kill()
+            holder.wait()
+
+            self.assertTrue(_gone(server_pid), "the remote server outlived the app")
+            self.assertTrue(_gone(tunnel_pid), "the port forward outlived the app")
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+                holder.wait()
+            holder.stdin.close()
+            holder.stdout.close()
 
     def test_disconnecting_stops_the_remote_server(self):
         session = self.session()

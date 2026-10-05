@@ -8,8 +8,9 @@ hands the window the forwarded address.
 Two SSH connections do the work. The first runs the server and reads the
 address it prints once it is up; the second carries the port forward. The
 server watches its standard input and exits when it closes, which happens
-when the first connection drops or this side ends it, so a GPU is not left
-holding a model nobody can reach.
+when the first connection drops, this side ends it, or this process dies, so
+a GPU is not left holding a model nobody can reach. The forward ends the
+same way, so it never outlives the app holding the local port.
 
 SSH runs in batch mode: keys, the agent and ``~/.ssh/config`` decide how it
 signs in, and a host that would ask for a password or a new host key is
@@ -47,6 +48,9 @@ TUNNEL_TIMEOUT = 30.0
 STOP_TIMEOUT = 5.0
 # How many lines of the server's output are kept for an error message.
 TAIL_LINES = 12
+# What the forward's connection runs on the host: nothing but a wait for its
+# input to close.
+TUNNEL_COMMAND = "cat > /dev/null"
 SSH_OPTIONS = (
     "-o", "BatchMode=yes",
     "-o", "RemoteCommand=none",
@@ -267,11 +271,19 @@ class RemoteSession:
             raise RemoteError(f"ChatLab on {self.target.host} reported an address without a port: {remote_address}")
         forward = f"127.0.0.1:{self.local_port}:{host}:{port}"
         logger.info("Forwarding %s to %s on %s", self.local_port, remote_address, self.target.host)
+        # The forward runs a command that reads its input to the end, rather
+        # than -N, so it ends the way the server does when this process dies
+        # without closing it: the pipe closes, ``cat`` exits, and SSH with it.
+        # An -N forward would be orphaned holding the local port.
         tunnel = self._spawn(
             "_tunnel",
-            ["-N", *SSH_OPTIONS, "-o", "ClearAllForwardings=no",
-             "-o", "ExitOnForwardFailure=yes", "-L", forward, self.target.host],
-            stdin=subprocess.DEVNULL,
+            [
+                "-T", *SSH_OPTIONS, "-o", "ClearAllForwardings=no",
+                "-o", "StdinNull=no", "-o", "SessionType=default",
+                "-o", "ExitOnForwardFailure=yes", "-L", forward,
+                self.target.host, TUNNEL_COMMAND,
+            ],
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
@@ -367,11 +379,12 @@ class RemoteSession:
 
     def _stop_processes(self, server, tunnel) -> None:
         logger.info("Disconnecting from %s", self.target.host)
-        if server is not None and server.stdin is not None:
-            try:
-                server.stdin.close()
-            except OSError:
-                pass
+        for process in (server, tunnel):
+            if process is not None and process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
         for process in (tunnel, server):
             if process is None:
                 continue
