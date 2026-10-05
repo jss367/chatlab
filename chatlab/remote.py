@@ -50,6 +50,10 @@ STOP_TIMEOUT = 5.0
 TAIL_LINES = 12
 SSH_OPTIONS = (
     "-o", "BatchMode=yes",
+    # Session lifetime is owned here, rather than an existing user SSH master.
+    "-o", "ControlMaster=no",
+    "-o", "ControlPath=none",
+    "-o", "ControlPersist=no",
     "-o", "ConnectTimeout=15",
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=3",
@@ -148,6 +152,7 @@ class RemoteSession:
         self.url: str | None = None
         self._lock = threading.Lock()
         self._closed = threading.Event()
+        self._shutdown = threading.Event()
         self._ready = threading.Event()
         self._remote_address: str | None = None
         self._tail: collections.deque[str] = collections.deque(maxlen=TAIL_LINES)
@@ -167,10 +172,13 @@ class RemoteSession:
             self._start_tunnel(remote_address)
             url = f"http://127.0.0.1:{self.local_port}/"
             self._wait_for(url)
+            with self._lock:
+                if self.closed:
+                    raise RemoteError("The connection was cancelled.")
+                self.url = url
         except BaseException:
             self.close()
             raise
-        self.url = url
         for process, name in ((self._server, "server"), (self._tunnel, "port forward")):
             threading.Thread(target=self._watch, args=(process, name), daemon=True).start()
         logger.info("Connected to ChatLab on %s at %s", self.target, url)
@@ -196,7 +204,7 @@ class RemoteSession:
         logger.info("Starting ChatLab on %s: %s", self.target.host, command)
         server = self._spawn(
             "_server",
-            ["-T", *SSH_OPTIONS, self.target.host, command],
+            ["-T", *SSH_OPTIONS, "-o", "ClearAllForwardings=yes", self.target.host, command],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -207,8 +215,11 @@ class RemoteSession:
         # Drained for as long as the server runs, since a full pipe would
         # stall it the next time it wrote, and logged here because this log
         # is the only place a reader of this app will look.
-        self._reader = threading.Thread(target=self._read_server, args=(server,), daemon=True)
-        self._reader.start()
+        with self._lock:
+            if self.closed:
+                raise RemoteError("The connection was cancelled.")
+            self._reader = threading.Thread(target=self._read_server, args=(server,), daemon=True)
+            self._reader.start()
         deadline = time.monotonic() + self.start_timeout
         while not self._ready.wait(0.1):
             if self.closed:
@@ -231,15 +242,20 @@ class RemoteSession:
                 self._remote_address = line[len(READY_MARKER):].strip()
                 self._ready.set()
                 continue
-            self._tail.append(line)
+            with self._lock:
+                self._tail.append(line)
             logger.info("[%s] %s", self.target.host, line)
 
     def _start_tunnel(self, remote_address: str) -> None:
-        parts = urlsplit(remote_address)
-        if parts.port is None:
+        try:
+            parts = urlsplit(remote_address)
+            port = parts.port
+            host = parts.hostname or "127.0.0.1"
+        except ValueError as error:
+            raise RemoteError(f"ChatLab on {self.target.host} reported an invalid address: {remote_address}") from error
+        if port is None:
             raise RemoteError(f"ChatLab on {self.target.host} reported an address without a port: {remote_address}")
-        host = parts.hostname or "127.0.0.1"
-        forward = f"127.0.0.1:{self.local_port}:{host}:{parts.port}"
+        forward = f"127.0.0.1:{self.local_port}:{host}:{port}"
         logger.info("Forwarding %s to %s on %s", self.local_port, remote_address, self.target.host)
         self._spawn(
             "_tunnel",
@@ -276,7 +292,9 @@ class RemoteSession:
             time.sleep(0.25)
 
     def _failure(self, summary: str) -> str:
-        tail = "\n".join(line for line in self._tail if line.strip())
+        with self._lock:
+            lines = tuple(self._tail)
+        tail = "\n".join(line for line in lines if line.strip())
         return f"{summary}\n\n{tail}" if tail else summary
 
     def _watch(self, process: subprocess.Popen, name: str) -> None:
@@ -295,13 +313,22 @@ class RemoteSession:
         self._close()
 
     def _close(self) -> bool:
-        """Close, and say whether this call was the one that did it."""
-
+        """Close once; concurrent callers wait until the owned processes are gone."""
         with self._lock:
-            if self.closed:
-                return False
-            self._closed.set()
-            server, tunnel = self._server, self._tunnel
+            already_closed = self.closed
+            if not already_closed:
+                self._closed.set()
+                server, tunnel = self._server, self._tunnel
+        if already_closed:
+            self._shutdown.wait()
+            return False
+        try:
+            self._stop_processes(server, tunnel)
+        finally:
+            self._shutdown.set()
+        return True
+
+    def _stop_processes(self, server, tunnel) -> None:
         logger.info("Disconnecting from %s", self.target.host)
         if server is not None and server.stdin is not None:
             try:
@@ -335,7 +362,6 @@ class RemoteSession:
                 server.stdout.close()
         if tunnel is not None:
             tunnel.stderr.close()
-        return True
 
 
 def exit_when_stdin_closes(stop: Callable[[], None], stream=None) -> threading.Thread:

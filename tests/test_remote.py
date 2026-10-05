@@ -8,9 +8,11 @@ at the far end, except in the one test that starts the real one.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -81,6 +83,34 @@ class CommandTests(unittest.TestCase):
         self.assertTrue(remote.remote_command("/srv/a;b").startswith("cd '/srv/a;b' && "))
 
 
+class SSHConfigurationTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ssh"), "OpenSSH is unavailable")
+    def test_server_suppresses_inherited_forwards_and_tunnel_owns_them_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config"
+            config.write_text("Host fixture-gpu\n  HostName 127.0.0.1\n  LocalForward 18080 127.0.0.1:8080\n  DynamicForward 18081\n  ControlMaster auto\n  ControlPath /tmp/chatlab-fixture-master\n  ControlPersist 60\n")
+            session = remote.RemoteSession(remote.RemoteTarget("fixture-gpu"), local_port=18082)
+            captured = []
+            def spawn(name, arguments, **options):
+                captured.append(arguments)
+                raise remote.RemoteError("capture only")
+            with mock.patch.object(session, "_spawn", side_effect=spawn):
+                with self.assertRaises(remote.RemoteError):
+                    session._start_server()
+                with self.assertRaises(remote.RemoteError):
+                    session._start_tunnel("http://127.0.0.1:8123/")
+            # -G only expands this controlled fixture config: it makes no connection.
+            server = subprocess.check_output(["ssh", "-G", "-F", str(config), *captured[0]], text=True).splitlines()
+            tunnel = subprocess.check_output(["ssh", "-G", "-F", str(config), *captured[1]], text=True).splitlines()
+            self.assertFalse(any(line.startswith(("localforward ", "dynamicforward ")) for line in server))
+            self.assertEqual(len([line for line in tunnel if line.startswith("localforward ")]), 2)
+            self.assertEqual(len([line for line in tunnel if line.startswith("dynamicforward ")]), 1)
+            self.assertTrue(any("18082" in line and "8123" in line for line in tunnel if line.startswith("localforward ")))
+            for lines in (server, tunnel):
+                self.assertIn("controlmaster false", lines)
+                self.assertIn("controlpersist no", lines)
+
+
 class SavedTargetTests(unittest.TestCase):
     def test_the_last_target_is_offered_again(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -104,6 +134,50 @@ class StdinWatchTests(unittest.TestCase):
             os.close(write_end)
 
             self.assertTrue(stopped.wait(5))
+
+
+class SessionConcurrencyTests(unittest.TestCase):
+    def test_concurrent_close_waits_for_owned_transport_cleanup(self):
+        session = remote.RemoteSession(remote.RemoteTarget("gpu-box"), local_port=18082)
+        entered, release, done = threading.Event(), threading.Event(), threading.Event()
+        def wait(timeout=None):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("cleanup was not released")
+        tunnel = mock.Mock(stderr=io.StringIO(), wait=wait)
+        session._tunnel = tunnel
+        first = threading.Thread(target=session.close)
+        second = threading.Thread(target=lambda: (session.close(), done.set()))
+        first.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            second.start()
+            self.assertFalse(done.wait(0.1))
+        finally:
+            release.set()
+            first.join(3)
+            second.join(3)
+        self.assertTrue(done.is_set())
+        tunnel.terminate.assert_called_once()
+        self.assertTrue(tunnel.stderr.closed)
+
+    def test_failure_formats_a_snapshot_before_other_lines_arrive(self):
+        session = remote.RemoteSession(remote.RemoteTarget("gpu-box"), local_port=18082)
+        class Line(str):
+            def strip(self):
+                with session._lock:
+                    session._tail.append("later output")
+                return super().strip()
+        session._tail.append(Line("original output"))
+        self.assertEqual(session._failure("Stopped"), "Stopped\n\noriginal output")
+
+    def test_invalid_ready_ports_are_reported_as_remote_errors(self):
+        session = remote.RemoteSession(remote.RemoteTarget("gpu-box"), local_port=18082)
+        for address in ("http://127.0.0.1:bad/", "http://127.0.0.1:65536/", "http://[broken:123/"):
+            with self.subTest(address=address), mock.patch.object(session, "_spawn") as spawn:
+                with self.assertRaisesRegex(remote.RemoteError, "reported an invalid address"):
+                    session._start_tunnel(address)
+                spawn.assert_not_called()
 
 
 class SessionTests(unittest.TestCase):
@@ -579,6 +653,56 @@ class RemoteConnectionTests(unittest.TestCase):
         self.assertEqual(remote.load_target(self.saved).host, "new-gpu")
         self.assertIs(connection.session, self.sessions[1])
         self.assertEqual(window.named("set_title")[-1], [f"{WINDOW_TITLE} — new-gpu"])
+
+    def test_menu_worker_returns_while_startup_waits_and_disconnect_remains_available(self):
+        entered, release = threading.Event(), threading.Event()
+        def start(session):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("startup was not released")
+            return f"http://127.0.0.1:{session.local_port}/"
+        window = FakeWindow("gpu-box")
+        connection = self.connection(window, start=start)
+        worker = connection.connect_in_background()
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertTrue(worker.is_alive())
+            stopping = connection.disconnect_in_background()
+            stopping.join(1)
+            self.assertFalse(stopping.is_alive())
+            self.assertIsNone(connection.session)
+        finally:
+            release.set()
+            worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(window.named("load_url")[-1], [self.LOCAL])
+
+    def test_quit_waits_for_a_disconnect_worker_to_finish_cleanup(self):
+        window = FakeWindow("gpu-box")
+        connection = self.connection(window)
+        connection.connect()
+        session = self.sessions[0]
+        entered, release, done = threading.Event(), threading.Event(), threading.Event()
+        def close():
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("cleanup was not released")
+            session.closed = True
+        session.close = close
+        worker = connection.disconnect_in_background()
+        quitting = threading.Thread(target=lambda: (connection.close(), done.set()))
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertIsNone(connection.session)
+            quitting.start()
+            self.assertFalse(done.wait(0.1))
+        finally:
+            release.set()
+            worker.join(3)
+            quitting.join(3)
+        self.assertTrue(done.is_set())
+        self.assertTrue(session.closed)
+        self.assertFalse(connection._disconnect_workers)
 
     def test_quitting_ends_the_session(self):
         window = FakeWindow("gpu-box")

@@ -434,7 +434,28 @@ class RemoteConnection:
         self._lock = threading.RLock()
         self._generation = 0
         self._closing = False
+        self._disconnect_workers: set[threading.Thread] = set()
         self.session: remote.RemoteSession | None = None
+
+    def connect_in_background(self) -> threading.Thread:
+        """Return the Cocoa menu callback promptly; window APIs dispatch to Cocoa."""
+        worker = threading.Thread(target=self.connect, name="chatlab-remote-connect", daemon=True)
+        worker.start()
+        return worker
+
+    def disconnect_in_background(self) -> threading.Thread:
+        """Keep Cocoa responsive, and retain shutdown work until quitting waits for it."""
+        def finish():
+            try:
+                self.disconnect()
+            finally:
+                with self._lock:
+                    self._disconnect_workers.discard(threading.current_thread())
+        worker = threading.Thread(target=finish, name="chatlab-remote-disconnect", daemon=True)
+        with self._lock:
+            self._disconnect_workers.add(worker)
+            worker.start()
+        return worker
 
     def connect(self) -> None:
         """Ask for a host, start ChatLab there, and show it in the window."""
@@ -509,8 +530,12 @@ class RemoteConnection:
             self._closing = True
             self._generation += 1
             session, self.session = self.session, None
+            workers = tuple(self._disconnect_workers)
         if session is not None:
             session.close()
+        for worker in workers:
+            if worker is not threading.current_thread():
+                worker.join(4 * remote.STOP_TIMEOUT + 1)
 
     def _lost(self, session: remote.RemoteSession, reason: str) -> None:
         with self._lock:
@@ -641,8 +666,8 @@ def run_desktop() -> int:
                 Menu(
                     "Remote",
                     [
-                        MenuAction("Connect to Remote Host…", lambda: connection.connect()),
-                        MenuAction("Disconnect", lambda: connection.disconnect()),
+                        MenuAction("Connect to Remote Host…", connection.connect_in_background),
+                        MenuAction("Disconnect", connection.disconnect_in_background),
                     ],
                 ),
                 Menu(
