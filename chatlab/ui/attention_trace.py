@@ -1,0 +1,793 @@
+"""Attention across the reply: every reply token's attention, played back.
+
+One pass over the latest reply reads every head's attention from every
+query that predicted a reply token (see ``ModelManager.trace_attention``).
+The rows for the chosen heads go to the page whole, so stepping, playing,
+hiding the attention sink and the region totals all happen in the browser
+(see ATTENTION_TRACE_JS) and only a new choice of heads runs the model again.
+
+Prompt positions are put in regions by finding each message's text in the
+decoded prompt: the system prompt, the latest user message, the turns before
+it, and a passage the reader marks. What no message accounts for is the
+chat template. Reply positions are the earlier reply, and the keys just
+before each query are its recent context, whatever region they are in.
+"""
+
+from __future__ import annotations
+
+import base64
+import html
+import json
+import re
+import time
+from dataclasses import dataclass
+
+import gradio as gr
+import numpy as np
+
+from chatlab.conversation import model_messages
+from chatlab.model_inspection import RECENT_KEYS
+from chatlab.model_runtime import LOADING
+from chatlab.text_generation import ModelChanged
+from chatlab.ui import runtime
+from chatlab.ui.common import QUIET_TICK, failure_status
+from chatlab.ui.panel import current_strip_generation
+
+
+USER = "user message"
+MARKED = "marked passage"
+SYSTEM = "system prompt"
+EARLIER_TURNS = "earlier turns"
+TEMPLATE = "template"
+REPLY = "earlier reply"
+RECENT = f"last {RECENT_KEYS} tokens"
+
+# The regions in the order the view lists them. Each has a CSS slot,
+# --atr-c0 to --atr-c6 in ATTENTION_TRACE_CSS, holding its color.
+REGIONS = (USER, MARKED, SYSTEM, EARLIER_TURNS, TEMPLATE, REPLY, RECENT)
+
+# Heads that put less than this share of their attention anywhere but the
+# first token, on average, are left out of the ranking: their shares are
+# rounding, and would top any region by accident.
+ACTIVE_FLOOR = 0.01
+
+# What the page is sent for one trace is a float16 row per reply token, each
+# as long as the sequence up to it. Past this many values the page would be
+# sent tens of megabytes, so a longer reply is refused before the pass.
+TRACE_VALUE_LIMIT = 4_000_000
+
+TRACE_HINT = (
+    "Press **Trace the reply** to read where each token of the latest reply looked."
+)
+TRACE_BUSY = "Wait for the response to finish before tracing it."
+TRACE_LOADING = "Wait for the model to finish loading before tracing a reply."
+TRACE_NO_REPLY = "There is no reply to trace yet. Send a message first."
+TRACE_GONE = "That reply is no longer on screen. Trace the reply again."
+TRACE_MODEL_CHANGED = (
+    "The model has been reloaded since this reply was generated, so its "
+    "attention cannot be read from the weights in memory. Generate it again."
+)
+
+EMPTY_TRACE = ""
+EMPTY_RANKING = ""
+
+
+# ------------------------------------------------------------------- heads
+
+
+_HEAD_ITEM = re.compile(r"^(\d+)(?:-(\d+)|\.(\d+))?$")
+
+
+def parse_heads(text: str):
+    """Read the heads box: ``None`` for every head, else a chooser for the trace.
+
+    Items are separated by commas or spaces and count from 1: ``14`` is
+    every head of layer 14, ``10-12`` every head of layers 10 to 12, and
+    ``14.3`` the third head of layer 14. ``all`` or nothing means every
+    head. The chooser is given the model's layer and head counts and
+    returns ``(layer, head)`` pairs counting from 0, in the order written,
+    each once. A malformed item raises ``ValueError`` here; a layer or head
+    the model does not have raises it from the chooser.
+    """
+
+    items = [item for item in re.split(r"[,\s]+", (text or "").strip().lower()) if item]
+    if not items or items == ["all"]:
+        return None
+    parsed = []
+    for item in items:
+        match = _HEAD_ITEM.match(item.removeprefix("l").replace(".h", "."))
+        if not match:
+            raise ValueError(
+                f"{item!r} is not a head. Write a layer (14), a range of layers (10-12) "
+                "or a layer and head (14.3), counting from 1."
+            )
+        first, last, head = match.groups()
+        parsed.append((int(first), int(last) if last else int(first), int(head) if head else None))
+
+    def choose(layer_count: int, head_count: int) -> list[tuple[int, int]]:
+        chosen: dict[tuple[int, int], None] = {}
+        for first, last, head in parsed:
+            for layer in (first, last):
+                if not 1 <= layer <= layer_count:
+                    raise ValueError(
+                        f"This model has {layer_count} layers, so there is no layer {layer}."
+                    )
+            if head is not None and not 1 <= head <= head_count:
+                raise ValueError(
+                    f"This model has {head_count} heads per layer, so there is no head {head}."
+                )
+            for layer in range(min(first, last), max(first, last) + 1):
+                for one in [head] if head is not None else range(1, head_count + 1):
+                    chosen[(layer - 1, one - 1)] = None
+        return list(chosen)
+
+    return choose
+
+
+def head_name(layer: int, head: int) -> str:
+    """A head counting from 0 as the heads box writes it, counting from 1."""
+
+    return f"{layer + 1}.{head + 1}"
+
+
+def heads_label(heads, layer_count: int, head_count: int) -> str:
+    if len(heads) == layer_count * head_count:
+        return f"all {len(heads):,} heads"
+    names = ", ".join(head_name(*pair) for pair in heads[:8])
+    more = f" and {len(heads) - 8:,} more" if len(heads) > 8 else ""
+    return f"{len(heads):,} head{'s' if len(heads) != 1 else ''}: {names}{more}"
+
+
+# ----------------------------------------------------------------- regions
+
+
+def _messages_before_reply(turns: list[dict] | None, system_prompt: str) -> list[dict]:
+    """The messages the latest reply was written after, as the model was sent them."""
+
+    turns = list(turns or [])
+    for index in range(len(turns) - 1, -1, -1):
+        if turns[index].get("role") == "assistant":
+            turns = turns[:index]
+            break
+    return model_messages(turns, system_prompt=system_prompt or "")
+
+
+def token_regions(
+    tokens: list[dict], context_count: int, messages: list[dict], marked: str = ""
+) -> list[str]:
+    """The region of every position: see the module docstring.
+
+    A message's text is looked for in the prompt the tokens decode to, each
+    after the one before, and a token that overlaps it at all is counted in
+    it. A message the template rewrote is not found, and its tokens stay in
+    the template. Every occurrence of the marked passage in the prompt is
+    marked, over whatever region it was in.
+    """
+
+    text, spans = "", []
+    for token in tokens[:context_count]:
+        piece = token.get("text") or ""
+        spans.append((len(text), len(text) + len(piece)))
+        text += piece
+    labels = [TEMPLATE] * len(spans)
+
+    def paint(start: int, end: int, label: str) -> None:
+        for index, (low, high) in enumerate(spans):
+            if low < end and high > start:
+                labels[index] = label
+
+    users = [index for index, message in enumerate(messages) if message.get("role") == "user"]
+    latest_user = users[-1] if users else None
+    cursor = 0
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        content = content.strip() if isinstance(content, str) else ""
+        if not content:
+            continue
+        found = text.find(content, cursor)
+        if found < 0:
+            continue
+        if message.get("role") == "system":
+            label = SYSTEM
+        elif index == latest_user:
+            label = USER
+        else:
+            label = EARLIER_TURNS
+        paint(found, found + len(content), label)
+        cursor = found + len(content)
+    passage = (marked or "").strip()
+    if passage:
+        start = text.find(passage)
+        while start >= 0:
+            paint(start, start + len(passage), MARKED)
+            start = text.find(passage, start + len(passage))
+    return labels + [REPLY] * (len(tokens) - context_count)
+
+
+def rank_heads(state: dict, region: str, top: int = 10) -> list[tuple[int, int, float]]:
+    """The heads that put the largest share of their attention on ``region``, best first.
+
+    A share leaves the first token out (see ``AttentionTrace``). For a fixed
+    region it is the sum over the region's positions; for the recent context
+    it is read per step, since those keys move with the query. Heads under
+    :data:`ACTIVE_FLOOR` are not ranked.
+    """
+
+    if region == RECENT:
+        scores = np.asarray(state["recent_shares"], dtype=np.float32)
+    else:
+        shares = np.asarray(state["key_shares"], dtype=np.float32)
+        regions = state["regions"][: shares.shape[-1]]
+        mask = np.array([label == region for label in regions], dtype=bool)
+        if not mask.any():
+            return []
+        scores = shares[..., mask].sum(axis=-1)
+    scores = np.where(np.asarray(state["active"]) >= ACTIVE_FLOOR, scores, -1.0)
+    order = np.argsort(scores, axis=None, kind="stable")[::-1][: max(int(top or 0), 1)]
+    layers, heads = np.unravel_index(order, scores.shape)
+    return [
+        (int(layer), int(head), float(scores[layer, head]))
+        for layer, head in zip(layers, heads)
+        if scores[layer, head] >= 0
+    ]
+
+
+def region_choices(state: dict | None) -> list[str]:
+    """The regions a trace can be ranked by: those it has, and the recent context."""
+
+    if not state:
+        return [USER, RECENT]
+    present = set(state["regions"][: state["context_count"]])
+    return [region for region in REGIONS if region in present or region in (REPLY, RECENT)]
+
+
+# --------------------------------------------------------------- rendering
+
+
+def _shown(token: dict) -> str:
+    text = token.get("text") or ""
+    if not text:
+        return f"‹{token.get('fallback') or token.get('token_id', '')}›"
+    return text.replace("\t", "⇥").replace("\n", "↵\n")
+
+
+def render_trace(state: dict | None) -> str:
+    """The playback view for a trace, its data embedded for the page script."""
+
+    if not state:
+        return EMPTY_TRACE
+    tokens = state["tokens"]
+    context_count = state["context_count"]
+    regions = state["regions"]
+    shown = [region for region in REGIONS if region in set(regions) or region == RECENT]
+    payload = {
+        "context": context_count,
+        "recent": RECENT_KEYS,
+        "names": list(REGIONS),
+        "regions": [REGIONS.index(label) for label in regions],
+        "recentRegion": REGIONS.index(RECENT),
+        "tokens": [token.get("text") or f"‹{token.get('fallback') or ''}›" for token in tokens],
+        "rows": base64.b64encode(np.asarray(state["rows"], dtype="<f2").tobytes()).decode("ascii"),
+    }
+    # The payload sits in a script element, so nothing in it may close one.
+    data = json.dumps(payload, ensure_ascii=True).replace("</", "<\\/")
+    spans = "".join(
+        f'<span class="atr-tok" data-i="{index}">{html.escape(_shown(token))}</span>'
+        for index, token in enumerate(tokens)
+    )
+    bars = "".join(
+        f'<div class="atr-bar" data-region="{REGIONS.index(region)}">'
+        f'<span class="atr-name"><i class="atr-swatch" style="background: var(--atr-c{REGIONS.index(region)})"></i>'
+        f"{html.escape(region)}</span>"
+        f'<span class="atr-track"><i class="atr-fill" style="background: var(--atr-c{REGIONS.index(region)})"></i></span>'
+        f'<span class="atr-value">0.0%</span></div>'
+        for region in shown
+    )
+    steps = len(tokens) - context_count
+    return (
+        '<div class="viz-root atr-root" tabindex="0">'
+        f'<script type="application/json" class="atr-data">{data}</script>'
+        '<div class="atr-controls">'
+        '<label class="atr-sink"><input type="checkbox" checked> hide the first token '
+        "(attention sink) and renormalize</label>"
+        '<span class="atr-buttons">'
+        '<button type="button" class="atr-prev" aria-label="Previous token">←</button>'
+        '<span class="atr-step"></span>'
+        '<button type="button" class="atr-next" aria-label="Next token">→</button>'
+        '<button type="button" class="atr-play">▶ play</button></span>'
+        f'<input type="range" class="atr-range" min="0" max="{max(steps - 1, 0)}" value="0" '
+        'aria-label="Reply token">'
+        "</div>"
+        '<div class="atr-caption"></div>'
+        f'<div class="atr-text">{spans}</div>'
+        '<div class="atr-hist"><canvas height="150"></canvas><div class="atr-tip" hidden></div></div>'
+        f'<div class="atr-bars">{bars}</div>'
+        f'<div class="viz-note">Averaging {html.escape(state["heads_label"])}. Shading and bars '
+        "are the chosen heads' mean attention from the query, the position before the token "
+        f"being predicted. The last {RECENT_KEYS} tokens before each query count as recent "
+        "whatever region they are in.</div>"
+        "</div>"
+    )
+
+
+def render_ranking(state: dict | None, region: str, top) -> str:
+    if not state:
+        return EMPTY_RANKING
+    ranked = rank_heads(state, region, int(top or 10))
+    if not ranked:
+        absent = region != RECENT and region not in state["regions"]
+        return (
+            f'<div class="viz-empty">This reply has no {html.escape(region)} to rank heads by.</div>'
+            if absent else
+            '<div class="viz-empty">No head puts enough attention past the first token to rank.</div>'
+        )
+    rows = "".join(
+        f"<tr><td>{rank}</td><td><code>{head_name(layer, head)}</code></td>"
+        f"<td>{share:.1%}</td><td>{float(state['active'][layer, head]):.1%}</td></tr>"
+        for rank, (layer, head, share) in enumerate(ranked, start=1)
+    )
+    return (
+        '<div class="viz-root">'
+        f'<div class="viz-title">Heads that read the {html.escape(region)} most'
+        '<span class="viz-sub">share of the attention not on the first token, over the reply</span></div>'
+        '<div class="viz-table-wrap"><table class="viz-table">'
+        "<thead><tr><th>Rank</th><th>Layer.head</th><th>Share</th><th>Not on the first token</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div></div>"
+    )
+
+
+# ----------------------------------------------------------------- handlers
+
+
+def trace_reply(
+    chat_metrics_state,
+    chat_context_state,
+    conversation,
+    system_prompt,
+    heads_text,
+    marked,
+    region,
+    top,
+):
+    """Trace the latest reply and draw it, with the head ranking beside it.
+
+    A generator for the reason inspection.inspect_layers() is one: the
+    generation slot is held until the frame is on screen, so a reply cannot
+    start between the pass and the drawing, and a frame for a reply that
+    was replaced while it travelled is taken down again.
+    """
+
+    skip = gr.skip()
+    refused = (skip, skip, skip, skip)
+    generation, metrics = chat_metrics_state or (0, [])
+    context_generation, context_ids, load_id = (chat_context_state or (0, [], None))[:3]
+    steering = chat_context_state[3] if len(chat_context_state or ()) > 3 else None
+    images = list(chat_context_state[4]) if len(chat_context_state or ()) > 4 else []
+    if not metrics or not context_ids:
+        yield (*refused, TRACE_NO_REPLY)
+        return
+    if generation != context_generation or generation != current_strip_generation("response"):
+        yield (*refused, TRACE_GONE)
+        return
+    try:
+        heads = parse_heads(heads_text)
+    except ValueError as error:
+        yield (*refused, failure_status("Could not read the heads", str(error)))
+        return
+    context_ids = [int(value) for value in context_ids]
+    steps = len(metrics)
+    values = steps * len(context_ids) + steps * (steps - 1) // 2
+    if values > TRACE_VALUE_LIMIT:
+        yield (
+            *refused,
+            f"This reply is too long to trace: {steps:,} tokens after a {len(context_ids):,}-token "
+            f"prompt would send the page {values:,} values, over the {TRACE_VALUE_LIMIT:,} it takes.",
+        )
+        return
+
+    held = runtime.MANAGER.claim_generation()
+    if held:
+        yield (*refused, TRACE_LOADING if held == LOADING else TRACE_BUSY)
+        return
+    try:
+        if not runtime.MANAGER.loaded:
+            yield (*refused, "Download and load a model first.")
+            return
+        if load_id != runtime.MANAGER.load_id:
+            yield (*refused, TRACE_MODEL_CHANGED)
+            return
+        sequence = context_ids + [int(metric["token_id"]) for metric in metrics]
+        started = time.monotonic()
+        options = {"heads": heads, "load_id": load_id}
+        if steering is not None:
+            options["steering"] = steering
+        if images:
+            options["images"] = images
+        try:
+            trace = runtime.MANAGER.trace_attention(sequence, len(context_ids), **options)
+        except ModelChanged:
+            yield (*refused, TRACE_MODEL_CHANGED)
+            return
+        except Exception as error:
+            yield (*refused, failure_status("Could not trace the reply", str(error)))
+            return
+        if generation != current_strip_generation("response"):
+            yield (*refused, TRACE_GONE)
+            return
+        messages = _messages_before_reply(conversation, system_prompt)
+        label = heads_label(trace.heads, trace.layer_count, trace.head_count)
+        state = {
+            "generation": generation,
+            "context_count": trace.context_count,
+            "tokens": trace.tokens,
+            "messages": messages,
+            "regions": token_regions(trace.tokens, trace.context_count, messages, marked),
+            "rows": trace.rows,
+            "key_shares": trace.key_shares,
+            "recent_shares": trace.recent_shares,
+            "active": trace.active,
+            "heads_label": label,
+            "layer_count": trace.layer_count,
+            "head_count": trace.head_count,
+        }
+        choices = region_choices(state)
+        region = region if region in choices else choices[0]
+        status = (
+            f"Traced {steps:,} reply tokens through {trace.layer_count} layers of "
+            f"{trace.head_count} heads in {time.monotonic() - started:.1f}s, averaging {label}."
+        )
+        yield (
+            render_trace(state),
+            state,
+            render_ranking(state, region, top),
+            gr.update(choices=choices, value=region),
+            status,
+        )
+        if generation != current_strip_generation("response"):
+            yield (EMPTY_TRACE, None, EMPTY_RANKING, skip, TRACE_GONE)
+    finally:
+        runtime.MANAGER.release_generation()
+
+
+def remark(state, marked, region, top):
+    """Put the marked passage in its region and redraw, without another pass."""
+
+    if not state:
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    state = dict(state)
+    state["regions"] = token_regions(
+        state["tokens"], state["context_count"], state["messages"], marked
+    )
+    choices = region_choices(state)
+    region = region if region in choices else choices[0]
+    return (
+        render_trace(state),
+        state,
+        render_ranking(state, region, top),
+        gr.update(choices=choices, value=region),
+    )
+
+
+def top_heads_text(state, region, top) -> str:
+    """The ranked heads written the way the heads box reads them."""
+
+    if not state:
+        return gr.skip()
+    ranked = rank_heads(state, region, int(top or 10))
+    return ", ".join(head_name(layer, head) for layer, head, _share in ranked) or gr.skip()
+
+
+def reset_trace(state):
+    """Take the trace down when the reply it read is replaced."""
+
+    if state is None:
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    return EMPTY_TRACE, None, EMPTY_RANKING, TRACE_HINT
+
+
+# ------------------------------------------------------------------ layout
+
+
+@dataclass(frozen=True)
+class AttentionTraceView:
+    """The Attention across the reply accordion's controls and panels."""
+
+    state: gr.State
+    heads: gr.Textbox
+    marked: gr.Textbox
+    trace_button: gr.Button
+    status: gr.Markdown
+    panel: gr.HTML
+    region: gr.Dropdown
+    top: gr.Number
+    use_top: gr.Button
+    ranking: gr.HTML
+
+
+def build() -> AttentionTraceView:
+    """Drawn inside the inspector's accordion."""
+
+    state = gr.State(None)
+    heads = gr.Textbox(
+        value="all", label="Heads",
+        info="all, a layer (14), layers (10-12) or a layer and head (14.3), counting from 1.",
+    )
+    marked = gr.Textbox(
+        label="Mark a passage (optional)",
+        placeholder="Paste text from the prompt to give it its own region",
+        info="Press Enter to apply; the reply is not traced again.",
+    )
+    with gr.Row():
+        trace_button = gr.Button("Trace the reply", size="sm", scale=0, min_width=160)
+        status = gr.Markdown(TRACE_HINT, elem_classes=["scale-caption"])
+    panel = gr.HTML(EMPTY_TRACE, elem_id="attention-trace")
+    with gr.Row():
+        region = gr.Dropdown(
+            [USER, RECENT], value=USER, label="Rank heads by attention to", scale=2,
+        )
+        top = gr.Number(value=8, minimum=1, maximum=64, precision=0, label="How many", scale=1)
+        use_top = gr.Button("Trace with these heads", size="sm", scale=1)
+    ranking = gr.HTML(EMPTY_RANKING)
+    return AttentionTraceView(
+        state=state, heads=heads, marked=marked, trace_button=trace_button, status=status,
+        panel=panel, region=region, top=top, use_top=use_top, ranking=ranking,
+    )
+
+
+def wire(view: AttentionTraceView, states, system_prompt) -> None:
+    trace_inputs = [
+        states.chat_metrics, states.chat_context_ids, states.conversation, system_prompt,
+        view.heads, view.marked, view.region, view.top,
+    ]
+    trace_outputs = [view.panel, view.state, view.ranking, view.region, view.status]
+    view.trace_button.click(trace_reply, trace_inputs, trace_outputs)
+    view.marked.submit(
+        remark, [view.state, view.marked, view.region, view.top],
+        [view.panel, view.state, view.ranking, view.region],
+    )
+    for control in (view.region, view.top):
+        control.change(
+            render_ranking, [view.state, view.region, view.top], view.ranking, **QUIET_TICK,
+        )
+    view.use_top.click(
+        top_heads_text, [view.state, view.region, view.top], view.heads,
+    ).then(trace_reply, trace_inputs, trace_outputs)
+    states.chat_metrics.change(
+        reset_trace, view.state, [view.panel, view.state, view.ranking, view.status], **QUIET_TICK,
+    )
+
+
+# --------------------------------------------------------------- the page
+
+
+ATTENTION_TRACE_CSS = """
+.atr-root {
+  --atr-c0: #2a78d6; --atr-c1: #eb6834; --atr-c2: #1baf7a; --atr-c3: #eda100;
+  --atr-c4: #c3c2b7; --atr-c5: #4a3aa7; --atr-c6: #52514e;
+  outline: none;
+}
+.dark .atr-root {
+  --atr-c0: #3987e5; --atr-c1: #d95926; --atr-c2: #199e70; --atr-c3: #c98500;
+  --atr-c4: #5d5c57; --atr-c5: #9085e9; --atr-c6: #a3a29a;
+}
+.atr-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.8rem; font-size: 0.8rem; color: var(--viz-ink); }
+.atr-sink { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+.atr-sink input { appearance: auto; -webkit-appearance: checkbox; width: 14px; height: 14px; margin: 0; accent-color: var(--viz-line); }
+.atr-buttons { display: inline-flex; align-items: center; gap: 0.3rem; }
+.atr-buttons button {
+  border: 1px solid var(--viz-axis); border-radius: 6px; background: var(--background-fill-primary);
+  color: var(--viz-ink); padding: 0.1rem 0.5rem; cursor: pointer; font-size: 0.8rem;
+}
+.atr-buttons button:hover { border-color: var(--viz-muted); }
+.atr-step { font-variant-numeric: tabular-nums; min-width: 7.5rem; text-align: center; }
+.atr-range { flex: 1 1 8rem; min-width: 6rem; accent-color: var(--viz-line); }
+.atr-caption { font-size: 0.75rem; color: var(--viz-muted); margin: 0.35rem 0 0.25rem; }
+.atr-caption b { color: var(--viz-ink); font-weight: 600; }
+.atr-text {
+  max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.78rem; line-height: 1.75;
+  border: 1px solid var(--viz-grid); border-radius: 6px; padding: 0.4rem 0.5rem;
+}
+.atr-tok { border-radius: 3px; color: var(--body-text-color); }
+.atr-tok.atr-future { opacity: 0.35; }
+.atr-tok.atr-query { outline: 1.5px dashed var(--viz-muted); }
+.atr-tok.atr-predicted { outline: 1.5px solid var(--viz-ink); }
+.atr-hist { position: relative; margin: 0.5rem 0 0.3rem; }
+.atr-hist canvas { width: 100%; height: 150px; display: block; }
+.atr-tip {
+  position: absolute; pointer-events: none; z-index: 5; white-space: nowrap;
+  background: var(--viz-ink); color: var(--background-fill-primary); font-size: 0.72rem;
+  padding: 0.15rem 0.4rem; border-radius: 4px;
+}
+.atr-bars { display: grid; gap: 0.15rem; font-size: 0.78rem; color: var(--viz-ink); }
+.atr-bar { display: grid; grid-template-columns: 9.5rem 1fr 3.5rem; align-items: center; gap: 0.5rem; }
+.atr-name { display: inline-flex; align-items: center; gap: 0.35rem; }
+.atr-swatch { width: 0.6rem; height: 0.6rem; border-radius: 2px; display: inline-block; }
+.atr-track { height: 0.7rem; }
+.atr-fill { display: block; height: 100%; width: 0; border-radius: 0 4px 4px 0; }
+.atr-value { text-align: right; font-variant-numeric: tabular-nums; }
+"""
+
+
+# The view is drawn once per trace and then animated here: the rows arrive
+# as base64 float16 in the view's own script element, and every control
+# redraws from them without a round trip. A view Gradio replaces is left
+# with its timer stopped, since the timer checks the view is still there.
+ATTENTION_TRACE_JS = r"""
+() => {
+  if (window.chatlabAttentionTraceInstalled) return;
+  window.chatlabAttentionTraceInstalled = true;
+  const half = new Float32Array(65536);
+  for (let bits = 0; bits < 65536; bits++) {
+    const sign = bits & 0x8000 ? -1 : 1, exponent = (bits >> 10) & 0x1f, fraction = bits & 0x3ff;
+    half[bits] = exponent === 0 ? sign * 2 ** -14 * (fraction / 1024)
+      : exponent === 31 ? (fraction ? NaN : sign * Infinity)
+      : sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
+  }
+  const decode = text => {
+    const raw = atob(text), values = new Float32Array(raw.length >> 1);
+    for (let i = 0; i < values.length; i++) values[i] = half[raw.charCodeAt(2 * i) | (raw.charCodeAt(2 * i + 1) << 8)];
+    return values;
+  };
+  const percent = value => `${(value * 100).toFixed(value >= 0.0995 ? 1 : 2)}%`;
+  const build = root => {
+    root.dataset.built = '1';
+    let data;
+    try { data = JSON.parse(root.querySelector('script.atr-data').textContent); } catch (error) { return; }
+    const rows = decode(data.rows);
+    const context = data.context, total = data.tokens.length, steps = total - context;
+    if (steps <= 0) return;
+    const spans = Array.from(root.querySelectorAll('.atr-tok'));
+    const text = root.querySelector('.atr-text');
+    const canvas = root.querySelector('canvas'), tip = root.querySelector('.atr-tip');
+    const sink = root.querySelector('.atr-sink input');
+    const range = root.querySelector('.atr-range');
+    const label = root.querySelector('.atr-step'), caption = root.querySelector('.atr-caption');
+    const play = root.querySelector('.atr-play');
+    const bars = Array.from(root.querySelectorAll('.atr-bar'));
+    let step = 0, timer = null, weights = new Float32Array(total), regionOf = new Int8Array(total), peak = 1;
+    const quote = value => JSON.stringify(value);
+    const color = region => getComputedStyle(root).getPropertyValue(`--atr-c${region}`).trim() || '#888';
+    const read = () => {
+      const query = context - 1 + step, start = step * context + step * (step - 1) / 2;
+      const hide = sink.checked && query > 0;
+      let rest = 1;
+      if (hide) {
+        rest = 0;
+        for (let key = 1; key <= query; key++) rest += rows[start + key];
+      }
+      if (!(rest > 1e-9)) rest = Infinity;
+      weights.fill(0);
+      peak = 0;
+      for (let key = 0; key <= query; key++) {
+        const value = hide && key === 0 ? 0 : rows[start + key] / rest;
+        weights[key] = value;
+        regionOf[key] = key > query - data.recent ? data.recentRegion : data.regions[key];
+        if (value > peak && !(hide && key === 0)) peak = value;
+      }
+      for (let key = query + 1; key < total; key++) regionOf[key] = data.regions[key];
+      peak = peak || 1;
+      return query;
+    };
+    const drawText = query => {
+      spans.forEach((span, key) => {
+        span.classList.toggle('atr-future', key > query + 1);
+        span.classList.toggle('atr-query', key === query);
+        span.classList.toggle('atr-predicted', key === query + 1);
+        const share = key <= query ? Math.sqrt(Math.min(1, weights[key] / peak)) * 85 : 0;
+        span.style.background = share > 0.5 ? `color-mix(in srgb, var(--viz-line) ${share.toFixed(0)}%, transparent)` : '';
+      });
+      const target = spans[query + 1] || spans[query];
+      if (target) {
+        const top = target.offsetTop - text.offsetTop, bottom = top + target.offsetHeight;
+        if (top < text.scrollTop || bottom > text.scrollTop + text.clientHeight) {
+          text.scrollTop = Math.max(0, top - text.clientHeight / 2);
+        }
+      }
+    };
+    let columns = [];
+    const drawHistogram = query => {
+      const ratio = window.devicePixelRatio || 1, width = canvas.clientWidth, height = canvas.clientHeight;
+      if (!width) return;
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+      const context2d = canvas.getContext('2d');
+      context2d.setTransform(ratio, 0, 0, ratio, 0, 0);
+      context2d.clearRect(0, 0, width, height);
+      const count = Math.min(total, Math.floor(width));
+      const slot = width / count, base = height - 2;
+      columns = [];
+      for (let column = 0; column < count; column++) {
+        const low = Math.floor(column * total / count), high = Math.max(low + 1, Math.floor((column + 1) * total / count));
+        let best = low;
+        for (let key = low; key < high; key++) if (weights[key] > weights[best]) best = key;
+        columns.push(best);
+        const value = Math.min(1, weights[best] / peak), barHeight = value * (base - 4);
+        context2d.fillStyle = color(regionOf[best]);
+        if (best > query) context2d.globalAlpha = 0.15;
+        context2d.fillRect(column * slot + (slot > 3 ? 0.5 : 0), base - Math.max(barHeight, best > query ? 1 : 0),
+          Math.max(slot - (slot > 3 ? 1 : 0), 0.6), Math.max(barHeight, best > query ? 1 : 0));
+        context2d.globalAlpha = 1;
+      }
+      const styles = getComputedStyle(root);
+      context2d.fillStyle = styles.getPropertyValue('--viz-grid').trim() || '#ddd';
+      context2d.fillRect(0, base, width, 1);
+      const x = (query + 0.5) * width / total;
+      context2d.fillStyle = styles.getPropertyValue('--viz-ink').trim() || '#000';
+      context2d.fillRect(Math.round(x) - 1, 0, 2, height);
+    };
+    const drawBars = () => {
+      const sums = new Float64Array(data.names.length);
+      const query = context - 1 + step;
+      for (let key = 0; key <= query; key++) sums[regionOf[key]] += weights[key];
+      bars.forEach(bar => {
+        const region = Number(bar.dataset.region), share = sums[region];
+        bar.querySelector('.atr-fill').style.width = `${Math.min(100, share * 100).toFixed(2)}%`;
+        bar.querySelector('.atr-value').textContent = percent(share);
+      });
+    };
+    const draw = () => {
+      const query = read();
+      label.textContent = `token ${step + 1} of ${steps}`;
+      range.value = String(step);
+      const predicted = data.tokens[query + 1];
+      caption.innerHTML = '';
+      const strong = document.createElement('b');
+      strong.textContent = quote(predicted);
+      caption.append('Predicting ', strong, ` (position ${query + 1}) from the query `,
+        quote(data.tokens[query]), ` at position ${query}` + (sink.checked && query > 0
+          ? `. The first token took ${percent(rows[step * context + step * (step - 1) / 2])} before renormalizing.` : '.'));
+      drawText(query);
+      drawHistogram(query);
+      drawBars();
+    };
+    const go = next => { step = Math.max(0, Math.min(steps - 1, next)); draw(); };
+    const stop = () => { if (timer) clearInterval(timer); timer = null; play.textContent = '▶ play'; };
+    root.querySelector('.atr-prev').addEventListener('click', () => { stop(); go(step - 1); });
+    root.querySelector('.atr-next').addEventListener('click', () => { stop(); go(step + 1); });
+    range.addEventListener('input', () => { stop(); go(Number(range.value)); });
+    sink.addEventListener('change', draw);
+    play.addEventListener('click', () => {
+      if (timer) { stop(); return; }
+      if (step >= steps - 1) step = -1;
+      play.textContent = '❚❚ pause';
+      timer = setInterval(() => {
+        if (!root.isConnected || step >= steps - 1) { stop(); return; }
+        go(step + 1);
+      }, 120);
+    });
+    root.addEventListener('keydown', event => {
+      if (event.target.tagName === 'INPUT' && event.target.type !== 'checkbox') return;
+      if (event.key === 'ArrowLeft') { stop(); go(step - 1); event.preventDefault(); }
+      if (event.key === 'ArrowRight') { stop(); go(step + 1); event.preventDefault(); }
+    });
+    canvas.addEventListener('mousemove', event => {
+      const box = canvas.getBoundingClientRect();
+      const column = Math.floor((event.clientX - box.left) / box.width * columns.length);
+      const key = columns[column];
+      if (key === undefined) { tip.hidden = true; return; }
+      const query = context - 1 + step;
+      tip.textContent = `${quote(data.tokens[key])} · ${data.names[regionOf[key]]} · `
+        + (key > query ? 'not written yet' : percent(weights[key]));
+      tip.hidden = false;
+      const left = Math.min(Math.max(0, event.clientX - box.left + 10), box.width - tip.offsetWidth);
+      tip.style.left = `${left}px`;
+      tip.style.top = `${Math.max(0, event.clientY - box.top - 28)}px`;
+    });
+    canvas.addEventListener('mouseleave', () => { tip.hidden = true; });
+    spans.forEach((span, key) => {
+      span.title = '';
+      span.addEventListener('mouseenter', () => {
+        const query = context - 1 + step;
+        span.title = `${data.names[regionOf[key]]} · ` + (key > query ? 'not written yet' : percent(weights[key]));
+      });
+      if (key >= context) span.addEventListener('click', () => { stop(); go(key - context); });
+    });
+    new ResizeObserver(() => { if (root.isConnected) drawHistogram(context - 1 + step); }).observe(canvas);
+    draw();
+  };
+  const scan = () => document.querySelectorAll('.atr-root:not([data-built])').forEach(build);
+  new MutationObserver(scan).observe(document.body, {childList: true, subtree: true});
+  scan();
+}
+"""

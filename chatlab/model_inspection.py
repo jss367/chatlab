@@ -171,6 +171,115 @@ class TokenInsight:
         }
 
 
+# How many keys just before the query count as its recent context, in the
+# attention trace's head ranking and in the view's region bars.
+RECENT_KEYS = 16
+
+# Float32 bytes one chunk of an attention trace may hold: every layer's
+# every head, for each token fed, over the whole sequence so far. The
+# Transformers backend returns all layers' weights at once, so this bounds
+# the memory the trace takes on top of the model.
+ATTENTION_TRACE_CHUNK_BYTES = 256 << 20
+
+# The most tokens one chunk of an attention trace feeds, however small the
+# model: eager attention's own scratch grows with it too.
+ATTENTION_TRACE_CHUNK_TOKENS = 128
+
+
+@dataclass(frozen=True)
+class AttentionTrace:
+    """Where every reply token's prediction looked, read in one pass.
+
+    Step ``k`` explains reply token ``k``, the token at position
+    ``context_count + k``; its query is the position before it, whose output
+    predicted it. ``rows`` holds one row per step, flattened: step ``k``'s
+    row covers positions ``0`` through its query, ``context_count + k``
+    values, and is the mean over the ``heads`` chosen, first token included.
+
+    The rest describe every head, ``(layers, heads, ...)``, counting from 0
+    like ``heads``, and leave the first token out: it takes most of many
+    heads' attention whatever it is (the attention sink), which would
+    otherwise decide every ranking. ``key_shares`` is the share of a head's
+    attention on everything but the first token, summed over the steps,
+    that went to each position; ``recent_shares`` the share that went to
+    the last :data:`RECENT_KEYS` keys up to each query. ``active`` is the
+    head's mean attention on everything but the first token per step, which
+    says how much those shares stand on: a head that rests on the first
+    token at every step has shares made of rounding.
+    """
+
+    context_count: int
+    tokens: list[dict]
+    layer_count: int
+    head_count: int
+    heads: tuple[tuple[int, int], ...]
+    rows: np.ndarray
+    key_shares: np.ndarray
+    recent_shares: np.ndarray
+    active: np.ndarray
+
+
+class _TraceReducer:
+    """Fold an attention trace's chunks into the few readings kept."""
+
+    def __init__(self, layer_count: int, head_count: int, first: int, total: int, heads):
+        self.first = first
+        self.layer_count = layer_count
+        self.head_count = head_count
+        self.heads = tuple(heads)
+        self.by_layer: dict[int, list[int]] = {}
+        for layer, head in self.heads:
+            self.by_layer.setdefault(layer, []).append(head)
+        self.rows: list[np.ndarray] = []
+        self.key_sums = np.zeros((layer_count, head_count, total), dtype=np.float64)
+        self.recent_sums = np.zeros((layer_count, head_count), dtype=np.float64)
+        self.active_sums = np.zeros((layer_count, head_count), dtype=np.float64)
+        self.steps = 0
+
+    def add(self, start: int, layers: list[np.ndarray]) -> None:
+        """Take in chunk weights fed from position ``start``; see Engine.attention_heads."""
+
+        if len(layers) != self.layer_count or any(
+            layer.shape[0] != self.head_count for layer in layers
+        ):
+            raise RuntimeError("The model's attention changed shape partway through the reply.")
+        fed = layers[0].shape[1]
+        steps = [step for step in range(fed) if start + step >= self.first]
+        if not steps:
+            return
+        chosen = np.zeros(layers[0].shape[1:], dtype=np.float32)
+        for layer, heads in self.by_layer.items():
+            chosen += layers[layer][heads].sum(axis=0)
+        chosen /= len(self.heads)
+        for step in steps:
+            query = start + step
+            self.rows.append(chosen[step, : query + 1].astype(np.float16))
+            self.steps += 1
+            if query == 0:
+                continue
+            low = max(1, query + 1 - RECENT_KEYS)
+            for layer, weights in enumerate(layers):
+                kept = weights[:, step, 1 : query + 1]
+                self.key_sums[layer, :, 1 : query + 1] += kept
+                self.recent_sums[layer] += kept[:, low - 1 :].sum(axis=1)
+                self.active_sums[layer] += kept.sum(axis=1)
+
+    def finish(self, context_count: int, tokens: list[dict]) -> AttentionTrace:
+        steps = max(self.steps, 1)
+        active = np.maximum(self.active_sums, 1e-12)
+        return AttentionTrace(
+            context_count=context_count,
+            tokens=tokens,
+            layer_count=self.layer_count,
+            head_count=self.head_count,
+            heads=self.heads,
+            rows=np.concatenate(self.rows) if self.rows else np.zeros(0, dtype=np.float16),
+            key_shares=(self.key_sums / active[..., None]).astype(np.float32),
+            recent_shares=(self.recent_sums / active).astype(np.float32),
+            active=(self.active_sums / steps).astype(np.float32),
+        )
+
+
 class InspectionMixin:
     """The scoring and inspection methods of :class:`model_runtime.ModelManager`.
 
@@ -1126,6 +1235,100 @@ class InspectionMixin:
                 attention=attention,
                 decided_at=decided_at,
             )
+
+    @_guards_device_memory
+    def trace_attention(
+        self,
+        token_ids: Sequence[int],
+        context_count: int,
+        *,
+        heads=None,
+        load_id: str | None = None,
+        steering: dict | None = None,
+        images: Sequence[str] = (),
+    ) -> AttentionTrace:
+        """Read every head's attention behind every reply token in one pass.
+
+        ``token_ids`` is the prompt and the reply; the first
+        ``context_count`` are the prompt. Everything before the last prompt
+        token comes from the inspection cache where it can, then the rest is
+        fed a chunk at a time with the weights switched on, which costs about
+        what replaying the reply would, and the cache is kept for the next
+        inspection. See :class:`AttentionTrace` for what is kept.
+
+        ``heads`` chooses which heads the rows average: ``None`` for all of
+        them, or a function given the layer and head counts that returns
+        ``(layer, head)`` pairs counting from 0, and raises ``ValueError``
+        for a choice the model does not have. ``load_id``, ``steering`` and
+        ``images`` are as for :meth:`inspect`.
+        """
+
+        import torch
+
+        with self._lock, torch.inference_mode(), contextlib.ExitStack() as steering_scope:
+            if not self.loaded:
+                raise RuntimeError("Download and load a model before tracing attention.")
+            if load_id is not None and load_id != self.load_id:
+                raise ModelChanged(
+                    "The model has been reloaded since these tokens were produced."
+                )
+            steering_scope.enter_context(self._steering(steering))
+            steered = steering_vectors.active(steering)
+            if steered:
+                self._drop_inspect_cache()
+            ids = [int(value) for value in token_ids]
+            if not 1 <= context_count < len(ids):
+                raise ValueError("There is no reply after the prompt to trace.")
+
+            assert self.model is not None
+            engine = self._engine()
+            media = self._image_layout(ids, images)
+            first = context_count - 1
+            last = len(ids) - 1
+            position = media.run_start(first) if media is not None else first
+            cache = self._inspect_cache_for(ids[:position], media, images)
+            reducer: _TraceReducer | None = None
+            chunk = 1
+            while position < last:
+                end = min(position + chunk, last)
+                if media is not None:
+                    end = min(max(media.chunk_end(end), position + 1), last)
+                layers, cache = engine.attention_heads(ids[position:end], cache, position, media)
+                if layers is None:
+                    raise ValueError(
+                        "This model does not report its attention weights, so there is nothing to trace."
+                    )
+                if reducer is None:
+                    layer_count, head_count = len(layers), layers[0].shape[0]
+                    chosen = (
+                        [(layer, head) for layer in range(layer_count) for head in range(head_count)]
+                        if heads is None
+                        else list(heads(layer_count, head_count))
+                    )
+                    if not chosen:
+                        raise ValueError("Choose at least one head to trace.")
+                    reducer = _TraceReducer(layer_count, head_count, first, last, chosen)
+                    width = layer_count * head_count * len(ids) * 4
+                    chunk = max(1, min(ATTENTION_TRACE_CHUNK_TOKENS, ATTENTION_TRACE_CHUNK_BYTES // width))
+                reducer.add(position, layers)
+                del layers
+                position = end
+
+            tokens = [
+                {
+                    "index": index,
+                    "token_id": ids[index],
+                    "text": self._decode_token(ids[index]),
+                    "fallback": self._token_fallback(ids[index]),
+                    "segment": "prompt" if index < context_count else "response",
+                }
+                for index in range(len(ids))
+            ]
+            if cache is not None and self.load_id is not None and not steered:
+                self._inspect_cache = (self.load_id, ids[:last], cache, tuple(images))
+            del cache
+            assert reducer is not None
+            return reducer.finish(context_count, tokens)
 
     def read_kv_cache(
         self, token_ids: Sequence[int], layer: int, *, load_id: str | None = None,

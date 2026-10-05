@@ -28,7 +28,7 @@ from chatlab.compare import (
 from chatlab.conversation import new_forks
 from chatlab.token_metrics import COLOR_SCALES, DEFAULT_COLOR_SCALE
 from chatlab.trace_export import write_trace_export
-from chatlab.ui import runtime, experiments, experiment_compare, pictures, reasoning_check
+from chatlab.ui import attention_trace, runtime, experiments, experiment_compare, pictures, reasoning_check
 from chatlab.ui.activation_patching import build as build_activation_patching
 from chatlab.ui.common import (
     CONVERSATION_PANE_QUEUE,
@@ -419,6 +419,7 @@ class ChatPage:
     inspector_resizer: gr.HTML
     inspector: Inspector
     layers: Layers
+    attention_trace: attention_trace.AttentionTraceView
 
 
 def build_chat_page(saved: settings.Settings, states: SharedState) -> ChatPage:
@@ -471,7 +472,7 @@ def build_chat_page(saved: settings.Settings, states: SharedState) -> ChatPage:
                 padding=False,
             )
 
-            inspector, layers = _build_inspector(saved)
+            inspector, layers, trace_view = _build_inspector(saved)
     return ChatPage(
         column=chat_page,
         bar=bar,
@@ -485,6 +486,7 @@ def build_chat_page(saved: settings.Settings, states: SharedState) -> ChatPage:
         reasoning=reasoning,
         inspector=inspector,
         layers=layers,
+        attention_trace=trace_view,
         tabs=conversation_tabs,
         experiments_view=experiments_view,
         inspector_resizer=inspector_resizer,
@@ -1283,7 +1285,9 @@ def _build_compare_tab(states: SharedState) -> CompareTab:
     )
 
 
-def _build_inspector(saved: settings.Settings) -> tuple[Inspector, Layers]:
+def _build_inspector(
+    saved: settings.Settings,
+) -> tuple[Inspector, Layers, attention_trace.AttentionTraceView]:
     """The readings pane beside the tabs."""
 
     with gr.Column(scale=2, min_width=300, elem_id="inspector-pane") as inspector_pane:
@@ -1332,6 +1336,8 @@ def _build_inspector(saved: settings.Settings) -> tuple[Inspector, Layers]:
                 )
         with gr.Accordion("Layers and attention", open=False, elem_classes=["inspector-section"]):
             layers = _build_layers()
+        with gr.Accordion("Attention across the reply", open=False, elem_classes=["inspector-section"]):
+            trace_view = attention_trace.build()
         with gr.Accordion("Response statistics", open=False, elem_classes=["inspector-section"]):
             summary_panel = gr.HTML(charts.summary_tiles({}))
             surprise_panel = gr.HTML(charts.EMPTY_CHART)
@@ -1359,7 +1365,7 @@ def _build_inspector(saved: settings.Settings) -> tuple[Inspector, Layers]:
         prompt_note=prompt_note,
         prompt_strip=prompt_strip,
     )
-    return inspector, layers
+    return inspector, layers, trace_view
 
 
 def _build_layers() -> Layers:

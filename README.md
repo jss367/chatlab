@@ -51,6 +51,7 @@ drove.
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
 - An optional Jacobian lens reading concepts after a token as a layer × position grid, with lenses fetched from the Hub or imported from disk, click-to-pin tokens, and rank shading
 - An attention view showing which earlier tokens the model looked at when predicting it
+- Attention across the reply: one pass reads every head's attention behind every reply token, then plays it back token by token with the attention sink hidden or shown, a per-position histogram, and how much went to the user message, the system prompt, earlier turns, the template, a passage you mark, the earlier reply and the last 16 tokens. Heads can be chosen by layer or one at a time, or ranked by how much they read a region
 - A key-value cache view laying out each layer's cached keys and values per head and position: key norms, value norms, and key similarity to the query
 - A hardware panel naming the device, the memory ChatLab judges a load against, the Metal cap, and what the process is holding
 - Apple Metal, NVIDIA CUDA, and CPU loading
