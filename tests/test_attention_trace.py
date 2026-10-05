@@ -14,7 +14,7 @@ from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
 from chatlab.ui import attention_trace, runtime
 from chatlab.ui.panel import new_metrics_generation, restore_chat_metrics_generation
-from fakes import lens_manager
+from fakes import FakeTokenizer, SentencePieceTokenizer, lens_manager
 from mlx_support import needs_mlx, tiny_llama
 from test_kv_cache import tiny_manager
 
@@ -142,6 +142,44 @@ class TorchTraceTests(unittest.TestCase):
 
 
 class FakeModelTraceTests(unittest.TestCase):
+    def test_sentencepiece_regions_and_remarking_use_the_complete_prompt(self):
+        manager = lens_manager([1, 2, 3])
+        manager.tokenizer = SentencePieceTokenizer(["▁user:", "▁hello", "▁world", "▁reply"])
+        trace = manager.trace_attention([0, 1, 2, 3], 3)
+        self.assertEqual(trace.prompt_text, "user: hello world")
+        messages = [{"role": "user", "content": "hello world"}]
+        labels = attention_trace.token_regions(
+            trace.tokens, 3, messages,
+            prompt_text=trace.prompt_text, prompt_spans=trace.prompt_spans,
+        )
+        self.assertEqual(labels, ["template", "user message", "user message", "earlier reply"])
+        state = {
+            "tokens": trace.tokens, "context_count": 3, "messages": messages,
+            "regions": labels, "prompt_text": trace.prompt_text, "prompt_spans": trace.prompt_spans,
+            "rows": trace.rows, "key_shares": trace.key_shares, "recent_shares": trace.recent_shares,
+            "active": trace.active, "heads_label": "all heads",
+        }
+        _panel, marked, _ranking, _region = attention_trace.remark(state, "world", "marked passage", 4)
+        self.assertEqual(marked["regions"][2], "marked passage")
+        self.assertAlmostEqual(attention_trace.rank_heads(state, "user message")[0][2], 1.0)
+
+    def test_every_byte_of_a_split_character_belongs_to_its_message(self):
+        class ByteTokenizer(FakeTokenizer):
+            def decode(self, token_ids, **kwargs):
+                pieces = [b"user: ", b"\xc3", b"\xa9", b"reply"]
+                return b"".join(pieces[int(index)] for index in token_ids).decode("utf-8", errors="replace")
+
+        manager = lens_manager([1, 2, 3])
+        manager.tokenizer = ByteTokenizer(["user: ", "<0xC3>", "<0xA9>", "reply"])
+        trace = manager.trace_attention([0, 1, 2, 3], 3)
+        self.assertEqual(trace.prompt_text, "user: é")
+        self.assertEqual(trace.prompt_spans[1:], ((6, 7), (6, 7)))
+        labels = attention_trace.token_regions(
+            trace.tokens, 3, [{"role": "user", "content": "é"}],
+            prompt_text=trace.prompt_text, prompt_spans=trace.prompt_spans,
+        )
+        self.assertEqual(labels, ["template", "user message", "user message", "earlier reply"])
+
     def test_a_model_without_attention_weights_has_nothing_to_trace(self):
         manager = lens_manager([1, 2, 3])
         manager.model.return_attentions = False
@@ -246,6 +284,31 @@ class RegionTests(unittest.TestCase):
         ]
         messages = attention_trace._messages_before_reply(turns, "rules")
         self.assertEqual([message["content"] for message in messages], ["rules", "one", "two", "three"])
+
+    def test_recorded_system_and_reasoning_settings_reproduce_the_prompt(self):
+        turns = [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two", "reasoning": "earlier thought"},
+            {"role": "user", "content": "three"},
+            {"role": "assistant", "content": "four", "generation_settings": {
+                "system_prompt": "original rules", "keep_reasoning": True,
+            }},
+        ]
+        messages = attention_trace._messages_before_reply(turns, "edited rules")
+        self.assertEqual(messages[0], {"role": "system", "content": "original rules"})
+        self.assertEqual(messages[2]["content"], "<think>\nearlier thought\n</think>\ntwo")
+        pieces = tokens("system:", " original rules", " user: one assistant: ",
+                        "<think>\nearlier thought\n</think>\ntwo", " user: three", " reply")
+        labels = attention_trace.token_regions(pieces, 5, messages)
+        self.assertEqual(labels[1], "system prompt")
+        self.assertEqual(labels[3], "earlier turns")
+
+    def test_a_recorded_empty_system_prompt_does_not_use_the_edited_control(self):
+        turns = [{"role": "user", "content": "one"}, {
+            "role": "assistant", "content": "two", "generation_settings": {"system_prompt": ""},
+        }]
+        self.assertEqual(attention_trace._messages_before_reply(turns, "new rules"),
+                         [{"role": "user", "content": "one"}])
 
 
 def trace_state(regions, key_shares, recent_shares, rows=None, context_count=None, active=None):

@@ -145,15 +145,22 @@ def _messages_before_reply(turns: list[dict] | None, system_prompt: str) -> list
     """The messages the latest reply was written after, as the model was sent them."""
 
     turns = list(turns or [])
+    recorded = {}
     for index in range(len(turns) - 1, -1, -1):
         if turns[index].get("role") == "assistant":
+            recorded = turns[index].get("generation_settings") or {}
             turns = turns[:index]
             break
-    return model_messages(turns, system_prompt=system_prompt or "")
+    return model_messages(
+        turns,
+        system_prompt=recorded.get("system_prompt", system_prompt) or "",
+        include_reasoning=bool(recorded.get("keep_reasoning", False)),
+    )
 
 
 def token_regions(
-    tokens: list[dict], context_count: int, messages: list[dict], marked: str = ""
+    tokens: list[dict], context_count: int, messages: list[dict], marked: str = "",
+    *, prompt_text: str = "", prompt_spans=(),
 ) -> list[str]:
     """The region of every position: see the module docstring.
 
@@ -164,11 +171,13 @@ def token_regions(
     marked, over whatever region it was in.
     """
 
-    text, spans = "", []
-    for token in tokens[:context_count]:
-        piece = token.get("text") or ""
-        spans.append((len(text), len(text) + len(piece)))
-        text += piece
+    text, spans = prompt_text, list(prompt_spans)
+    if len(spans) != context_count:
+        text, spans = "", []
+        for token in tokens[:context_count]:
+            piece = token.get("text") or ""
+            spans.append((len(text), len(text) + len(piece)))
+            text += piece
     labels = [TEMPLATE] * len(spans)
 
     def paint(start: int, end: int, label: str) -> None:
@@ -421,7 +430,12 @@ def trace_reply(
             "context_count": trace.context_count,
             "tokens": trace.tokens,
             "messages": messages,
-            "regions": token_regions(trace.tokens, trace.context_count, messages, marked),
+            "prompt_text": trace.prompt_text,
+            "prompt_spans": trace.prompt_spans,
+            "regions": token_regions(
+                trace.tokens, trace.context_count, messages, marked,
+                prompt_text=trace.prompt_text, prompt_spans=trace.prompt_spans,
+            ),
             "rows": trace.rows,
             "key_shares": trace.key_shares,
             "recent_shares": trace.recent_shares,
@@ -456,7 +470,8 @@ def remark(state, marked, region, top):
         return gr.skip(), gr.skip(), gr.skip(), gr.skip()
     state = dict(state)
     state["regions"] = token_regions(
-        state["tokens"], state["context_count"], state["messages"], marked
+        state["tokens"], state["context_count"], state["messages"], marked,
+        prompt_text=state.get("prompt_text", ""), prompt_spans=state.get("prompt_spans", ()),
     )
     choices = region_choices(state)
     region = region if region in choices else choices[0]

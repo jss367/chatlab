@@ -186,6 +186,33 @@ ATTENTION_TRACE_CHUNK_BYTES = 256 << 20
 ATTENTION_TRACE_CHUNK_TOKENS = 128
 
 
+def _decoded_prompt(tokenizer, token_ids: Sequence[int]) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """Decode in context and give every byte of a split character its span."""
+
+    from chatlab.tokenization import IncrementalDecoder
+
+    text = tokenizer.decode(
+        list(token_ids), skip_special_tokens=False, clean_up_tokenization_spaces=False
+    )
+    decoder = IncrementalDecoder(tokenizer)
+    spans = [(0, 0)] * len(token_ids)
+    pending: list[int] = []
+    boundary = 0
+    for index, token_id in enumerate(token_ids):
+        decoder.push(int(token_id), force_visible=True)
+        pending.append(index)
+        end = decoder.prefix_end(text)
+        if end is None:
+            continue
+        for position in pending:
+            spans[position] = (boundary, end)
+        pending.clear()
+        boundary = end
+    for position in pending:
+        spans[position] = (boundary, len(text))
+    return text, tuple(spans)
+
+
 @dataclass(frozen=True)
 class AttentionTrace:
     """Where every reply token's prediction looked, read in one pass.
@@ -217,6 +244,8 @@ class AttentionTrace:
     key_shares: np.ndarray
     recent_shares: np.ndarray
     active: np.ndarray
+    prompt_text: str = ""
+    prompt_spans: tuple[tuple[int, int], ...] = ()
 
 
 class _TraceReducer:
@@ -264,7 +293,7 @@ class _TraceReducer:
                 self.recent_sums[layer] += kept[:, low - 1 :].sum(axis=1)
                 self.active_sums[layer] += kept.sum(axis=1)
 
-    def finish(self, context_count: int, tokens: list[dict]) -> AttentionTrace:
+    def finish(self, context_count: int, tokens: list[dict], prompt_text="", prompt_spans=()) -> AttentionTrace:
         steps = max(self.steps, 1)
         active = np.maximum(self.active_sums, 1e-12)
         return AttentionTrace(
@@ -277,6 +306,8 @@ class _TraceReducer:
             key_shares=(self.key_sums / active[..., None]).astype(np.float32),
             recent_shares=(self.recent_sums / active).astype(np.float32),
             active=(self.active_sums / steps).astype(np.float32),
+            prompt_text=prompt_text,
+            prompt_spans=prompt_spans,
         )
 
 
@@ -1328,7 +1359,9 @@ class InspectionMixin:
                 self._inspect_cache = (self.load_id, ids[:last], cache, tuple(images))
             del cache
             assert reducer is not None
-            return reducer.finish(context_count, tokens)
+            assert self.tokenizer is not None
+            prompt_text, prompt_spans = _decoded_prompt(self.tokenizer, ids[:context_count])
+            return reducer.finish(context_count, tokens, prompt_text, prompt_spans)
 
     def read_kv_cache(
         self, token_ids: Sequence[int], layer: int, *, load_id: str | None = None,
