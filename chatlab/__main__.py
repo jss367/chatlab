@@ -4,11 +4,6 @@ import argparse
 import logging
 import os
 
-from chatlab import api, branding, logs, remote
-from chatlab.app import build_app, current_manager
-from chatlab.device_memory import watch_memory
-
-
 parser = argparse.ArgumentParser(prog="python -m chatlab", description="Serve ChatLab to a browser.")
 parser.add_argument(
     "--remote",
@@ -19,6 +14,23 @@ parser.add_argument(
     ),
 )
 args = parser.parse_args()
+
+if args.remote:
+    # Arm lifetime control before cold imports, page building, or launch.
+    from chatlab import remote
+
+    def stop() -> None:
+        # Exits from the watching thread without waiting on the others: a
+        # generation or a load in flight belongs to a window that is gone.
+        logging.shutdown()
+        os._exit(0)
+
+    remote.exit_when_stdin_closes(stop)
+
+from chatlab import api, branding, logs  # noqa: E402 - remote EOF must be watched before cold imports
+from chatlab.app import build_app, current_manager  # noqa: E402
+from chatlab.device_memory import watch_memory  # noqa: E402
+
 
 # The same rules the desktop app runs under, so a problem reproduced from
 # a checkout is recorded the way it was recorded on the machine that hit
@@ -42,12 +54,5 @@ _, local_url, _ = demo.launch(
 api.attach(demo.app, current_manager)
 if args.remote:
 
-    def stop() -> None:
-        # Exits from the watching thread without waiting on the others: a
-        # generation or a load in flight belongs to a window that is gone.
-        logging.shutdown()
-        os._exit(0)
-
-    remote.exit_when_stdin_closes(stop)
     print(f"{remote.READY_MARKER}{local_url}", flush=True)
 demo.block_thread()

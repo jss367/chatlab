@@ -32,7 +32,6 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from chatlab import api
 
 
 logger = logging.getLogger(__name__)
@@ -300,6 +299,8 @@ class RemoteSession:
 
     def _wait_for(self, url: str) -> None:
         """Poll the API's status route through the forward until it answers."""
+
+        from chatlab import api
 
         status_url = f"{url.rstrip('/')}{api.API_PREFIX}/chatlab/status"
         deadline = time.monotonic() + self.tunnel_timeout

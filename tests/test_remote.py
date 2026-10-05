@@ -373,6 +373,48 @@ class SessionTests(unittest.TestCase):
 class RealServerTests(unittest.TestCase):
     """``python -m chatlab --remote``: the far end the desktop app expects."""
 
+    def test_eof_stops_a_remote_server_during_cold_build_or_launch(self):
+        script = """
+import runpy, sys, threading, types
+stage = sys.argv[1]
+def hang():
+    print("CHATLAB_COLD_START", flush=True)
+    threading.Event().wait()
+class Demo:
+    def queue(self, **kwargs):
+        return self
+    def launch(self, **kwargs):
+        hang()
+app = types.ModuleType("chatlab.app")
+app.build_app = hang if stage == "build" else Demo
+app.current_manager = lambda: None
+sys.modules["chatlab.app"] = app
+sys.argv = ["chatlab", "--remote"]
+runpy.run_module("chatlab", run_name="__main__")
+"""
+        for stage in ("build", "launch"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                environment = dict(os.environ, PYTHONPATH=str(REPO), **{
+                    settings.SETTINGS_PATH_ENV: str(Path(directory) / "settings.json"),
+                    library.LIBRARY_PATH_ENV: str(Path(directory) / "conversations.json"),
+                    logs.LOG_PATH_ENV: str(Path(directory) / "ChatLab.log"),
+                })
+                server = subprocess.Popen(
+                    [sys.executable, "-c", script, stage], cwd=directory, env=environment,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                )
+                try:
+                    self.assertEqual(server.stdout.readline().strip(), "CHATLAB_COLD_START")
+                    self.assertIsNone(server.poll())
+                    server.stdin.close()
+                    self.assertEqual(server.wait(5), 0)
+                finally:
+                    if server.poll() is None:
+                        server.kill()
+                        server.wait()
+                    server.stdin.close()
+                    server.stdout.close()
+
     def test_the_server_reports_its_address_and_stops_when_its_input_closes(self):
         with tempfile.TemporaryDirectory() as directory:
             environment = dict(
