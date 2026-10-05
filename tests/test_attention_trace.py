@@ -485,5 +485,60 @@ class TraceHandlerTests(unittest.TestCase):
         self.assertEqual(next(frames)[:3], (attention_trace.EMPTY_TRACE, None, attention_trace.EMPTY_RANKING))
 
 
+class PromptEditTraceTests(unittest.TestCase):
+    def setUp(self):
+        import test_prompt_edit
+
+        self.edits = test_prompt_edit
+        test_prompt_edit.setUpModule()
+        self.addCleanup(test_prompt_edit.tearDownModule)
+        self.fixture = test_prompt_edit.PromptEditTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def trace(self, frame):
+        # Generation's small fake emits the edited reply; the inspection fake
+        # additionally exposes attention without changing its recorded ids.
+        runtime.MANAGER.model = lens_manager([1, 2, 3]).model
+        runtime.MANAGER.engine = None
+        frames = list(attention_trace.trace_reply(
+            frame["chat_metrics"], frame["context_ids"], frame["turns"], "", "all", "",
+            "user message", 4,
+        ))
+        self.assertIn("atr-root", frames[0][0], frames[0][-1])
+        return frames[0][1]
+
+    def test_one_message_token_replaced_by_several_keeps_its_region_and_ranking(self):
+        frame = self.fixture.replace_with_text("Hello world")
+        state = self.trace(frame)
+        at = self.edits.MESSAGE_AT
+        self.assertEqual(state["regions"][at:at + 2], ["user message"] * 2)
+        self.assertTrue(attention_trace.rank_heads(state, "user message"))
+        _panel, marked, _ranking, _region = attention_trace.remark(state, "world", "marked passage", 4)
+        self.assertEqual(marked["regions"][at:at + 2], ["user message", "marked passage"])
+        _panel, cleared, _ranking, _region = attention_trace.remark(marked, "", "user message", 4)
+        self.assertEqual(cleared["regions"][at:at + 2], ["user message"] * 2)
+
+    def test_an_edited_template_token_does_not_acquire_the_message_region(self):
+        at = self.edits.PROMPT_IDS.index(4)
+        frame = self.fixture.replace_with_text("Hello", index=at)
+        state = self.trace(frame)
+        self.assertEqual(state["regions"][at], "template")
+        self.assertEqual(state["regions"][self.edits.MESSAGE_AT], "user message")
+
+    def test_repeated_edits_in_different_regions_preserve_both_origins(self):
+        first = self.fixture.replace_with_text("Hello world")
+        at = first["context_ids"][1].index(4)
+        payload = self.fixture.payload(index=at, frame=first)
+        second = self.fixture.edit(
+            {"kind": "text", "text": "Hello", "selection": payload["selection"]},
+            frame=first, turns=first["turns"],
+        )
+        state = self.trace(second)
+        self.assertEqual(state["regions"][self.edits.MESSAGE_AT:self.edits.MESSAGE_AT + 2],
+                         ["user message"] * 2)
+        self.assertEqual(state["regions"][at], "template")
+
+
 if __name__ == "__main__":
     unittest.main()

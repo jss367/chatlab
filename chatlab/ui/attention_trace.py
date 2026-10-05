@@ -16,6 +16,7 @@ before each query are its recent context, whatever region they are in.
 from __future__ import annotations
 
 import base64
+import difflib
 import html
 import json
 import re
@@ -26,7 +27,7 @@ import gradio as gr
 import numpy as np
 
 from chatlab.conversation import model_messages
-from chatlab.model_inspection import RECENT_KEYS
+from chatlab.model_inspection import RECENT_KEYS, _decoded_prompt
 from chatlab.model_runtime import LOADING
 from chatlab.text_generation import ModelChanged
 from chatlab.ui import runtime
@@ -160,7 +161,7 @@ def _messages_before_reply(turns: list[dict] | None, system_prompt: str) -> list
 
 def token_regions(
     tokens: list[dict], context_count: int, messages: list[dict], marked: str = "",
-    *, prompt_text: str = "", prompt_spans=(),
+    *, prompt_text: str = "", prompt_spans=(), base_regions=None,
 ) -> list[str]:
     """The region of every position: see the module docstring.
 
@@ -178,7 +179,8 @@ def token_regions(
             piece = token.get("text") or ""
             spans.append((len(text), len(text) + len(piece)))
             text += piece
-    labels = [TEMPLATE] * len(spans)
+    inherited = base_regions is not None and len(base_regions) == context_count
+    labels = list(base_regions) if inherited else [TEMPLATE] * len(spans)
 
     def paint(start: int, end: int, label: str) -> None:
         for index, (low, high) in enumerate(spans):
@@ -189,6 +191,8 @@ def token_regions(
     latest_user = users[-1] if users else None
     cursor = 0
     for index, message in enumerate(messages):
+        if inherited:
+            break
         content = message.get("content")
         content = content.strip() if isinstance(content, str) else ""
         if not content:
@@ -211,6 +215,48 @@ def token_regions(
             paint(start, start + len(passage), MARKED)
             start = text.find(passage, start + len(passage))
     return labels + [REPLY] * (len(tokens) - context_count)
+
+
+def _prompt_edit_regions(trace, turns, messages):
+    """Carry source regions through a prompt token's replacement, including retries."""
+
+    turn = next((turn for turn in reversed(turns or []) if turn.get("role") == "assistant"), {})
+    edit = turn.get("prompt_edit")
+    if not edit:
+        return None
+    settings = turn.get("generation_settings") or {}
+    source_ids, _, _ = runtime.MANAGER._response_prompt(
+        messages, tools=None,
+        thinking_mode=turn.get("thinking_mode") or settings.get("thinking_mode") or "default",
+        prompt_override_ids=None,
+    )
+    text, spans = _decoded_prompt(runtime.MANAGER.tokenizer, source_ids)
+    labels = token_regions(
+        [{} for _ in source_ids], len(source_ids), messages, prompt_text=text, prompt_spans=spans,
+    )
+    actual = [token["token_id"] for token in trace.tokens[:trace.context_count]]
+    at = int(edit["position"]) - 1
+    inserted = len(actual) - len(source_ids) + 1
+    # The recorded position disambiguates repeated tokens and one-to-many edits.
+    if (0 <= at < len(source_ids) and inserted >= 0
+            and source_ids[:at] == actual[:at]
+            and source_ids[at + 1:] == actual[at + inserted:]):
+        return labels[:at] + [labels[at]] * inserted + labels[at + 1:]
+    # A reply may have been edited repeatedly. Match unchanged token runs so
+    # previous edits also inherit their source message instead of its spelling.
+    result = [TEMPLATE] * len(actual)
+    for kind, low, high, start, end in difflib.SequenceMatcher(
+        a=source_ids, b=actual, autojunk=False
+    ).get_opcodes():
+        if kind == "equal":
+            result[start:end] = labels[low:high]
+        elif kind == "replace":
+            for index in range(start, end):
+                source = low + min((index - start) * (high - low) // (end - start), high - low - 1)
+                result[index] = labels[source]
+        elif kind == "insert" and 0 < low < len(labels) and labels[low - 1] == labels[low]:
+            result[start:end] = [labels[low]] * (end - start)
+    return result
 
 
 def rank_heads(state: dict, region: str, top: int = 10) -> list[tuple[int, int, float]]:
@@ -424,6 +470,7 @@ def trace_reply(
             yield (*refused, TRACE_GONE)
             return
         messages = _messages_before_reply(conversation, system_prompt)
+        source_regions = _prompt_edit_regions(trace, conversation, messages)
         label = heads_label(trace.heads, trace.layer_count, trace.head_count)
         state = {
             "generation": generation,
@@ -432,9 +479,11 @@ def trace_reply(
             "messages": messages,
             "prompt_text": trace.prompt_text,
             "prompt_spans": trace.prompt_spans,
+            "source_regions": source_regions,
             "regions": token_regions(
                 trace.tokens, trace.context_count, messages, marked,
                 prompt_text=trace.prompt_text, prompt_spans=trace.prompt_spans,
+                base_regions=source_regions,
             ),
             "rows": trace.rows,
             "key_shares": trace.key_shares,
@@ -472,6 +521,7 @@ def remark(state, marked, region, top):
     state["regions"] = token_regions(
         state["tokens"], state["context_count"], state["messages"], marked,
         prompt_text=state.get("prompt_text", ""), prompt_spans=state.get("prompt_spans", ()),
+        base_regions=state.get("source_regions"),
     )
     choices = region_choices(state)
     region = region if region in choices else choices[0]
