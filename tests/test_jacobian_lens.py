@@ -873,9 +873,9 @@ class LargeLensTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory()
-        if shutil.disk_usage(cls.directory.name).free < 8 * 1024**3:
+        if shutil.disk_usage(cls.directory.name).free < 6 * 1024**3:
             cls.directory.cleanup()
-            raise unittest.SkipTest("needs 8 GiB of free disk for a lens over 2 GiB")
+            raise unittest.SkipTest("needs 6 GiB of free disk: the lens and the copy an import keeps")
         cls.path = Path(cls.directory.name) / "large.pt"
         matrix = torch.eye(cls.WIDTH, dtype=torch.float16)
         torch.save({
@@ -1002,6 +1002,36 @@ class MlxJacobianLensTests(unittest.TestCase):
             self.assertAlmostEqual(cell["pinned_score"], float(logits[position, 7]), places=4)
         rendered = charts.jacobian_lens_chart(result)
         self.assertIn("4-bit MLX weights", rendered)
+
+    def test_a_half_precision_conversion_passes_the_replay_over_a_long_slice(self):
+        # The model's head reads every fed position at once; a replay of the
+        # last row alone, or in float32, rounds differently in bfloat16.
+        from mlx.utils import tree_map
+
+        from chatlab.mlx_runtime import MLX_THREAD, MlxEngine
+        from mlx_support import HIDDEN, LAYERS, tiny_llama
+
+        mx = self.mx
+
+        def build():
+            model = tiny_llama(vocab=512)
+            model.update(tree_map(lambda array: array.astype(mx.bfloat16) * 8, model.parameters()))
+            mx.eval(model.parameters())
+            return model
+
+        model = MLX_THREAD.run(build)
+        self.manager.model = model
+        self.manager.engine = MlxEngine(model, {
+            "eos_token_id": 99, "model_type": "llama",
+            "hidden_size": HIDDEN, "num_hidden_layers": LAYERS,
+        })
+        self.manager.tokenizer = type(self.manager.tokenizer)(tuple(f"t{i}" for i in range(512)), 1)
+        self.manager.load_count += 1
+        imported = self.manager.import_jacobian_lens(str(self.path), "test/tiny-decoder")
+        result = self.manager.inspect_jacobian(
+            list(range(3, 60)), 56, lens_id=imported["import_id"], load_id=self.manager.load_id,
+        ).to_dict()
+        self.assertEqual(len(result["slice"]["tokens"]), 57)
 
     def test_the_declared_source_must_name_the_conversion(self):
         with self.assertRaisesRegex(ValueError, "MLX conversion"):

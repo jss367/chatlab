@@ -285,7 +285,10 @@ class FittedLens:
         if set(states) != set(self.wanted(layout)):
             raise ValueError("The model did not return all requested decoder activations.")
         actual = torch.as_tensor(np.asarray(actual_logits), dtype=torch.float32)
-        replayed = _unembed(engine, layout, states[last][-1:])[0]
+        # The whole slice is replayed, as the model's own head read it: a
+        # half-precision head over one row rounds differently from the same
+        # head over many, by more than the tolerance.
+        replayed = _unembed(engine, layout, states[last])[-1]
         if not torch.allclose(replayed, actual, rtol=1e-2, atol=1e-2):
             raise ValueError("The final-layer readout does not reproduce this model's output; Jacobian results were withheld.")
         if pinned_id is not None and not 0 <= pinned_id < actual.numel():
@@ -372,7 +375,11 @@ def _unembed_mlx(engine, layout: Layout, vectors: np.ndarray) -> np.ndarray:
     """:func:`_unembed` for an MLX model, run on the MLX thread."""
     import mlx.core as mx
 
+    # In the norm's own dtype, as the Transformers readout casts to it.
     array = mx.array(vectors)[None]
+    weight = getattr(layout.norm, "weight", None)
+    if weight is not None:
+        array = array.astype(weight.dtype)
     logits = engine.read_head(layout.norm(array))[0].astype(mx.float32)
     mx.eval(logits)
     return np.array(logits)
