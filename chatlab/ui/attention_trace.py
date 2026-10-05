@@ -28,6 +28,7 @@ import gradio as gr
 import numpy as np
 
 from chatlab.conversation import model_messages
+from chatlab import attachments, vision
 from chatlab.model_inspection import RECENT_KEYS, _decoded_prompt
 from chatlab.model_runtime import LOADING
 from chatlab.text_generation import ModelChanged
@@ -196,9 +197,9 @@ def token_regions(
             break
         content = message.get("content")
         content = content.strip() if isinstance(content, str) else ""
-        if not content:
-            continue
         bounds = message_spans[index] if message_spans is not None else None
+        if not content and bounds is None:
+            continue
         if bounds is None:
             found = text.find(content, cursor)
             # Legacy traces without template metadata still must not match
@@ -244,15 +245,32 @@ def _message_spans(text, messages, turns):
     mode = turn.get("thinking_mode") or settings.get("thinking_mode") or "default"
     spans = []
     for index, message in enumerate(messages):
-        if not isinstance(message.get("content"), str) or not message["content"].strip():
+        if (not isinstance(message.get("content"), str) or not message["content"].strip()) and not message.get("images"):
             spans.append(None)
             continue
         marker = "CHATLAB_REGION_" + uuid.uuid4().hex
         probe = [dict(item) for item in messages]
         probe[index]["content"] = marker
-        ids, _, _ = runtime.MANAGER._response_prompt(
-            probe, tools=None, thinking_mode=mode, prompt_override_ids=None,
-        )
+        if message.get("images"):
+            manager = runtime.MANAGER
+            renderer = manager.tokenizer if manager.tokenizer.chat_template else manager.processor
+            parts = vision.template_messages(messages)
+            # Replace the whole multimodal body, so its image placeholders
+            # lie between the same boundaries as its text and belong to it.
+            parts[index]["content"] = [{"type": "text", "text": marker}]
+            options = {"enable_thinking": mode == "on"} if manager.supports_thinking and mode != "default" else {}
+            rendered = renderer.apply_chat_template(
+                parts, add_generation_prompt=True, tokenize=False, **options,
+            )
+            remaining = [name for at, item in enumerate(messages) if at != index
+                         for name in item.get("images") or []]
+            ids = (vision.expand_prompt(manager.processor, rendered,
+                                       [attachments.open_for_model(name) for name in remaining])
+                   if remaining else manager._encode_ids(rendered, add_special_tokens=False))
+        else:
+            ids, _, _ = runtime.MANAGER._response_prompt(
+                probe, tools=None, thinking_mode=mode, prompt_override_ids=None,
+            )
         decoded = runtime.MANAGER._decode_ids(ids)
         if decoded.count(marker) != 1:
             spans.append(None)
@@ -408,7 +426,7 @@ def render_trace(state: dict | None) -> str:
         f'<div class="viz-note">Averaging {html.escape(state["heads_label"])}. Shading and bars '
         "are the chosen heads' mean attention from the query, the position before the token "
         f"being predicted. The last {RECENT_KEYS} tokens before each query count as recent "
-        "whatever region they are in.</div>"
+        "whatever region they are in; their total overlaps the other bars.</div>"
         "</div>"
     )
 
@@ -781,7 +799,7 @@ ATTENTION_TRACE_JS = r"""
       for (let key = 0; key <= query; key++) {
         const value = hide && key === 0 ? 0 : rows[start + key] / rest;
         weights[key] = value;
-        regionOf[key] = key > query - data.recent ? data.recentRegion : data.regions[key];
+        regionOf[key] = data.regions[key];
         if (value > peak && !(hide && key === 0)) peak = value;
       }
       for (let key = query + 1; key < total; key++) regionOf[key] = data.regions[key];
@@ -838,7 +856,10 @@ ATTENTION_TRACE_JS = r"""
     const drawBars = () => {
       const sums = new Float64Array(data.names.length);
       const query = context - 1 + step;
-      for (let key = 0; key <= query; key++) sums[regionOf[key]] += weights[key];
+      for (let key = 0; key <= query; key++) {
+        sums[regionOf[key]] += weights[key];
+        if (key > query - data.recent) sums[data.recentRegion] += weights[key];
+      }
       bars.forEach(bar => {
         const region = Number(bar.dataset.region), share = sums[region];
         bar.querySelector('.atr-fill').style.width = `${Math.min(100, share * 100).toFixed(2)}%`;

@@ -3,7 +3,9 @@
 import base64
 import json
 import re
+import shutil
 import string
+import subprocess
 import unittest
 from unittest import mock
 
@@ -143,6 +145,62 @@ class TorchTraceTests(unittest.TestCase):
 
 
 class FakeModelTraceTests(unittest.TestCase):
+    def test_expanded_images_belong_to_their_earlier_or_current_user_message(self):
+        class ImageTokenizer(FakeTokenizer):
+            def apply_chat_template(self, messages, tokenize=True, **kwargs):
+                def body(message):
+                    content = message["content"]
+                    if isinstance(content, list):
+                        return "".join("<image>" if part["type"] == "image" else part["text"]
+                                       for part in content)
+                    return content
+                text = "".join(f"<|{message['role']}|>\n{body(message)}<|end|>\n"
+                               for message in messages) + "<|assistant|>"
+                return self(text, add_special_tokens=False)["input_ids"] if tokenize else text
+
+        class Processor:
+            chat_template = "native vision template"
+
+            def apply_chat_template(self, *args, **kwargs):
+                return tokenizer.apply_chat_template(*args, **kwargs)
+
+            def __call__(self, text, images, **kwargs):
+                # A processor expands each picture into three encoder slots.
+                rendered = text[0].replace("<image>", "<image>" * 3)
+                return {"input_ids": torch.tensor([tokenizer(rendered, add_special_tokens=False)["input_ids"]])}
+
+        pieces = ["<|user|>", "<|end|>", "<|assistant|>", "\n", "question", "reply", "<image>"]
+        pieces += list(string.ascii_letters + string.digits + "_; ")
+        tokenizer = ImageTokenizer(pieces)  # Its template lives on the processor.
+        manager = lens_manager([1, 2, 3])
+        manager.tokenizer, manager.processor = tokenizer, Processor()
+        with (mock.patch.object(runtime, "MANAGER", manager),
+              mock.patch("chatlab.attachments.open_for_model", return_value=object()),
+              mock.patch.object(manager, "_image_layout", return_value=None)):
+            for content in ("question", ""):
+                with self.subTest(content=content):
+                    messages = [
+                        {"role": "user", "content": "question", "images": ["earlier.png"]},
+                        {"role": "assistant", "content": "reply"},
+                        {"role": "user", "content": content, "images": ["current.png"]},
+                    ]
+                    ids, _, _ = manager._response_prompt(
+                        messages, tools=None, thinking_mode="default", prompt_override_ids=None,
+                    )
+                    image_positions = [index for index, token in enumerate(ids) if token == 6]
+                    manager.model.focus = image_positions[3]
+                    generation = new_metrics_generation()
+                    _panel, state, *_ = list(attention_trace.trace_reply(
+                        (generation, [{"token_id": 5}]),
+                        (generation, ids, manager.load_id, None, ["earlier.png", "current.png"]),
+                        messages + [{"role": "assistant", "content": "reply"}],
+                        "", "all", "", "user message", 4,
+                    ))[0]
+                    self.assertEqual(len(image_positions), 6)
+                    self.assertEqual([state["regions"][index] for index in image_positions],
+                                     ["earlier turns"] * 3 + ["user message"] * 3)
+                    self.assertGreater(attention_trace.rank_heads(state, "user message")[0][2], 0.5)
+
     def test_template_boundaries_win_over_duplicate_preamble_and_role_marker_text(self):
         class NativeTokenizer(FakeTokenizer):
             chat_template = "native"
@@ -417,6 +475,56 @@ class RankingTests(unittest.TestCase):
 
 
 class RenderTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the page script")
+    def test_recent_total_overlaps_the_original_regions_in_the_real_page_script(self):
+        payload = {
+            "context": 3, "recent": 16, "recentRegion": 6,
+            "names": list(attention_trace.REGIONS), "regions": [4, 0, 2, 5],
+            "tokens": ["sink", "user", "system", "reply"],
+            "rows": base64.b64encode(np.array([0.5, 0.25, 0.25], dtype="<f2").tobytes()).decode(),
+        }
+        script = r"""
+const assert = require('node:assert/strict');
+const element = () => ({style:{},dataset:{},handlers:{},classList:{toggle(){}},
+  offsetTop:0,offsetHeight:10,clientHeight:100,scrollTop:0,
+  addEventListener(name,fn){this.handlers[name]=fn;},append(){}});
+const spans = Array.from({length:4}, element);
+const bars = Array.from({length:7}, (_,i) => {
+  const bar=element(), fill=element(), value=element();
+  bar.dataset.region=String(i); bar.fill=fill; bar.value=value;
+  bar.querySelector=selector => selector==='.atr-fill' ? fill : value;
+  return bar;
+});
+const selectors = ['.atr-text','canvas','.atr-tip','.atr-sink input','.atr-range',
+ '.atr-step','.atr-caption','.atr-play','.atr-prev','.atr-next'];
+const nodes=Object.fromEntries(selectors.map(selector=>[selector,element()]));
+nodes['canvas'].clientWidth=0;
+nodes['.atr-sink input'].checked=true;
+const root=element(); root.isConnected=true;
+root.querySelector=selector => selector==='script.atr-data' ? {textContent:JSON.stringify(payload)} : nodes[selector];
+root.querySelectorAll=selector => selector==='.atr-tok' ? spans : bars;
+global.window={devicePixelRatio:1};
+global.document={body:{},querySelectorAll:()=>[root],createElement:()=>element()};
+global.MutationObserver=class{observe(){}};
+global.ResizeObserver=class{observe(){}};
+"""
+        script = "const payload=" + json.dumps(payload) + ";\n" + script
+        script += "\nconst start=" + attention_trace.ATTENTION_TRACE_JS + ";\nstart();\n"
+        script += r"""
+assert.equal(bars[0].value.textContent,'50.0%');
+assert.equal(bars[2].value.textContent,'50.0%');
+assert.equal(bars[6].value.textContent,'100.0%');
+spans[1].handlers.mouseenter();
+assert.ok(spans[1].title.startsWith('user message'));
+nodes['.atr-sink input'].checked=false;
+nodes['.atr-sink input'].handlers.change();
+assert.equal(bars[0].value.textContent,'25.0%');
+assert.equal(bars[4].value.textContent,'50.0%');
+assert.equal(bars[6].value.textContent,'100.0%');
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_the_view_carries_every_row_for_the_page_script(self):
         rows = np.array([0.5, 0.5, 0.2, 0.3, 0.5], dtype=np.float16)
         state = trace_state(
