@@ -130,7 +130,7 @@ git clone https://github.com/jss367/chatlab ~/chatlab
 cd ~/chatlab && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
-Then choose **Remote → Connect to Remote Host…** and enter the host as SSH knows it, optionally followed by the checkout's path: `gpu-box`, or `me@gpu-box:/srv/chatlab`. The path defaults to `~/chatlab`, and the last host entered is offered next time. The app connects over SSH, runs `.venv/bin/python -m chatlab --remote` in the checkout, forwards a local port to it, and loads the remote page. The window title shows the host while it is connected. Models, conversations, settings and the log are all the remote host's while connected.
+Then choose **Remote → Connect to Remote Host…** and enter the host as SSH knows it, optionally followed by the checkout's path: `gpu-box`, or `me@gpu-box:/srv/chatlab`. To specify a port directly, use `ssh://me@gpu-box:2222`; append `#/srv/chatlab` to name its checkout. IPv6 addresses go in brackets, such as `ssh://me@[::1]:2222`. The path defaults to `~/chatlab`, and the last host entered is offered next time. The app connects over SSH, runs `.venv/bin/python -m chatlab --remote` in the checkout, forwards a local port to it, and loads the remote page. The window title shows the host while it is connected. Models, conversations, settings and the log are all the remote host's while connected.
 
 SSH signs in with your keys, agent and `~/.ssh/config`, and never asks for anything, so a host that wants a password or an unknown host key is refused with SSH's message. Connect once with `ssh gpu-box` from Terminal first. The remote server listens on its own loopback address only and is reached through the forward.
 

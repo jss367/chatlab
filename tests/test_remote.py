@@ -60,6 +60,33 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(target, remote.RemoteTarget("me@gpu-box", "/srv/chat lab"))
         self.assertEqual(remote.RemoteTarget.parse(str(target)), target)
 
+    def test_ssh_uris_keep_the_requested_endpoint_and_round_trip_checkout_paths(self):
+        for text, host, directory in (
+            ("ssh://me@gpu-box:2222", "ssh://me@gpu-box:2222", "~/chatlab"),
+            ("ssh://me@[::1]:2222", "ssh://me@[::1]:2222", "~/chatlab"),
+            ("ssh://me@gpu-box:2222#/srv/chat%20lab", "ssh://me@gpu-box:2222", "/srv/chat lab"),
+            ("ssh://gpu-box#relative/path:with%23mark", "ssh://gpu-box", "relative/path:with#mark"),
+        ):
+            with self.subTest(text=text):
+                target = remote.RemoteTarget.parse(text)
+                self.assertEqual(target, remote.RemoteTarget(host, directory))
+                self.assertEqual(remote.RemoteTarget.parse(str(target)), target)
+
+    def test_malformed_ssh_uris_are_refused_before_connecting_to_another_host(self):
+        for text in ("ssh://", "ssh://me:password@gpu-box", "ssh://gpu-box:bad", "ssh://gpu-box:65536",
+                     "ssh://gpu-box:0", "ssh://gpu box", "ssh://gpu-box/path", "ssh://gpu-box?x=y"):
+            with self.subTest(text=text), self.assertRaises(remote.RemoteError):
+                remote.RemoteTarget.parse(text)
+
+    @unittest.skipUnless(shutil.which("ssh"), "OpenSSH is unavailable")
+    def test_openssh_receives_the_uri_user_host_and_port(self):
+        target = remote.RemoteTarget.parse("ssh://me@gpu-box:2222#/srv/chatlab")
+        config = subprocess.check_output(["ssh", "-G", "-F", "/dev/null", target.host], text=True, stderr=subprocess.DEVNULL).splitlines()
+        self.assertIn("user me", config)
+        self.assertIn("hostname gpu-box", config)
+        self.assertIn("port 2222", config)
+        self.assertEqual(target.directory, "/srv/chatlab")
+
     def test_nothing_entered_is_refused(self):
         for text in ("", "   ", ":~/chatlab"):
             with self.subTest(text=text), self.assertRaises(remote.RemoteError):
@@ -135,6 +162,13 @@ class SavedTargetTests(unittest.TestCase):
             remote.save_target(path, remote.RemoteTarget("gpu-box", "/srv/chatlab"))
 
             self.assertEqual(remote.load_target(path), remote.RemoteTarget("gpu-box", "/srv/chatlab"))
+
+    def test_the_saved_ssh_uri_keeps_its_port_and_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "remote-host"
+            target = remote.RemoteTarget.parse("ssh://me@[::1]:2222#/srv/chat%20lab")
+            remote.save_target(path, target)
+            self.assertEqual(remote.load_target(path), target)
 
 
 class StdinWatchTests(unittest.TestCase):

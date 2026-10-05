@@ -424,7 +424,7 @@ class RemoteConnection:
     when the session ends for any reason. Only one session runs at a time.
     """
 
-    PROMPT = "Run ChatLab on an SSH host. Enter host or host:path to its checkout (the path defaults to ~/chatlab)."
+    PROMPT = "Run ChatLab on an SSH host. Enter host, host:path, or ssh://user@host:port#path (the path defaults to ~/chatlab)."
 
     def __init__(self, window, local_url: str, saved: Path, session_factory=remote.RemoteSession) -> None:
         self.window = window

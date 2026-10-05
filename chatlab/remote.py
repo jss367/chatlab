@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.error import URLError
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 
@@ -67,9 +67,9 @@ class RemoteError(Exception):
 class RemoteTarget:
     """An SSH host and the ChatLab checkout on it, written ``host:path``.
 
-    The host is anything ``ssh`` accepts, including an alias from
-    ``~/.ssh/config``. An IPv6 literal would need its colons, so give one an
-    alias instead.
+    SSH aliases and ``ssh://user@host:port`` destinations are accepted.
+    URI checkout paths follow ``#`` so colons in ports and IPv6 addresses
+    cannot be confused with the ``host:path`` checkout separator.
     """
 
     host: str
@@ -77,7 +77,24 @@ class RemoteTarget:
 
     @classmethod
     def parse(cls, text: str) -> RemoteTarget:
-        host, _, directory = text.strip().partition(":")
+        text = text.strip()
+        if text.lower().startswith("ssh://"):
+            uri = "ssh://" + text[6:]
+            host, _, fragment = uri.partition("#")
+            try:
+                parts = urlsplit(host)
+                port = parts.port
+                valid = (
+                    bool(parts.hostname) and parts.password is None and not parts.path and not parts.query
+                    and not any(character.isspace() for character in host)
+                    and (port is None or port > 0)
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise RemoteError("Enter an SSH URI such as ssh://user@host:2222; checkout paths follow #.")
+            return cls(host, unquote(fragment) if fragment else DEFAULT_DIRECTORY)
+        host, _, directory = text.partition(":")
         host = host.strip()
         directory = directory.strip() or DEFAULT_DIRECTORY
         if not host:
@@ -88,6 +105,9 @@ class RemoteTarget:
         return cls(host, directory)
 
     def __str__(self) -> str:
+        if self.host.lower().startswith("ssh://"):
+            suffix = "" if self.directory == DEFAULT_DIRECTORY else "#" + quote(self.directory, safe="/~:")
+            return self.host + suffix
         return f"{self.host}:{self.directory}"
 
 
