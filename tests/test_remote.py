@@ -78,6 +78,14 @@ class TargetTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(remote.RemoteError):
                 remote.RemoteTarget.parse(text)
 
+    def test_nul_bytes_in_hosts_and_checkout_paths_are_rejected(self):
+        for text in ("gpu\x00-box", "gpu-box:/srv/chat\x00lab", "ssh://gpu-box#%2Fsrv%2Fchat%00lab",
+                     "ssh://gpu%00-box", "ssh://me%00@gpu-box"):
+            with self.subTest(text=text), self.assertRaisesRegex(remote.RemoteError, "NUL"):
+                remote.RemoteTarget.parse(text)
+        with self.assertRaisesRegex(remote.RemoteError, "NUL"):
+            remote.RemoteTarget("gpu-box", "/srv/chat\x00lab")
+
     @unittest.skipUnless(shutil.which("ssh"), "OpenSSH is unavailable")
     def test_openssh_receives_the_uri_user_host_and_port(self):
         target = remote.RemoteTarget.parse("ssh://me@gpu-box:2222#/srv/chatlab")
@@ -708,6 +716,28 @@ class RemoteConnectionTests(unittest.TestCase):
         self.assertEqual(window.named("set_title")[-1], [WINDOW_TITLE])
         self.assertIn("Host key verification failed.", window.named("dialog")[0][0])
         self.assertIsNone(remote.load_target(self.saved))
+
+    def test_a_nul_checkout_is_refused_before_startup_and_connect_remains_available(self):
+        window = FakeWindow("ssh://gpu-box#%2Fsrv%2Fchat%00lab")
+        connection = self.connection(window)
+        connection.connect()
+        self.assertIsNone(connection.session)
+        self.assertEqual(self.sessions, [])
+        self.assertEqual(window.named("set_title"), [])
+        self.assertIn("NUL", window.named("dialog")[-1][0])
+        window.answer = "gpu-box"
+        connection.connect()
+        self.assertIs(connection.session, self.sessions[0])
+        self.assertEqual(window.named("set_title")[-1], [f"{WINDOW_TITLE} — gpu-box"])
+
+    def test_invalid_subprocess_arguments_restore_the_window(self):
+        window = FakeWindow("gpu-box")
+        connection = RemoteConnection(window, self.LOCAL, self.saved)
+        with mock.patch("chatlab.remote.subprocess.Popen", side_effect=ValueError("embedded null byte")):
+            connection.connect()
+        self.assertIsNone(connection.session)
+        self.assertEqual(window.named("set_title")[-1], [WINDOW_TITLE])
+        self.assertIn("embedded null byte", window.named("dialog")[-1][0])
 
     def test_control_directory_failure_restores_the_window_and_allows_retry(self):
         window = FakeWindow("gpu-box")

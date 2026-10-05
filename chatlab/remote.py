@@ -75,6 +75,11 @@ class RemoteTarget:
     host: str
     directory: str = DEFAULT_DIRECTORY
 
+    def __post_init__(self) -> None:
+        host = unquote(self.host) if self.host.lower().startswith("ssh://") else self.host
+        if "\x00" in host or "\x00" in self.directory:
+            raise RemoteError("SSH hosts and checkout paths cannot contain NUL characters.")
+
     @classmethod
     def parse(cls, text: str) -> RemoteTarget:
         text = text.strip()
@@ -218,7 +223,7 @@ class RemoteSession:
                 # Its own session, so a signal meant for the app is not also
                 # delivered to SSH, and closing is this class's decision.
                 process = subprocess.Popen([self.ssh, *arguments], start_new_session=True, **options)
-            except OSError as error:
+            except (OSError, ValueError) as error:
                 raise RemoteError(f"Could not run ssh: {error}") from error
             setattr(self, name, process)
             return process
