@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import multiprocessing
 import socket
@@ -17,6 +18,7 @@ from chatlab import branding
 from chatlab import desktop
 from chatlab import logs
 from chatlab import device_memory
+from chatlab import remote
 from chatlab import updater
 from chatlab.app import build_app, current_manager
 from chatlab.desktop_smoke import (
@@ -41,6 +43,9 @@ LOOPBACK_ADDRESS = "127.0.0.1"
 # range macOS hands out for connections of its own, so a window that has to
 # fall back to any free port cannot be handed this one by accident.
 DESKTOP_PORT = 47890
+# The local end of a remote session's port forward, fixed for the same
+# reason: a remote window keeps its pane widths from one session to the next.
+REMOTE_PORT = 47891
 
 # What Settings is told when the restart it asked for is not its to make,
 # and when the one it was granted could not be started after all.
@@ -88,6 +93,12 @@ def port_is_free(port: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def remote_port() -> int:
+    """The local port a remote session's forward listens on."""
+
+    return REMOTE_PORT if port_is_free(REMOTE_PORT) else find_available_port()
 
 
 def start_local_server():
@@ -405,6 +416,113 @@ class UpdateFlow:
             self._window_call("set_title", f"{WINDOW_TITLE} — downloading update ({received >> 20} MB)")
 
 
+class RemoteConnection:
+    """The window's remote session, if it has one, and the menu that runs it.
+
+    The window shows the local server until a session starts, then the
+    forwarded address of the remote one, and goes back to the local server
+    when the session ends for any reason. Only one session runs at a time.
+    """
+
+    PROMPT = "Run ChatLab on an SSH host. Enter host or host:path to its checkout (the path defaults to ~/chatlab)."
+
+    def __init__(self, window, local_url: str, saved: Path, session_factory=remote.RemoteSession) -> None:
+        self.window = window
+        self.local_url = local_url
+        self.saved = saved
+        self.session_factory = session_factory
+        self._lock = threading.Lock()
+        self.session: remote.RemoteSession | None = None
+
+    def connect(self) -> None:
+        """Ask for a host, start ChatLab there, and show it in the window."""
+
+        with self._lock:
+            current = self.session
+        if current is not None:
+            self._say(f"ChatLab is already connected to {current.target.host}. Disconnect first.")
+            return
+        last = remote.load_target(self.saved)
+        answer = self._window_call(
+            "evaluate_js", f"prompt({json.dumps(self.PROMPT)}, {json.dumps(str(last) if last else '')})"
+        )
+        if not isinstance(answer, str) or not answer.strip():
+            return
+        try:
+            target = remote.RemoteTarget.parse(answer)
+        except remote.RemoteError as error:
+            self._say(str(error))
+            return
+        session = self.session_factory(target, local_port=remote_port(), on_lost=self._lost)
+        with self._lock:
+            if self.session is not None:
+                return
+            self.session = session
+        self._window_call("set_title", f"{WINDOW_TITLE} — connecting to {target.host}…")
+        try:
+            url = session.start()
+        except remote.RemoteError as error:
+            logging.warning("Could not connect to %s: %s", target, error)
+            with self._lock:
+                # A Disconnect while connecting took the session already and
+                # put the window back; that stop is the reader's own doing.
+                cancelled = self.session is not session
+                if not cancelled:
+                    self.session = None
+            if not cancelled:
+                self._window_call("set_title", WINDOW_TITLE)
+                self._say(f"Could not start ChatLab on {target.host}.\n\n{error}")
+            return
+        remote.save_target(self.saved, target)
+        # Under the lock, so a Disconnect or a lost connection cannot put the
+        # window back on this Mac between the check and the switch.
+        with self._lock:
+            if self.session is session:
+                self._window_call("load_url", url)
+                self._window_call("set_title", f"{WINDOW_TITLE} — {target.host}")
+
+    def disconnect(self) -> None:
+        """End the session and show this Mac's server again."""
+
+        with self._lock:
+            session, self.session = self.session, None
+        if session is None:
+            self._say("ChatLab is not connected to a remote host.")
+            return
+        session.close()
+        self._show_local()
+
+    def close(self) -> None:
+        """End any session on the way out, so no remote server outlives the app."""
+
+        with self._lock:
+            session, self.session = self.session, None
+        if session is not None:
+            session.close()
+
+    def _lost(self, session: remote.RemoteSession, reason: str) -> None:
+        with self._lock:
+            if self.session is not session:
+                return
+            self.session = None
+        self._show_local()
+        self._say(f"{reason}\n\nChatLab is showing this Mac again. Connect again from the Remote menu.")
+
+    def _show_local(self) -> None:
+        self._window_call("load_url", self.local_url)
+        self._window_call("set_title", WINDOW_TITLE)
+
+    def _say(self, message: str) -> None:
+        self._window_call("create_confirmation_dialog", "ChatLab", message)
+
+    def _window_call(self, method: str, *args):
+        try:
+            return getattr(self.window, method)(*args)
+        except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
+            logging.info("Window call %s skipped: %s", method, error)
+            return None
+
+
 def run_desktop() -> int:
     """Open ChatLab in a native WebKit window until the user quits."""
 
@@ -416,6 +534,7 @@ def run_desktop() -> int:
     bundle = updater.running_app_bundle()
     window = None
     flow: UpdateFlow | None = None
+    connection: RemoteConnection | None = None
 
     def restart() -> str | None:
         """Quit and open a fresh copy, which Settings asks for after a change.
@@ -474,6 +593,7 @@ def run_desktop() -> int:
             zoomable=True,
         )
         flow = UpdateFlow(window, bundle)
+        connection = RemoteConnection(window, local_url, support_directory / "remote-host")
 
         def after_startup() -> None:
             # Runs once the native window is up, so a release that fails to
@@ -501,6 +621,13 @@ def run_desktop() -> int:
                     ],
                 ),
                 Menu(
+                    "Remote",
+                    [
+                        MenuAction("Connect to Remote Host…", lambda: connection.connect()),
+                        MenuAction("Disconnect", lambda: connection.disconnect()),
+                    ],
+                ),
+                Menu(
                     "Help",
                     [
                         MenuAction("ChatLab Releases", lambda: webbrowser.open(updater.RELEASES_PAGE_URL)),
@@ -511,6 +638,8 @@ def run_desktop() -> int:
     finally:
         if flow is not None:
             flow.wait_for_swap()
+        if connection is not None:
+            connection.close()
         logging.info("Stopping ChatLab")
         demo.close(verbose=False)
     return 0
