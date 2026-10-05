@@ -178,6 +178,30 @@ class SessionConcurrencyTests(unittest.TestCase):
         session._tail.append(Line("original output"))
         self.assertEqual(session._failure("Stopped"), "Stopped\n\noriginal output")
 
+    def test_exit_failure_waits_for_buffered_server_diagnostics(self):
+        session = remote.RemoteSession(remote.RemoteTarget("gpu-box"), local_port=18082)
+        entered, release, done = threading.Event(), threading.Event(), threading.Event()
+        def lines():
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("diagnostics were not released")
+            yield "Permission denied (publickey).\n"
+        session._server = mock.Mock(stdout=lines(), poll=lambda: 255)
+        session._reader = threading.Thread(target=session._read_server, args=(session._server,))
+        messages = []
+        report = threading.Thread(target=lambda: (messages.append(session._failure("Stopped")), done.set()))
+        session._reader.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            report.start()
+            self.assertFalse(done.wait(0.1))
+        finally:
+            release.set()
+            session._reader.join(3)
+            report.join(3)
+        self.assertTrue(done.is_set())
+        self.assertEqual(messages, ["Stopped\n\nPermission denied (publickey)."])
+
     def test_invalid_ready_ports_are_reported_as_remote_errors(self):
         session = remote.RemoteSession(remote.RemoteTarget("gpu-box"), local_port=18082)
         for address in ("http://127.0.0.1:bad/", "http://127.0.0.1:65536/", "http://[broken:123/"):
@@ -238,6 +262,17 @@ class SessionTests(unittest.TestCase):
         with urlopen(f"{url.rstrip('/')}{api.API_PREFIX}/chatlab/status", timeout=5) as response:
             self.assertEqual(response.status, 200)
             self.assertEqual(json.load(response)["path"], f"{api.API_PREFIX}/chatlab/status")
+
+    def test_readiness_uses_the_tunnel_even_with_environment_http_proxies(self):
+        with mock.patch.dict(os.environ, {
+            "HTTP_PROXY": "http://127.0.0.1:1", "http_proxy": "http://127.0.0.1:1",
+            "NO_PROXY": "", "no_proxy": "",
+        }), mock.patch("urllib.request._opener", None), mock.patch("urllib.request.proxy_bypass", return_value=False):
+            session = self.session(tunnel_timeout=2)
+            try:
+                self.assertEqual(session.start(), f"http://127.0.0.1:{session.local_port}/")
+            finally:
+                session.close()
 
     def test_disconnecting_stops_the_remote_server(self):
         session = self.session()

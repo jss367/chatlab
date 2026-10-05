@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 
 
@@ -155,6 +155,7 @@ class RemoteSession:
         self._closed = threading.Event()
         self._shutdown = threading.Event()
         self._ready = threading.Event()
+        self._server_drained = threading.Event()
         self._remote_address: str | None = None
         self._tail: collections.deque[str] = collections.deque(maxlen=TAIL_LINES)
         self._tunnel_tail: collections.deque[str] = collections.deque(maxlen=TAIL_LINES)
@@ -163,6 +164,7 @@ class RemoteSession:
         self._tunnel: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
         self._tunnel_reader: threading.Thread | None = None
+        self._probe = build_opener(ProxyHandler({}))
 
     @property
     def closed(self) -> bool:
@@ -241,15 +243,18 @@ class RemoteSession:
         return self._remote_address
 
     def _read_server(self, process: subprocess.Popen) -> None:
-        for line in process.stdout:
-            line = line.rstrip("\r\n")
-            if line.startswith(READY_MARKER) and not self._ready.is_set():
-                self._remote_address = line[len(READY_MARKER):].strip()
-                self._ready.set()
-                continue
-            with self._lock:
-                self._tail.append(line)
-            logger.info("[%s] %s", self.target.host, line)
+        try:
+            for line in process.stdout:
+                line = line.rstrip("\r\n")
+                if line.startswith(READY_MARKER) and not self._ready.is_set():
+                    self._remote_address = line[len(READY_MARKER):].strip()
+                    self._ready.set()
+                    continue
+                with self._lock:
+                    self._tail.append(line)
+                logger.info("[%s] %s", self.target.host, line)
+        finally:
+            self._server_drained.set()
 
     def _start_tunnel(self, remote_address: str) -> None:
         try:
@@ -312,7 +317,7 @@ class RemoteSession:
             if self._server.poll() is not None:
                 raise RemoteError(self._failure(f"ChatLab on {self.target.host} stopped."))
             try:
-                with urlopen(status_url, timeout=5) as response:
+                with self._probe.open(status_url, timeout=5) as response:
                     if response.status == 200:
                         return
             except (URLError, OSError):
@@ -322,6 +327,8 @@ class RemoteSession:
             time.sleep(0.25)
 
     def _failure(self, summary: str) -> str:
+        if self._reader is not None and self._server.poll() is not None:
+            self._server_drained.wait(STOP_TIMEOUT)
         with self._lock:
             lines = tuple(self._tail)
         tail = "\n".join(line for line in lines if line.strip())
