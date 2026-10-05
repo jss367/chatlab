@@ -21,6 +21,7 @@ import html
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
 
 import gradio as gr
@@ -161,7 +162,7 @@ def _messages_before_reply(turns: list[dict] | None, system_prompt: str) -> list
 
 def token_regions(
     tokens: list[dict], context_count: int, messages: list[dict], marked: str = "",
-    *, prompt_text: str = "", prompt_spans=(), base_regions=None,
+    *, prompt_text: str = "", prompt_spans=(), base_regions=None, message_spans=None,
 ) -> list[str]:
     """The region of every position: see the module docstring.
 
@@ -197,7 +198,20 @@ def token_regions(
         content = content.strip() if isinstance(content, str) else ""
         if not content:
             continue
-        found = text.find(content, cursor)
+        bounds = message_spans[index] if message_spans is not None else None
+        if bounds is None:
+            found = text.find(content, cursor)
+            # Legacy traces without template metadata still must not match
+            # a role name inside a delimiter or its transcript heading.
+            reserved = [match.span() for match in re.finditer(
+                r"<[^<>]*>|\[(?:/?INST|/?SYS)\]|(?m:^)(?:System|User|Assistant):", text
+            )]
+            while found >= 0 and any(
+                low <= found and found + len(content) <= high for low, high in reserved
+            ):
+                found = text.find(content, found + 1)
+            bounds = (found, found + len(content))
+        found, end = bounds
         if found < 0:
             continue
         if message.get("role") == "system":
@@ -206,8 +220,8 @@ def token_regions(
             label = USER
         else:
             label = EARLIER_TURNS
-        paint(found, found + len(content), label)
-        cursor = found + len(content)
+        paint(found, end, label)
+        cursor = end
     passage = (marked or "").strip()
     if passage:
         start = text.find(passage)
@@ -215,6 +229,39 @@ def token_regions(
             paint(start, start + len(passage), MARKED)
             start = text.find(passage, start + len(passage))
     return labels + [REPLY] * (len(tokens) - context_count)
+
+
+def _message_spans(text, messages, turns):
+    """Locate content between the template's own unchanged prefix and suffix.
+
+    A temporary unique content marker is rendered and decoded through the
+    same tokenizer. It identifies the slot even when the message repeats a
+    role delimiter's spelling; no model forward pass is needed.
+    """
+
+    turn = next((turn for turn in reversed(turns or []) if turn.get("role") == "assistant"), {})
+    settings = turn.get("generation_settings") or {}
+    mode = turn.get("thinking_mode") or settings.get("thinking_mode") or "default"
+    spans = []
+    for index, message in enumerate(messages):
+        if not isinstance(message.get("content"), str) or not message["content"].strip():
+            spans.append(None)
+            continue
+        marker = "CHATLAB_REGION_" + uuid.uuid4().hex
+        probe = [dict(item) for item in messages]
+        probe[index]["content"] = marker
+        ids, _, _ = runtime.MANAGER._response_prompt(
+            probe, tools=None, thinking_mode=mode, prompt_override_ids=None,
+        )
+        decoded = runtime.MANAGER._decode_ids(ids)
+        if decoded.count(marker) != 1:
+            spans.append(None)
+            continue
+        prefix, suffix = decoded.split(marker)
+        end = len(text) - len(suffix)
+        spans.append((len(prefix), end) if
+                     text.startswith(prefix) and text.endswith(suffix) and len(prefix) <= end else None)
+    return spans
 
 
 def _prompt_edit_regions(trace, turns, messages):
@@ -233,6 +280,7 @@ def _prompt_edit_regions(trace, turns, messages):
     text, spans = _decoded_prompt(runtime.MANAGER.tokenizer, source_ids)
     labels = token_regions(
         [{} for _ in source_ids], len(source_ids), messages, prompt_text=text, prompt_spans=spans,
+        message_spans=_message_spans(text, messages, turns),
     )
     actual = [token["token_id"] for token in trace.tokens[:trace.context_count]]
     at = int(edit["position"]) - 1
@@ -471,6 +519,9 @@ def trace_reply(
             return
         messages = _messages_before_reply(conversation, system_prompt)
         source_regions = _prompt_edit_regions(trace, conversation, messages)
+        message_spans = None if source_regions is not None else _message_spans(
+            trace.prompt_text, messages, conversation,
+        )
         label = heads_label(trace.heads, trace.layer_count, trace.head_count)
         state = {
             "generation": generation,
@@ -480,10 +531,12 @@ def trace_reply(
             "prompt_text": trace.prompt_text,
             "prompt_spans": trace.prompt_spans,
             "source_regions": source_regions,
+            "message_spans": message_spans,
             "regions": token_regions(
                 trace.tokens, trace.context_count, messages, marked,
                 prompt_text=trace.prompt_text, prompt_spans=trace.prompt_spans,
                 base_regions=source_regions,
+                message_spans=message_spans,
             ),
             "rows": trace.rows,
             "key_shares": trace.key_shares,
@@ -522,6 +575,7 @@ def remark(state, marked, region, top):
         state["tokens"], state["context_count"], state["messages"], marked,
         prompt_text=state.get("prompt_text", ""), prompt_spans=state.get("prompt_spans", ()),
         base_regions=state.get("source_regions"),
+        message_spans=state.get("message_spans"),
     )
     choices = region_choices(state)
     region = region if region in choices else choices[0]

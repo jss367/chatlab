@@ -3,6 +3,7 @@
 import base64
 import json
 import re
+import string
 import unittest
 from unittest import mock
 
@@ -142,6 +143,40 @@ class TorchTraceTests(unittest.TestCase):
 
 
 class FakeModelTraceTests(unittest.TestCase):
+    def test_template_boundaries_win_over_duplicate_preamble_and_role_marker_text(self):
+        class NativeTokenizer(FakeTokenizer):
+            chat_template = "native"
+
+            def apply_chat_template(self, messages, tokenize=True, **kwargs):
+                text = "preamble user;" + "".join(
+                    f"<|{message['role']}|>\n{message['content']}<|end|>\n" for message in messages
+                ) + "<|assistant|>"
+                return self(text, add_special_tokens=False)["input_ids"] if tokenize else text
+
+        pieces = ["<|user|>", "<|end|>", "<|assistant|>", "\n", "user", "reply", "preamble ", "user;"]
+        pieces += list(string.ascii_letters + string.digits + "_; ")
+        manager = lens_manager([1, 2, 3])
+        manager.tokenizer = NativeTokenizer(pieces)
+        with mock.patch.object(runtime, "MANAGER", manager):
+            for content in ("user", "preamble user;"):
+                with self.subTest(content=content):
+                    messages = [{"role": "user", "content": content}]
+                    ids, _, _ = manager._response_prompt(
+                        messages, tools=None, thinking_mode="default", prompt_override_ids=None,
+                    )
+                    generation = new_metrics_generation()
+                    _panel, state, *_ = list(attention_trace.trace_reply(
+                        (generation, [{"token_id": 5}]), (generation, ids, manager.load_id),
+                        messages + [{"role": "assistant", "content": "reply"}],
+                        "", "all", "", "user message", 4,
+                    ))[0]
+                    count = len(manager.tokenizer(content, add_special_tokens=False)["input_ids"])
+                    expected = ["template"] * len(ids) + ["earlier reply"]
+                    expected[4:4 + count] = ["user message"] * count
+                    self.assertEqual(state["regions"], expected)
+                    _panel, remarked, *_ = attention_trace.remark(state, "", "user message", 4)
+                    self.assertEqual(remarked["regions"], expected)
+
     def test_sentencepiece_regions_and_remarking_use_the_complete_prompt(self):
         manager = lens_manager([1, 2, 3])
         manager.tokenizer = SentencePieceTokenizer(["▁user:", "▁hello", "▁world", "▁reply"])
@@ -243,6 +278,15 @@ def tokens(*pieces):
 
 
 class RegionTests(unittest.TestCase):
+    def test_legacy_region_matching_skips_role_delimiters_and_transcript_headings(self):
+        self.assertEqual(attention_trace.token_regions(
+            tokens("<|user|>", "\n", "user", "<|end|>"), 4,
+            [{"role": "user", "content": "user"}],
+        ), ["template", "template", "user message", "template"])
+        self.assertEqual(attention_trace.token_regions(
+            tokens("User:", " ", "User"), 3, [{"role": "user", "content": "User"}],
+        ), ["template", "template", "user message"])
+
     MESSAGES = [
         {"role": "system", "content": "Be brief."},
         {"role": "user", "content": "Hi there"},
