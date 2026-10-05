@@ -85,11 +85,12 @@ class CommandTests(unittest.TestCase):
 
 class SSHConfigurationTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("ssh"), "OpenSSH is unavailable")
-    def test_server_suppresses_inherited_forwards_and_tunnel_owns_them_once(self):
+    def test_owned_master_preserves_alias_auth_and_adds_only_the_generated_forward(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config"
-            config.write_text("Host fixture-gpu\n  HostName 127.0.0.1\n  LocalForward 18080 127.0.0.1:8080\n  DynamicForward 18081\n  ControlMaster auto\n  ControlPath /tmp/chatlab-fixture-master\n  ControlPersist 60\n  RemoteCommand tmux attach\n  ClearAllForwardings yes\n  StdinNull yes\n  ForkAfterAuthentication yes\n  SessionType none\n")
+            config.write_text("Host fixture-gpu\n  HostName 127.0.0.1\n  User fixture-user\n  IdentityFile /tmp/fixture-key\n  LocalForward 18080 127.0.0.1:8080\n  RemoteForward 18083 127.0.0.1:8083\n  DynamicForward 18081\n  ControlMaster auto\n  ControlPath /tmp/chatlab-fixture-master\n  ControlPersist 60\n  RemoteCommand tmux attach\n  ClearAllForwardings yes\n  StdinNull yes\n  ForkAfterAuthentication yes\n  SessionType none\n")
             session = remote.RemoteSession(remote.RemoteTarget("fixture-gpu"), local_port=18082)
+            self.addCleanup(session.close)
             captured = []
             def spawn(name, arguments, **options):
                 captured.append(arguments)
@@ -101,26 +102,28 @@ class SSHConfigurationTests(unittest.TestCase):
                     session._start_tunnel("http://127.0.0.1:8123/")
             # -G only expands this controlled fixture config: it makes no connection.
             server = subprocess.check_output(["ssh", "-G", "-F", str(config), *captured[0]], text=True).splitlines()
-            # -G takes no command, so the forward's is checked apart.
-            *tunnel_arguments, tunnel_command = captured[1]
-            tunnel = subprocess.check_output(["ssh", "-G", "-F", str(config), *tunnel_arguments], text=True).splitlines()
-            self.assertFalse(any(line.startswith(("localforward ", "dynamicforward ")) for line in server))
+            tunnel = subprocess.check_output(["ssh", "-G", "-F", str(config), *captured[1]], text=True).splitlines()
+            self.assertFalse(any(line.startswith(("localforward ", "dynamicforward ", "remoteforward ")) for line in server))
             self.assertIn("clearallforwardings yes", server)
             self.assertIn("stdinnull no", server)
             self.assertIn("sessiontype default", server)
-            self.assertIn("clearallforwardings no", tunnel)
-            # A session reading stdin, so the forward ends with the app.
-            self.assertIn("sessiontype default", tunnel)
-            self.assertIn("stdinnull no", tunnel)
-            self.assertEqual(tunnel_command, remote.TUNNEL_COMMAND)
-            self.assertEqual(len([line for line in tunnel if line.startswith("localforward ")]), 2)
-            self.assertEqual(len([line for line in tunnel if line.startswith("dynamicforward ")]), 1)
-            self.assertTrue(any("18082" in line and "8123" in line for line in tunnel if line.startswith("localforward ")))
-            for lines in (server, tunnel):
-                self.assertIn("controlmaster false", lines)
-                self.assertIn("controlpersist no", lines)
-                self.assertIn("forkafterauthentication no", lines)
-                self.assertFalse(any(line.startswith("remotecommand ") for line in lines))
+            self.assertIn("controlmaster true", server)
+            self.assertIn("hostname 127.0.0.1", server)
+            self.assertIn("user fixture-user", server)
+            self.assertIn("identityfile /tmp/fixture-key", server)
+            self.assertIn(f"controlpath {session._control_path}", server)
+            # The local control request reads no alias config, including occupied forwards.
+            forwards = [line for line in tunnel if line.startswith("localforward ")]
+            self.assertEqual(len(forwards), 1)
+            self.assertIn("18082", forwards[0])
+            self.assertIn("8123", forwards[0])
+            self.assertFalse(any(line.startswith(("dynamicforward ", "remoteforward ")) for line in tunnel))
+            self.assertIn(f"controlpath {session._control_path}", tunnel)
+            self.assertIn("controlpersist no", server)
+            self.assertIn("forkafterauthentication no", server)
+            self.assertFalse(any(line.startswith("remotecommand ") for line in server))
+            self.assertEqual(Path(session._control_directory.name).stat().st_mode & 0o777, 0o700)
+
 
 
 class SavedTargetTests(unittest.TestCase):
@@ -157,7 +160,7 @@ class SessionConcurrencyTests(unittest.TestCase):
             if not release.wait(3):
                 raise AssertionError("cleanup was not released")
         tunnel = mock.Mock(stderr=io.StringIO(), wait=wait)
-        session._tunnel = tunnel
+        session._forward_request = tunnel
         first = threading.Thread(target=session.close)
         second = threading.Thread(target=lambda: (session.close(), done.set()))
         first.start()
@@ -292,28 +295,59 @@ class SessionTests(unittest.TestCase):
                 f"target = remote.RemoteTarget('gpu-box', {str(self.checkout)!r})\n"
                 f"session = remote.RemoteSession(target, local_port={port}, ssh={str(self.ssh)!r})\n"
                 "session.start()\n"
-                "print(session._tunnel.pid, flush=True)\n"
+                "import json\n"
+                "print(json.dumps([session._server.pid, session._control_directory.name]), flush=True)\n"
                 "sys.stdin.read()\n",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
         )
+        control_directory = None
         try:
-            tunnel_pid = int(holder.stdout.readline())
+            tunnel_pid, control_directory = json.loads(holder.stdout.readline())
             server_pid = self.server_pid()
 
             holder.kill()
             holder.wait()
 
             self.assertTrue(_gone(server_pid), "the remote server outlived the app")
-            self.assertTrue(_gone(tunnel_pid), "the port forward outlived the app")
+            self.assertTrue(_gone(tunnel_pid), "the owned SSH connection outlived the app")
+            with self.assertRaises(OSError):
+                socket.create_connection(("127.0.0.1", port), timeout=1)
         finally:
             if holder.poll() is None:
                 holder.kill()
                 holder.wait()
             holder.stdin.close()
             holder.stdout.close()
+            if control_directory is not None:
+                shutil.rmtree(control_directory, ignore_errors=True)
+
+    def test_disconnecting_during_the_forward_control_request_stops_startup(self):
+        session = self.session()
+        entered = threading.Event()
+        spawn = session._spawn
+        def captured(name, *args, **kwargs):
+            process = spawn(name, *args, **kwargs)
+            if name == "_forward_request":
+                entered.set()
+            return process
+        failures = []
+        with mock.patch.dict(os.environ, {"FAKE_SSH_FORWARD_DELAY": "3"}), mock.patch.object(session, "_spawn", side_effect=captured):
+            worker = threading.Thread(target=lambda: self._start_expecting_failure(session, failures))
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                session.close()
+            finally:
+                session.close()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, ["The connection was cancelled."])
+        self.assertIsNotNone(session._server.poll())
+        self.assertIsNotNone(session._forward_request.poll())
+        self.assertFalse(Path(session._control_directory.name).exists())
 
     def test_disconnecting_stops_the_remote_server(self):
         session = self.session()
@@ -323,6 +357,7 @@ class SessionTests(unittest.TestCase):
         session.close()
 
         self.assertTrue(_gone(pid), "the remote server outlived its session")
+        self.assertFalse(Path(session._control_directory.name).exists())
         with self.assertRaises(OSError):
             urlopen(f"http://127.0.0.1:{session.local_port}/", timeout=2)
 
@@ -334,15 +369,15 @@ class SessionTests(unittest.TestCase):
                 with urlopen(f"{url.rstrip('/')}{api.API_PREFIX}/chatlab/status", timeout=3) as response:
                     self.assertEqual(response.status, 200)
                 deadline = time.monotonic() + 3
-                while not session._tunnel_tail or "diagnostic 1023:" not in session._tunnel_tail[-1]:
+                while not any("diagnostic 1023:" in line for line in session._tail):
                     if time.monotonic() > deadline:
                         self.fail("the tunnel diagnostics were not drained")
                     time.sleep(0.01)
-                self.assertEqual(len(session._tunnel_tail), remote.TAIL_LINES)
-                self.assertIn("diagnostic 1023:", session._tunnel_tail[-1])
+                self.assertEqual(len(session._tail), remote.TAIL_LINES)
+                self.assertTrue(any("diagnostic 1023:" in line for line in session._tail))
             finally:
                 session.close()
-        self.assertFalse(session._tunnel_reader.is_alive())
+        self.assertFalse(session._reader.is_alive())
 
     def test_a_server_that_dies_is_reported_once_and_ends_the_session(self):
         lost = []

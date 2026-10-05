@@ -1,22 +1,20 @@
-"""Stands in for ``ssh`` in the remote session tests.
+"""Local stand-in for an owned SSH master and its forwarding control request.
 
-It ignores the host. Given a command, it runs it here through ``sh``, the
-way sshd would run it on the far side, and exits when it does. Given
-``-L``, it also listens on the local end and relays each connection to the
-target itself, the way a real forward would, and exits with SSH's status
-when it cannot listen.
+The master executes the remote command here. Its Unix control socket accepts
+only the generated forward and serves it until the command exits. No real
+SSH host or user configuration is accessed.
 """
 
+import json
 import os
 import socket
 import subprocess
 import sys
 import threading
+import time
 
-_listening = threading.Event()
 
-
-def _relay(source: socket.socket, sink: socket.socket) -> None:
+def _relay(source, sink):
     try:
         while data := source.recv(65536):
             sink.sendall(data)
@@ -29,19 +27,12 @@ def _relay(source: socket.socket, sink: socket.socket) -> None:
             pass
 
 
-def _forward(spec: str) -> None:
-    bind_host, bind_port, target_host, target_port = spec.split(":")
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        listener.bind((bind_host, int(bind_port)))
-    except OSError as error:
-        print(f"bind [{bind_host}]:{bind_port}: {error.strerror}", file=sys.stderr)
-        print("Could not request local forwarding.", file=sys.stderr)
-        os._exit(255)
-    listener.listen()
-    _listening.set()
+def _serve_forward(listener, target_host, target_port):
     while True:
-        client, _ = listener.accept()
+        try:
+            client, _ = listener.accept()
+        except OSError:
+            return
         try:
             upstream = socket.create_connection((target_host, int(target_port)))
         except OSError:
@@ -51,15 +42,41 @@ def _forward(spec: str) -> None:
         threading.Thread(target=_relay, args=(upstream, client), daemon=True).start()
 
 
-def main(arguments: list[str]) -> None:
-    forward = None
+def _serve_control(listener):
+    while True:
+        try:
+            client, _ = listener.accept()
+        except OSError:
+            return
+        with client, client.makefile("r") as stream:
+            bind_host, bind_port, target_host, target_port = json.loads(stream.readline()).split(":")
+            forward = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                forward.bind((bind_host, int(bind_port)))
+                forward.listen()
+            except OSError as error:
+                forward.close()
+                result = {"status": 255, "error": f"bind [{bind_host}]:{bind_port}: {error}\nCould not request local forwarding."}
+            else:
+                threading.Thread(target=_serve_forward, args=(forward, target_host, target_port), daemon=True).start()
+                result = {"status": 0, "error": ""}
+            client.sendall((json.dumps(result) + "\n").encode())
+
+
+def main(arguments):
+    forward = control_path = operation = None
     positional = []
     index = 0
     while index < len(arguments):
         argument = arguments[index]
-        if argument in ("-o", "-L"):
+        if argument in ("-o", "-L", "-S", "-O", "-F"):
+            value = arguments[index + 1]
             if argument == "-L":
-                forward = arguments[index + 1]
+                forward = value
+            elif argument == "-S":
+                control_path = value
+            elif argument == "-O":
+                operation = value
             index += 2
         elif argument.startswith("-"):
             index += 1
@@ -70,19 +87,26 @@ def main(arguments: list[str]) -> None:
     if refusal:
         print(refusal, file=sys.stderr)
         sys.exit(255)
+    if operation:
+        time.sleep(float(os.environ.get("FAKE_SSH_FORWARD_DELAY", "0")))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(control_path)
+            client.sendall((json.dumps(forward) + "\n").encode())
+            with client.makefile("r") as stream:
+                result = json.loads(stream.readline())
+            if result["error"]:
+                print(result["error"], file=sys.stderr)
+            sys.exit(result["status"])
     _host, *command = positional
-    if forward is not None:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(control_path)
+        listener.listen()
+        threading.Thread(target=_serve_control, args=(listener,), daemon=True).start()
         if os.environ.get("FAKE_SSH_VERBOSE_TUNNEL"):
             for index in range(1024):
                 print(f"diagnostic {index}: " + "x" * 512, file=sys.stderr)
             sys.stderr.flush()
-        threading.Thread(target=_forward, args=(forward,), daemon=True).start()
-        if not _listening.wait(5):
-            sys.exit(255)
-        if not command:
-            threading.Event().wait()
         sys.exit(subprocess.call(["sh", "-c", " ".join(command)]))
-    os.execvp("sh", ["sh", "-c", " ".join(command)])
 
 
 if __name__ == "__main__":

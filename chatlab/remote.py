@@ -5,12 +5,10 @@ anywhere the window can reach. A remote session starts ``python -m chatlab
 --remote`` in a checkout on another host, forwards a local port to it, and
 hands the window the forwarded address.
 
-Two SSH connections do the work. The first runs the server and reads the
-address it prints once it is up; the second carries the port forward. The
-server watches its standard input and exits when it closes, which happens
-when the first connection drops, this side ends it, or this process dies, so
-a GPU is not left holding a model nobody can reach. The forward ends the
-same way, so it never outlives the app holding the local port.
+One owned SSH connection runs the server and carries its port forward. The
+server watches standard input and exits when it closes, including when this
+app dies. A private control socket adds only ChatLab's forward after the
+server reports its address; unrelated configured forwards are suppressed.
 
 SSH runs in batch mode: keys, the agent and ``~/.ssh/config`` decide how it
 signs in, and a host that would ask for a password or a new host key is
@@ -24,6 +22,7 @@ import logging
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -48,16 +47,11 @@ TUNNEL_TIMEOUT = 30.0
 STOP_TIMEOUT = 5.0
 # How many lines of the server's output are kept for an error message.
 TAIL_LINES = 12
-# What the forward's connection runs on the host: nothing but a wait for its
-# input to close.
-TUNNEL_COMMAND = "cat > /dev/null"
 SSH_OPTIONS = (
     "-o", "BatchMode=yes",
     "-o", "RemoteCommand=none",
     "-o", "ForkAfterAuthentication=no",
-    # Session lifetime is owned here, rather than an existing user SSH master.
-    "-o", "ControlMaster=no",
-    "-o", "ControlPath=none",
+    # The owned foreground connection must never persist after its session.
     "-o", "ControlPersist=no",
     "-o", "ConnectTimeout=15",
     "-o", "ServerAliveInterval=15",
@@ -132,9 +126,9 @@ class RemoteSession:
     """One remote server and the forward that reaches it.
 
     ``start`` blocks until the window can load the forwarded address and
-    returns it. ``close`` ends both connections and may be called from any
+    returns it. ``close`` ends the connection and may be called from any
     thread, including while ``start`` is still waiting, which stops it.
-    ``on_lost`` is called with a reason if either connection ends after a
+    ``on_lost`` is called with a reason if the connection ends after a
     successful start without ``close`` having been asked for.
     """
 
@@ -162,12 +156,13 @@ class RemoteSession:
         self._server_drained = threading.Event()
         self._remote_address: str | None = None
         self._tail: collections.deque[str] = collections.deque(maxlen=TAIL_LINES)
-        self._tunnel_tail: collections.deque[str] = collections.deque(maxlen=TAIL_LINES)
-        self._tunnel_drained = threading.Event()
+        self._forward_drained = threading.Event()
+        self._forward_drained.set()
+        self._control_directory: tempfile.TemporaryDirectory | None = None
+        self._control_path: str | None = None
         self._server: subprocess.Popen | None = None
-        self._tunnel: subprocess.Popen | None = None
+        self._forward_request: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
-        self._tunnel_reader: threading.Thread | None = None
         self._probe = build_opener(ProxyHandler({}))
 
     @property
@@ -189,8 +184,7 @@ class RemoteSession:
         except BaseException:
             self.close()
             raise
-        for process, name in ((self._server, "server"), (self._tunnel, "port forward")):
-            threading.Thread(target=self._watch, args=(process, name), daemon=True).start()
+        threading.Thread(target=self._watch, args=(self._server, "server"), daemon=True).start()
         logger.info("Connected to ChatLab on %s at %s", self.target, url)
         return url
 
@@ -210,11 +204,18 @@ class RemoteSession:
             return process
 
     def _start_server(self) -> str:
+        with self._lock:
+            if self.closed:
+                raise RemoteError("The connection was cancelled.")
+            # Keep the Unix socket path short and its directory private.
+            self._control_directory = tempfile.TemporaryDirectory(prefix="chatlab-ssh-", dir="/tmp")
+            self._control_path = str(Path(self._control_directory.name) / "control")
         command = remote_command(self.target.directory)
         logger.info("Starting ChatLab on %s: %s", self.target.host, command)
         server = self._spawn(
             "_server",
-            ["-T", *SSH_OPTIONS, "-o", "ClearAllForwardings=yes",
+            ["-T", *SSH_OPTIONS, "-o", "ControlMaster=yes", "-S", self._control_path,
+             "-o", "ClearAllForwardings=yes",
              "-o", "StdinNull=no", "-o", "SessionType=default", self.target.host, command],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -271,48 +272,33 @@ class RemoteSession:
             raise RemoteError(f"ChatLab on {self.target.host} reported an address without a port: {remote_address}")
         forward = f"127.0.0.1:{self.local_port}:{host}:{port}"
         logger.info("Forwarding %s to %s on %s", self.local_port, remote_address, self.target.host)
-        # The forward runs a command that reads its input to the end, rather
-        # than -N, so it ends the way the server does when this process dies
-        # without closing it: the pipe closes, ``cat`` exits, and SSH with it.
-        # An -N forward would be orphaned holding the local port.
-        tunnel = self._spawn(
-            "_tunnel",
-            [
-                "-T", *SSH_OPTIONS, "-o", "ClearAllForwardings=no",
-                "-o", "StdinNull=no", "-o", "SessionType=default",
-                "-o", "ExitOnForwardFailure=yes", "-L", forward,
-                self.target.host, TUNNEL_COMMAND,
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        with self._lock:
+        if self._control_path is None:
+            raise RemoteError("The server connection has not started.")
+        # This is a local control request, not a second SSH connection.
+        # With no config, it requests only our -L on the existing connection;
+        # the master has already applied the alias's host/auth/proxy settings.
+        self._forward_drained.clear()
+        try:
+            request = self._spawn(
+                "_forward_request",
+                ["-F", "/dev/null", "-S", self._control_path, "-O", "forward",
+                 "-o", "ExitOnForwardFailure=yes", "-L", forward, self.target.host],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            try:
+                _, errors = request.communicate(timeout=self.tunnel_timeout)
+            except (subprocess.TimeoutExpired, OSError, ValueError) as error:
+                if self.closed:
+                    raise RemoteError("The connection was cancelled.") from error
+                raise RemoteError(f"The port forward to {self.target.host} could not be established: {error}") from error
             if self.closed:
                 raise RemoteError("The connection was cancelled.")
-            self._tunnel_reader = threading.Thread(target=self._read_tunnel, args=(tunnel,), daemon=True)
-            self._tunnel_reader.start()
-
-    def _read_tunnel(self, process: subprocess.Popen) -> None:
-        try:
-            for line in process.stderr:
-                line = line.rstrip("\r\n")
-                with self._lock:
-                    self._tunnel_tail.append(line)
-                logger.info("[%s port forward] %s", self.target.host, line)
+            if request.returncode:
+                tail = "\n".join(errors.strip().splitlines()[-TAIL_LINES:])
+                raise RemoteError(f"The port forward to {self.target.host} failed.\n\n{tail}".strip())
         finally:
-            self._tunnel_drained.set()
-
-    def _tunnel_failure(self, summary: str) -> str:
-        # Once SSH exits, let the reader collect its last diagnostic lines.
-        if self._tunnel_reader is not None:
-            self._tunnel_drained.wait(STOP_TIMEOUT)
-        with self._lock:
-            tail = "\n".join(self._tunnel_tail).strip()
-        return f"{summary}\n\n{tail}" if tail else summary
+            self._forward_drained.set()
 
     def _wait_for(self, url: str) -> None:
         """Poll the API's status route through the forward until it answers."""
@@ -324,8 +310,6 @@ class RemoteSession:
         while True:
             if self.closed:
                 raise RemoteError("The connection was cancelled.")
-            if self._tunnel.poll() is not None:
-                raise RemoteError(self._tunnel_failure(f"The port forward to {self.target.host} failed."))
             if self._server.poll() is not None:
                 raise RemoteError(self._failure(f"ChatLab on {self.target.host} stopped."))
             try:
@@ -349,15 +333,14 @@ class RemoteSession:
     def _watch(self, process: subprocess.Popen, name: str) -> None:
         process.wait()
         summary = f"The {name} connection to {self.target.host} ended."
-        reason = self._failure(summary) if process is self._server else self._tunnel_failure(summary)
-        # Only the watcher whose close is the one that ends the session
-        # reports it; the other connection ending behind it is that close.
+        reason = self._failure(summary)
+        # An explicit close must not also be reported as a lost connection.
         if self._close() and self.on_lost is not None:
             logger.warning("%s", reason)
             self.on_lost(self, reason)
 
     def close(self) -> None:
-        """End both connections; the server exits when its input closes."""
+        """End the owned connection; the server exits when its input closes."""
 
         self._close()
 
@@ -367,25 +350,29 @@ class RemoteSession:
             already_closed = self.closed
             if not already_closed:
                 self._closed.set()
-                server, tunnel = self._server, self._tunnel
+                server, request = self._server, self._forward_request
         if already_closed:
             self._shutdown.wait()
             return False
         try:
-            self._stop_processes(server, tunnel)
+            self._stop_processes(server, request)
         finally:
-            self._shutdown.set()
+            try:
+                if self._control_directory is not None:
+                    self._control_directory.cleanup()
+            finally:
+                self._shutdown.set()
         return True
 
-    def _stop_processes(self, server, tunnel) -> None:
+    def _stop_processes(self, server, request) -> None:
         logger.info("Disconnecting from %s", self.target.host)
-        for process in (server, tunnel):
+        for process in (server, request):
             if process is not None and process.stdin is not None:
                 try:
                     process.stdin.close()
                 except OSError:
                     pass
-        for process in (tunnel, server):
+        for process in (request, server):
             if process is None:
                 continue
             if process is server:
@@ -410,12 +397,12 @@ class RemoteSession:
                 reader.join(STOP_TIMEOUT)
             if reader is None or not reader.is_alive():
                 server.stdout.close()
-        if tunnel is not None:
-            reader = self._tunnel_reader
-            if reader is not None:
-                reader.join(STOP_TIMEOUT)
-            if reader is None or not reader.is_alive():
-                tunnel.stderr.close()
+        if request is not None and self._forward_drained.wait(STOP_TIMEOUT):
+            # communicate owns these streams until it finishes, even on cancel.
+            for stream in (request.stdout, request.stderr):
+                if stream is not None:
+                    stream.close()
+
 
 
 def exit_when_stdin_closes(stop: Callable[[], None], stream=None) -> threading.Thread:
