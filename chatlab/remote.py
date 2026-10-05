@@ -208,7 +208,10 @@ class RemoteSession:
             if self.closed:
                 raise RemoteError("The connection was cancelled.")
             # Keep the Unix socket path short and its directory private.
-            self._control_directory = tempfile.TemporaryDirectory(prefix="chatlab-ssh-", dir="/tmp")
+            try:
+                self._control_directory = tempfile.TemporaryDirectory(prefix="chatlab-ssh-", dir="/tmp")
+            except OSError as error:
+                raise RemoteError(f"Could not create the private SSH control directory: {error}") from error
             self._control_path = str(Path(self._control_directory.name) / "control")
         command = remote_command(self.target.directory)
         logger.info("Starting ChatLab on %s: %s", self.target.host, command)

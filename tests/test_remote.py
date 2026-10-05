@@ -675,6 +675,19 @@ class RemoteConnectionTests(unittest.TestCase):
         self.assertIn("Host key verification failed.", window.named("dialog")[0][0])
         self.assertIsNone(remote.load_target(self.saved))
 
+    def test_control_directory_failure_restores_the_window_and_allows_retry(self):
+        window = FakeWindow("gpu-box")
+        connection = RemoteConnection(window, self.LOCAL, self.saved)
+        with mock.patch("chatlab.remote.tempfile.TemporaryDirectory", side_effect=OSError(28, "No space left on device")), mock.patch("chatlab.remote.subprocess.Popen") as spawn:
+            connection.connect()
+            self.assertIsNone(connection.session)
+            self.assertEqual(window.named("set_title")[-1], [WINDOW_TITLE])
+            self.assertIn("No space left on device", window.named("dialog")[-1][0])
+            connection.connect()
+            self.assertIsNone(connection.session)
+            self.assertEqual(len(window.named("dialog")), 2)
+            spawn.assert_not_called()
+
     def test_disconnecting_while_connecting_is_not_reported_as_a_failure(self):
         def disconnected(session):
             connection.disconnect()
