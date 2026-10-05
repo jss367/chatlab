@@ -704,7 +704,6 @@ class JacobianLensTests(unittest.TestCase):
                 inspection.INSPECTION_CONTROLS.forget(other)
 
 
-@needs_mlx
 def qwen3_5_model(vocab):
     """A tiny Qwen3.5 image-text checkpoint: Gated DeltaNet and full attention alternate."""
     config = Qwen3_5Config(
@@ -917,6 +916,7 @@ class LargeLensTests(unittest.TestCase):
             self.assertIn("import_id", imported, status)
 
 
+@needs_mlx
 class MlxJacobianLensTests(unittest.TestCase):
     """The same lens read through an MLX conversion of the fitted model."""
 
