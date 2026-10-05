@@ -67,6 +67,10 @@ def main(arguments: list[str]) -> None:
         sys.exit(255)
     _host, *command = positional
     if forward is not None:
+        if os.environ.get("FAKE_SSH_VERBOSE_TUNNEL"):
+            for index in range(1024):
+                print(f"diagnostic {index}: " + "x" * 512, file=sys.stderr)
+            sys.stderr.flush()
         _forward(forward)
     else:
         os.execvp("sh", ["sh", "-c", " ".join(command)])

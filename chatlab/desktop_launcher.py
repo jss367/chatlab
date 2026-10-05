@@ -535,7 +535,7 @@ class RemoteConnection:
             session.close()
         for worker in workers:
             if worker is not threading.current_thread():
-                worker.join(4 * remote.STOP_TIMEOUT + 1)
+                worker.join(6 * remote.STOP_TIMEOUT + 1)
 
     def _lost(self, session: remote.RemoteSession, reason: str) -> None:
         with self._lock:

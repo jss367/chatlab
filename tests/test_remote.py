@@ -88,7 +88,7 @@ class SSHConfigurationTests(unittest.TestCase):
     def test_server_suppresses_inherited_forwards_and_tunnel_owns_them_once(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config"
-            config.write_text("Host fixture-gpu\n  HostName 127.0.0.1\n  LocalForward 18080 127.0.0.1:8080\n  DynamicForward 18081\n  ControlMaster auto\n  ControlPath /tmp/chatlab-fixture-master\n  ControlPersist 60\n")
+            config.write_text("Host fixture-gpu\n  HostName 127.0.0.1\n  LocalForward 18080 127.0.0.1:8080\n  DynamicForward 18081\n  ControlMaster auto\n  ControlPath /tmp/chatlab-fixture-master\n  ControlPersist 60\n  RemoteCommand tmux attach\n")
             session = remote.RemoteSession(remote.RemoteTarget("fixture-gpu"), local_port=18082)
             captured = []
             def spawn(name, arguments, **options):
@@ -109,6 +109,7 @@ class SSHConfigurationTests(unittest.TestCase):
             for lines in (server, tunnel):
                 self.assertIn("controlmaster false", lines)
                 self.assertIn("controlpersist no", lines)
+                self.assertFalse(any(line.startswith("remotecommand ") for line in lines))
 
 
 class SavedTargetTests(unittest.TestCase):
@@ -242,6 +243,24 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(_gone(pid), "the remote server outlived its session")
         with self.assertRaises(OSError):
             urlopen(f"http://127.0.0.1:{session.local_port}/", timeout=2)
+
+    def test_verbose_tunnel_diagnostics_do_not_fill_the_pipe_or_block_forwarding(self):
+        session = self.session(tunnel_timeout=3)
+        with mock.patch.dict(os.environ, {"FAKE_SSH_VERBOSE_TUNNEL": "1"}):
+            try:
+                url = session.start()
+                with urlopen(f"{url.rstrip('/')}{api.API_PREFIX}/chatlab/status", timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                deadline = time.monotonic() + 3
+                while not session._tunnel_tail or "diagnostic 1023:" not in session._tunnel_tail[-1]:
+                    if time.monotonic() > deadline:
+                        self.fail("the tunnel diagnostics were not drained")
+                    time.sleep(0.01)
+                self.assertEqual(len(session._tunnel_tail), remote.TAIL_LINES)
+                self.assertIn("diagnostic 1023:", session._tunnel_tail[-1])
+            finally:
+                session.close()
+        self.assertFalse(session._tunnel_reader.is_alive())
 
     def test_a_server_that_dies_is_reported_once_and_ends_the_session(self):
         lost = []

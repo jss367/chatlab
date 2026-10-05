@@ -50,6 +50,7 @@ STOP_TIMEOUT = 5.0
 TAIL_LINES = 12
 SSH_OPTIONS = (
     "-o", "BatchMode=yes",
+    "-o", "RemoteCommand=none",
     # Session lifetime is owned here, rather than an existing user SSH master.
     "-o", "ControlMaster=no",
     "-o", "ControlPath=none",
@@ -156,9 +157,12 @@ class RemoteSession:
         self._ready = threading.Event()
         self._remote_address: str | None = None
         self._tail: collections.deque[str] = collections.deque(maxlen=TAIL_LINES)
+        self._tunnel_tail: collections.deque[str] = collections.deque(maxlen=TAIL_LINES)
+        self._tunnel_drained = threading.Event()
         self._server: subprocess.Popen | None = None
         self._tunnel: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
+        self._tunnel_reader: threading.Thread | None = None
 
     @property
     def closed(self) -> bool:
@@ -257,7 +261,7 @@ class RemoteSession:
             raise RemoteError(f"ChatLab on {self.target.host} reported an address without a port: {remote_address}")
         forward = f"127.0.0.1:{self.local_port}:{host}:{port}"
         logger.info("Forwarding %s to %s on %s", self.local_port, remote_address, self.target.host)
-        self._spawn(
+        tunnel = self._spawn(
             "_tunnel",
             ["-N", *SSH_OPTIONS, "-o", "ExitOnForwardFailure=yes", "-L", forward, self.target.host],
             stdin=subprocess.DEVNULL,
@@ -267,6 +271,29 @@ class RemoteSession:
             encoding="utf-8",
             errors="replace",
         )
+        with self._lock:
+            if self.closed:
+                raise RemoteError("The connection was cancelled.")
+            self._tunnel_reader = threading.Thread(target=self._read_tunnel, args=(tunnel,), daemon=True)
+            self._tunnel_reader.start()
+
+    def _read_tunnel(self, process: subprocess.Popen) -> None:
+        try:
+            for line in process.stderr:
+                line = line.rstrip("\r\n")
+                with self._lock:
+                    self._tunnel_tail.append(line)
+                logger.info("[%s port forward] %s", self.target.host, line)
+        finally:
+            self._tunnel_drained.set()
+
+    def _tunnel_failure(self, summary: str) -> str:
+        # Once SSH exits, let the reader collect its last diagnostic lines.
+        if self._tunnel_reader is not None:
+            self._tunnel_drained.wait(STOP_TIMEOUT)
+        with self._lock:
+            tail = "\n".join(self._tunnel_tail).strip()
+        return f"{summary}\n\n{tail}" if tail else summary
 
     def _wait_for(self, url: str) -> None:
         """Poll the API's status route through the forward until it answers."""
@@ -277,8 +304,7 @@ class RemoteSession:
             if self.closed:
                 raise RemoteError("The connection was cancelled.")
             if self._tunnel.poll() is not None:
-                message = self._tunnel.stderr.read().strip()
-                raise RemoteError(f"The port forward to {self.target.host} failed.\n\n{message}".strip())
+                raise RemoteError(self._tunnel_failure(f"The port forward to {self.target.host} failed."))
             if self._server.poll() is not None:
                 raise RemoteError(self._failure(f"ChatLab on {self.target.host} stopped."))
             try:
@@ -300,7 +326,7 @@ class RemoteSession:
     def _watch(self, process: subprocess.Popen, name: str) -> None:
         process.wait()
         summary = f"The {name} connection to {self.target.host} ended."
-        reason = self._failure(summary) if process is self._server else summary
+        reason = self._failure(summary) if process is self._server else self._tunnel_failure(summary)
         # Only the watcher whose close is the one that ends the session
         # reports it; the other connection ending behind it is that close.
         if self._close() and self.on_lost is not None:
@@ -361,7 +387,11 @@ class RemoteSession:
             if reader is None or not reader.is_alive():
                 server.stdout.close()
         if tunnel is not None:
-            tunnel.stderr.close()
+            reader = self._tunnel_reader
+            if reader is not None:
+                reader.join(STOP_TIMEOUT)
+            if reader is None or not reader.is_alive():
+                tunnel.stderr.close()
 
 
 def exit_when_stdin_closes(stop: Callable[[], None], stream=None) -> threading.Thread:
