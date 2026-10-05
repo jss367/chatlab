@@ -124,6 +124,19 @@ class Engine(Protocol):
         """Feed one token and read every layer's prediction and attention."""
         ...
 
+    def attention_heads(
+        self, token_ids: Sequence[int], cache: Any, cached: int, media: Any = None
+    ) -> tuple[list[np.ndarray] | None, Any]:
+        """Feed ``token_ids`` and read every head's attention from each of them.
+
+        Returns one float32 array per decoder layer, shaped ``(heads, fed,
+        cached + fed)``: row ``i`` is what fed token ``i`` paid each position
+        of the sequence so far, with zero for keys it could not see. The list
+        is ``None`` when some layer gives no weights, and the cache then
+        holds an unknown part of the fed tokens.
+        """
+        ...
+
     def cache_shapes(self, cache: Any) -> list[kv_cache.LayerShape | None]:
         """What every layer of ``cache`` holds, without copying any of it."""
         ...

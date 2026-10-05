@@ -439,6 +439,8 @@ class _Recorder:
     hidden: list = field(default_factory=list)
     attention: dict[int, Any] = field(default_factory=dict)
     current: int = -1
+    # Keep each head's row rather than their mean.
+    heads: bool = False
 
 
 class MlxEngine:
@@ -735,6 +737,49 @@ class MlxEngine:
             ]
         return reading
 
+    @on_mlx_thread
+    def attention_heads(
+        self, token_ids: Sequence[int], cache, cached: int, media=None
+    ) -> tuple[list[np.ndarray] | None, Any]:
+        """Feed ``token_ids`` one at a time and keep every head's weights.
+
+        The recorder reads the weights for a single query only (see
+        :func:`_recording_attention`), so each token is its own step, as it
+        was when the reply was generated.
+        """
+
+        import mlx.core as mx
+
+        _refuse_media(media)
+        if cache is None:
+            cache = self.new_cache()
+        offset = _cache_offset(cache)
+        if offset is not None and offset != cached:
+            raise RuntimeError(
+                f"The MLX cache holds {offset} tokens, not the {cached} expected."
+            )
+        fed = len(token_ids)
+        total = cached + fed
+        layers: list[np.ndarray] | None = None
+        for step, token_id in enumerate(token_ids):
+            recorder = _Recorder(heads=True)
+            with self._recording(recorder):
+                logits = self.model(mx.array([[int(token_id)]]), cache=cache)
+            count = len(recorder.hidden) - 1
+            if count <= 0 or any(index not in recorder.attention for index in range(count)):
+                mx.eval(logits)
+                return None, cache
+            rows = [recorder.attention[index].astype(mx.float32) for index in range(count)]
+            mx.eval(logits, *rows)
+            position = cached + step
+            for index, row in enumerate(rows):
+                row = np.array(row)
+                if layers is None:
+                    layers = [np.zeros((row.shape[0], fed, total), dtype=np.float32) for _ in range(count)]
+                width = row.shape[-1]
+                layers[index][:, step, position + 1 - width: position + 1] = row
+        return layers, cache
+
     @staticmethod
     def _cache_arrays(cache) -> list[tuple[Any, Any, Any] | None]:
         """Each layer's keys, values and cache object, ``None`` where it holds none.
@@ -860,7 +905,7 @@ def _recording_attention(original, recorder: _Recorder):
             if queries.ndim != 4 or keys.ndim != 4 or queries.shape[2] != 1:
                 return output
             recorder.attention[layer] = _in_temporal_order(
-                _attention_weights(queries, keys, scale, mask), keys, cache
+                _attention_weights(queries, keys, scale, mask, per_head=recorder.heads), keys, cache
             )
         except Exception:  # noqa: BLE001 - a strip is optional, the response is not
             logger.debug("Attention weights could not be recorded", exc_info=True)
@@ -869,8 +914,8 @@ def _recording_attention(original, recorder: _Recorder):
     return attention
 
 
-def _attention_weights(queries, keys, scale, mask):
-    """Mean-over-heads attention of the last query over every key, as one row."""
+def _attention_weights(queries, keys, scale, mask, per_head: bool = False):
+    """The last query's attention over every key: a row per head, or their mean."""
 
     import mlx.core as mx
 
@@ -885,8 +930,8 @@ def _attention_weights(queries, keys, scale, mask):
             scores = mx.where(mask, scores, mx.finfo(mx.float32).min)
         else:
             scores = scores + mask.astype(mx.float32)
-    weights = mx.softmax(scores, axis=-1)
-    return weights[0, :, -1, :].mean(axis=0)
+    weights = mx.softmax(scores, axis=-1)[0, :, -1, :]
+    return weights if per_head else weights.mean(axis=0)
 
 
 def _in_temporal_order(weights, keys, cache):
@@ -905,4 +950,5 @@ def _in_temporal_order(weights, keys, cache):
     ring = getattr(cache, "keys", None)
     if order is None or ring is None or keys.shape[2] != ring.shape[2]:
         return weights
-    return order(weights.reshape(1, 1, -1, 1)).reshape(-1)
+    width = weights.shape[-1]
+    return order(weights.reshape(1, -1, width, 1)).reshape(weights.shape)

@@ -290,6 +290,46 @@ class TorchEngine:
         del outputs
         return reading
 
+    def attention_heads(
+        self, token_ids: Sequence[int], cache, cached: int, media=None
+    ) -> tuple[list[np.ndarray] | None, Any]:
+        """Feed ``token_ids`` with eager attention and keep every head's weights.
+
+        A sliding-window layer hands back weights over the keys it kept,
+        which end at the last fed token, so they are laid against the right
+        edge and the keys it dropped read zero.
+        """
+
+        import torch
+
+        device = self._device()
+        fed = len(token_ids)
+        total = cached + fed
+        with self.eager_attention():
+            outputs = self.model(
+                input_ids=torch.tensor([list(token_ids)], dtype=torch.long, device=device),
+                attention_mask=torch.ones((1, total), dtype=torch.long, device=device),
+                past_key_values=cache,
+                use_cache=True,
+                output_attentions=True,
+                **(media.forward_arguments(cached, fed) if media is not None else {}),
+            )
+        cache = getattr(outputs, "past_key_values", None)
+        weights = tuple(outputs.attentions or ())
+        if not weights or any(layer is None for layer in weights):
+            return None, cache
+        layers: list[np.ndarray] = []
+        for layer in weights:
+            rows = layer[0].detach().float().cpu().numpy()
+            if rows.shape[-1] == total:
+                layers.append(rows)
+                continue
+            placed = np.zeros((rows.shape[0], fed, total), dtype=np.float32)
+            placed[..., total - rows.shape[-1]:] = rows
+            layers.append(placed)
+        del outputs, weights
+        return layers, cache
+
     @staticmethod
     def _cache_tensors(cache) -> list[tuple[Any, Any] | None]:
         """Each layer's key and value tensors, ``None`` where a layer holds none.

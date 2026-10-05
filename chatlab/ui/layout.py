@@ -28,7 +28,7 @@ from chatlab.conversation import MAIN_BRANCH, branch_choices, new_forks
 from chatlab.device_memory import warm_device
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.registry import load_enabled
-from chatlab.ui import reasoning_check, runtime
+from chatlab.ui import attention_trace, reasoning_check, runtime
 from chatlab.ui.background import ConversationEvents, ConversationJob
 from chatlab.ui.chat_layout import (
     ChatPage,
@@ -80,6 +80,7 @@ from chatlab.ui.generation import (
 )
 from chatlab.ui.icons import icon_classes
 from chatlab.ui.images_layout import build_images_page, wire_images_page
+from chatlab.ui.attention_trace import ATTENTION_TRACE_CSS, ATTENTION_TRACE_JS
 from chatlab.ui.inspection import JACOBIAN_CSS, JACOBIAN_JS
 from chatlab.ui.pictures import PICTURES_JS, REMOVE_BRIDGE_ID, attach_pictures, remove_picture
 from chatlab.ui.models_layout import (
@@ -257,7 +258,7 @@ def build_app() -> gr.Blocks:
     # GRADIO_ANALYTICS_ENABLED so it holds however the app is started - the
     # desktop bundle, run.sh, or python -m chatlab.
     with gr.Blocks(
-        title="ChatLab", css=CSS + TOKEN_MENU_CSS + TREE_CSS + JACOBIAN_CSS + extension_css(extensions), theme=THEME, fill_width=True,
+        title="ChatLab", css=CSS + TOKEN_MENU_CSS + TREE_CSS + JACOBIAN_CSS + ATTENTION_TRACE_CSS + extension_css(extensions), theme=THEME, fill_width=True,
         analytics_enabled=False,
     ) as demo:
         # The chosen theme's colors, as a stylesheet on the page. Gradio fixes
@@ -337,6 +338,7 @@ def build_app() -> gr.Blocks:
             settings_page.keep_reasoning, chat_page.sampling.max_new_tokens,
         )
         wire_inspector(chat_page, states)
+        attention_trace.wire(chat_page.attention_trace, states, settings_page.system_prompt)
     return demo
 
 
@@ -694,6 +696,7 @@ def _wire_page_scripts(
     demo.load(None, None, None, js=TOKEN_MENU_JS)
     demo.load(None, None, None, js=TREE_JS)
     demo.load(None, None, None, js=JACOBIAN_JS)
+    demo.load(None, None, None, js=ATTENTION_TRACE_JS)
     demo.load(None, None, None, js=PICTURES_JS)
     chat_page.tree.action.input(
         select_tree_branch,
