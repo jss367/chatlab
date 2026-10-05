@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -476,6 +477,108 @@ class RemoteConnectionTests(unittest.TestCase):
 
         self.assertEqual(window.named("load_url"), [])
         self.assertEqual(len(window.named("dialog")), 1)
+
+    def test_old_disconnect_cannot_replace_a_reconnected_window(self):
+        window = FakeWindow("old-gpu")
+        connection = self.connection(window)
+        connection.connect()
+        old = self.sessions[0]
+        entered, release = threading.Event(), threading.Event()
+        def close():
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("old close was not released")
+            old.closed = True
+        old.close = close
+        thread = threading.Thread(target=connection.disconnect)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            window.answer = "new-gpu"
+            connection.connect()
+        finally:
+            release.set()
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertIs(connection.session, self.sessions[1])
+        self.assertNotEqual(window.named("load_url")[-1], [self.LOCAL])
+        self.assertEqual(window.named("set_title")[-1], [f"{WINDOW_TITLE} — new-gpu"])
+
+    def test_old_loss_callback_cannot_replace_a_reconnected_window(self):
+        window = FakeWindow("old-gpu")
+        connection = self.connection(window)
+        connection.connect()
+        old = self.sessions[0]
+        entered, release = threading.Event(), threading.Event()
+        show = connection._show_local
+        def delayed(generation):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("old transition was not released")
+            return show(generation)
+        with mock.patch.object(connection, "_show_local", side_effect=delayed):
+            thread = threading.Thread(target=lambda: old.on_lost(old, "Old server ended"))
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                window.answer = "new-gpu"
+                connection.connect()
+            finally:
+                release.set()
+                thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertIs(connection.session, self.sessions[1])
+        self.assertEqual(window.named("set_title")[-1], [f"{WINDOW_TITLE} — new-gpu"])
+        self.assertEqual(window.named("dialog"), [])
+
+    def test_quitting_during_the_host_prompt_cannot_start_a_session(self):
+        window = FakeWindow("gpu-box")
+        start = mock.Mock(return_value="http://127.0.0.1:47891/")
+        connection = self.connection(window, start=start)
+        entered, release = threading.Event(), threading.Event()
+        def answer(script):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError("prompt was not released")
+            return "gpu-box"
+        window.evaluate_js = answer
+        thread = threading.Thread(target=connection.connect)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            connection.close()
+        finally:
+            release.set()
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
+        start.assert_not_called()
+        self.assertIsNone(connection.session)
+        self.assertEqual(window.named("load_url"), [])
+
+    def test_cancelled_start_cannot_overwrite_the_new_saved_host(self):
+        entered, release = threading.Event(), threading.Event()
+        def start(session):
+            if session.target.host == "old-gpu":
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError("old start was not released")
+            return f"http://127.0.0.1:{session.local_port}/"
+        window = FakeWindow("old-gpu")
+        connection = self.connection(window, start=start)
+        thread = threading.Thread(target=connection.connect)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            connection.disconnect()
+            window.answer = "new-gpu"
+            connection.connect()
+        finally:
+            release.set()
+            thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(remote.load_target(self.saved).host, "new-gpu")
+        self.assertIs(connection.session, self.sessions[1])
+        self.assertEqual(window.named("set_title")[-1], [f"{WINDOW_TITLE} — new-gpu"])
 
     def test_quitting_ends_the_session(self):
         window = FakeWindow("gpu-box")

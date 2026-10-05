@@ -431,13 +431,17 @@ class RemoteConnection:
         self.local_url = local_url
         self.saved = saved
         self.session_factory = session_factory
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._generation = 0
+        self._closing = False
         self.session: remote.RemoteSession | None = None
 
     def connect(self) -> None:
         """Ask for a host, start ChatLab there, and show it in the window."""
 
         with self._lock:
+            if self._closing:
+                return
             current = self.session
         if current is not None:
             self._say(f"ChatLab is already connected to {current.target.host}. Disconnect first.")
@@ -455,10 +459,11 @@ class RemoteConnection:
             return
         session = self.session_factory(target, local_port=remote_port(), on_lost=self._lost)
         with self._lock:
-            if self.session is not None:
+            if self._closing or self.session is not None:
                 return
+            self._generation += 1
             self.session = session
-        self._window_call("set_title", f"{WINDOW_TITLE} — connecting to {target.host}…")
+            self._window_call("set_title", f"{WINDOW_TITLE} — connecting to {target.host}…")
         try:
             url = session.start()
         except remote.RemoteError as error:
@@ -469,15 +474,16 @@ class RemoteConnection:
                 cancelled = self.session is not session
                 if not cancelled:
                     self.session = None
+                    self._generation += 1
+                    self._window_call("set_title", WINDOW_TITLE)
             if not cancelled:
-                self._window_call("set_title", WINDOW_TITLE)
                 self._say(f"Could not start ChatLab on {target.host}.\n\n{error}")
             return
-        remote.save_target(self.saved, target)
         # Under the lock, so a Disconnect or a lost connection cannot put the
         # window back on this Mac between the check and the switch.
         with self._lock:
-            if self.session is session:
+            if not self._closing and self.session is session:
+                remote.save_target(self.saved, target)
                 self._window_call("load_url", url)
                 self._window_call("set_title", f"{WINDOW_TITLE} — {target.host}")
 
@@ -485,17 +491,23 @@ class RemoteConnection:
         """End the session and show this Mac's server again."""
 
         with self._lock:
+            if self._closing:
+                return
             session, self.session = self.session, None
+            self._generation += 1
+            generation = self._generation
         if session is None:
             self._say("ChatLab is not connected to a remote host.")
             return
         session.close()
-        self._show_local()
+        self._show_local(generation)
 
     def close(self) -> None:
         """End any session on the way out, so no remote server outlives the app."""
 
         with self._lock:
+            self._closing = True
+            self._generation += 1
             session, self.session = self.session, None
         if session is not None:
             session.close()
@@ -505,12 +517,18 @@ class RemoteConnection:
             if self.session is not session:
                 return
             self.session = None
-        self._show_local()
-        self._say(f"{reason}\n\nChatLab is showing this Mac again. Connect again from the Remote menu.")
+            self._generation += 1
+            generation = self._generation
+        if self._show_local(generation):
+            self._say(f"{reason}\n\nChatLab is showing this Mac again. Connect again from the Remote menu.")
 
-    def _show_local(self) -> None:
-        self._window_call("load_url", self.local_url)
-        self._window_call("set_title", WINDOW_TITLE)
+    def _show_local(self, generation: int) -> bool:
+        with self._lock:
+            if self._closing or self._generation != generation:
+                return False
+            self._window_call("load_url", self.local_url)
+            self._window_call("set_title", WINDOW_TITLE)
+            return True
 
     def _say(self, message: str) -> None:
         self._window_call("create_confirmation_dialog", "ChatLab", message)
