@@ -88,7 +88,7 @@ class SSHConfigurationTests(unittest.TestCase):
     def test_server_suppresses_inherited_forwards_and_tunnel_owns_them_once(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config"
-            config.write_text("Host fixture-gpu\n  HostName 127.0.0.1\n  LocalForward 18080 127.0.0.1:8080\n  DynamicForward 18081\n  ControlMaster auto\n  ControlPath /tmp/chatlab-fixture-master\n  ControlPersist 60\n  RemoteCommand tmux attach\n")
+            config.write_text("Host fixture-gpu\n  HostName 127.0.0.1\n  LocalForward 18080 127.0.0.1:8080\n  DynamicForward 18081\n  ControlMaster auto\n  ControlPath /tmp/chatlab-fixture-master\n  ControlPersist 60\n  RemoteCommand tmux attach\n  ClearAllForwardings yes\n  StdinNull yes\n  ForkAfterAuthentication yes\n  SessionType none\n")
             session = remote.RemoteSession(remote.RemoteTarget("fixture-gpu"), local_port=18082)
             captured = []
             def spawn(name, arguments, **options):
@@ -103,12 +103,18 @@ class SSHConfigurationTests(unittest.TestCase):
             server = subprocess.check_output(["ssh", "-G", "-F", str(config), *captured[0]], text=True).splitlines()
             tunnel = subprocess.check_output(["ssh", "-G", "-F", str(config), *captured[1]], text=True).splitlines()
             self.assertFalse(any(line.startswith(("localforward ", "dynamicforward ")) for line in server))
+            self.assertIn("clearallforwardings yes", server)
+            self.assertIn("stdinnull no", server)
+            self.assertIn("sessiontype default", server)
+            self.assertIn("clearallforwardings no", tunnel)
+            self.assertIn("sessiontype none", tunnel)
             self.assertEqual(len([line for line in tunnel if line.startswith("localforward ")]), 2)
             self.assertEqual(len([line for line in tunnel if line.startswith("dynamicforward ")]), 1)
             self.assertTrue(any("18082" in line and "8123" in line for line in tunnel if line.startswith("localforward ")))
             for lines in (server, tunnel):
                 self.assertIn("controlmaster false", lines)
                 self.assertIn("controlpersist no", lines)
+                self.assertIn("forkafterauthentication no", lines)
                 self.assertFalse(any(line.startswith("remotecommand ") for line in lines))
 
 

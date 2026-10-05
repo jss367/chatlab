@@ -51,6 +51,7 @@ TAIL_LINES = 12
 SSH_OPTIONS = (
     "-o", "BatchMode=yes",
     "-o", "RemoteCommand=none",
+    "-o", "ForkAfterAuthentication=no",
     # Session lifetime is owned here, rather than an existing user SSH master.
     "-o", "ControlMaster=no",
     "-o", "ControlPath=none",
@@ -208,7 +209,8 @@ class RemoteSession:
         logger.info("Starting ChatLab on %s: %s", self.target.host, command)
         server = self._spawn(
             "_server",
-            ["-T", *SSH_OPTIONS, "-o", "ClearAllForwardings=yes", self.target.host, command],
+            ["-T", *SSH_OPTIONS, "-o", "ClearAllForwardings=yes",
+             "-o", "StdinNull=no", "-o", "SessionType=default", self.target.host, command],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -263,7 +265,8 @@ class RemoteSession:
         logger.info("Forwarding %s to %s on %s", self.local_port, remote_address, self.target.host)
         tunnel = self._spawn(
             "_tunnel",
-            ["-N", *SSH_OPTIONS, "-o", "ExitOnForwardFailure=yes", "-L", forward, self.target.host],
+            ["-N", *SSH_OPTIONS, "-o", "ClearAllForwardings=no",
+             "-o", "ExitOnForwardFailure=yes", "-L", forward, self.target.host],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
