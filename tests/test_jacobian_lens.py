@@ -767,9 +767,9 @@ class ImageTextWrapperTests(unittest.TestCase):
         ).to_dict()
 
     def test_the_layout_is_the_language_model_inside_the_wrapper(self):
-        for build, model_type in ((qwen3_5_model, "qwen3_5"), (gemma4_model, "gemma4")):
+        for build_model, model_type in ((qwen3_5_model, "qwen3_5"), (gemma4_model, "gemma4")):
             with self.subTest(model=model_type):
-                manager = self.manager_for(build)
+                manager = self.manager_for(build_model)
                 model = manager.model
                 # Depth and width live in the text config alone.
                 self.assertFalse(hasattr(model.config, "num_hidden_layers"))
@@ -789,9 +789,9 @@ class ImageTextWrapperTests(unittest.TestCase):
             jacobian_lens._check_type("qwen3_5_moe")
 
     def test_readout_matches_the_wrapped_blocks_through_norm_head_and_soft_cap(self):
-        for build in (qwen3_5_model, gemma4_model):
-            with self.subTest(model=build.__name__):
-                manager = self.manager_for(build)
+        for build_model in (qwen3_5_model, gemma4_model):
+            with self.subTest(model=build_model.__name__):
+                manager = self.manager_for(build_model)
                 model = manager.model
                 language = model.model.language_model
                 captured, handles = {}, []
@@ -828,9 +828,9 @@ class ImageTextWrapperTests(unittest.TestCase):
         torch.testing.assert_close(capped, torch.tanh(raw / 0.05) * 0.05)
 
     def test_a_steered_pass_is_what_the_lens_reads(self):
-        for build in (qwen3_5_model, gemma4_model):
-            with self.subTest(model=build.__name__):
-                manager = self.manager_for(build)
+        for build_model in (qwen3_5_model, gemma4_model):
+            with self.subTest(model=build_model.__name__):
+                manager = self.manager_for(build_model)
                 steered_layer = 1
                 vector = {
                     "format": steering.FORMAT, "model_id": manager.model_id, "layer": steered_layer,
