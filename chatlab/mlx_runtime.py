@@ -152,6 +152,18 @@ def _token_ids(candidate: Any) -> set[int]:
     return set()
 
 
+def text_settings(config: Mapping[str, Any]) -> dict[str, Any]:
+    """A checkpoint's config with its text model's settings laid over it.
+
+    An image-text checkpoint (Qwen3.5, Gemma 4) keeps the language model's
+    depth, width and head transforms under ``text_config``; a text model
+    keeps them at the top level, and its config comes back unchanged.
+    """
+
+    text = config.get("text_config")
+    return {**config, **text} if isinstance(text, Mapping) else dict(config)
+
+
 def _read_json_object(path: Path) -> dict[str, Any]:
     """``path`` parsed as a JSON object; ``{}`` when missing, unreadable or not one."""
 
@@ -414,7 +426,8 @@ class _RecordingLayer:
             self.recorder.hidden.append(hidden)
         self.recorder.current = self.index
         output = self.layer(hidden, *args, **kwargs)
-        self.recorder.hidden.append(output)
+        # Gemma 4's layers also hand back the keys and values later layers share.
+        self.recorder.hidden.append(output[0] if isinstance(output, tuple) else output)
         return output
 
     def __getattr__(self, name: str):
@@ -591,7 +604,8 @@ class MlxEngine:
     def read_head(self, vector):
         """Turn a normed residual vector into logits the way the model does.
 
-        The head is ``lm_head`` where the repo keeps one, and otherwise the
+        The head is ``lm_head`` where the repo keeps one, on the model or on
+        the language model an image-text wrapper holds, and otherwise the
         embedding matrix read backwards, which is what mlx-lm's tied models
         do. The post-processing some architectures apply - Gemma's soft-cap,
         Granite's division, Cohere's multiplication - is replicated from the
@@ -604,6 +618,8 @@ class MlxEngine:
 
         model = self.model
         head = getattr(model, "lm_head", None)
+        if head is None:
+            head = getattr(getattr(model, "language_model", None), "lm_head", None)
         if head is not None and callable(head):
             logits = head(vector)
         else:
@@ -616,13 +632,14 @@ class MlxEngine:
             if embedding is None or not hasattr(embedding, "as_linear"):
                 raise RuntimeError("This MLX model's output head could not be found.")
             logits = embedding.as_linear(vector)
-        scale = self.config.get("logit_scale")
+        config = text_settings(self.config)
+        scale = config.get("logit_scale")
         if scale:
             logits = logits * scale
-        scaling = self.config.get("logits_scaling")
+        scaling = config.get("logits_scaling")
         if scaling:
             logits = logits / scaling
-        softcap = self.config.get("final_logit_softcapping")
+        softcap = config.get("final_logit_softcapping")
         if softcap:
             logits = mx.tanh(logits / softcap) * softcap
         return logits

@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from chatlab import settings
+from chatlab import settings, steering
 
 
 logger = logging.getLogger(__name__)
@@ -37,12 +37,17 @@ logger = logging.getLogger(__name__)
 # norm after it, which is the layout the readout walks, and for which fitted
 # lenses are published. The layout check and the final-block replay decide
 # for a particular checkpoint; a family that is missing here is refused with
-# its name rather than read wrongly.
+# its name rather than read wrongly. Qwen3.5 and Gemma 4 checkpoints are
+# image-text wrappers around such a stack; the wrapper's type and the text
+# model's are both listed, since a text-only load carries the latter.
 SUPPORTED_MODELS = {
     "llama", "mistral", "qwen2", "qwen3", "qwen3_moe", "gemma2", "gemma3_text",
     "olmo2", "olmo3", "glm4", "phi3", "granite", "cohere2", "smollm3",
+    "qwen3_5", "qwen3_5_text", "gemma4", "gemma4_text",
 }
-MAX_FILE_BYTES = 2 * 1024**3
+# The published lenses for 27B and 31B models are about 3.4 GB.
+MAX_FILE_BYTES = 8 * 1024**3
+SIZE_LIMIT = f"{MAX_FILE_BYTES // 1024**3} GiB"
 # How many positions one slice covers, ending at the selected token.
 SLICE_POSITIONS = 128
 TOP_CANDIDATES = 5
@@ -66,15 +71,26 @@ class Layout:
 
 def _check_type(model_type) -> None:
     if model_type not in SUPPORTED_MODELS:
-        names = "Llama, Mistral, Qwen2, Qwen3, Gemma 2 and 3, OLMo 2 and 3, GLM-4, Phi-3, Granite, Cohere, and SmolLM3"
+        names = (
+            "Llama, Mistral, Qwen2, Qwen3, Qwen3.5, Gemma 2, 3 and 4, OLMo 2 and 3, GLM-4, "
+            "Phi-3, Granite, Cohere, and SmolLM3"
+        )
         raise ValueError(
             f"Jacobian inspection supports {names} text models; this model's type is "
             f"{model_type or 'unknown'}."
         )
 
 
+UNSUPPORTED_LAYOUT = "This model's decoder layout is not supported by the Jacobian inspector."
+
+
 def model_layout(engine) -> Layout:
-    """Keep the support boundary explicit; other layouts need validation."""
+    """Keep the support boundary explicit; other layouts need validation.
+
+    The blocks are the ones steering adds its vector to, so a steered
+    readout is read from the same stack the vector went into. An image-text
+    wrapper keeps the text model's depth and width in its text config.
+    """
     if engine.backend == "mlx":
         return _mlx_layout(engine)
     model = engine.model
@@ -82,26 +98,33 @@ def model_layout(engine) -> Layout:
     _check_type(getattr(config, "model_type", None))
     if getattr(model, "is_quantized", False) or getattr(config, "quantization_config", None):
         raise ValueError("Load full-precision weights for Jacobian inspection; quantized Transformers models are not validated yet.")
-    decoder = getattr(model, "model", None)
-    blocks = getattr(decoder, "layers", None)
-    norm = getattr(decoder, "norm", None)
-    if blocks is None or norm is None or len(blocks) != config.num_hidden_layers:
-        raise ValueError("This model's decoder layout is not supported by the Jacobian inspector.")
-    return Layout("torch", list(blocks), norm, int(config.hidden_size), config.model_type)
+    if callable(getattr(config, "get_text_config", None)):
+        config = config.get_text_config()
+    try:
+        blocks = steering.decoder_layers(model)
+    except steering.SteeringError:
+        raise ValueError(UNSUPPORTED_LAYOUT) from None
+    norm = engine.final_norm()
+    if norm is None or len(blocks) != getattr(config, "num_hidden_layers", None):
+        raise ValueError(UNSUPPORTED_LAYOUT)
+    return Layout("torch", list(blocks), norm, int(config.hidden_size), model.config.model_type)
 
 
 def _mlx_layout(engine) -> Layout:
+    from chatlab.mlx_runtime import text_settings
+
     config = getattr(engine, "config", None) or {}
     _check_type(config.get("model_type"))
+    text = text_settings(config)
     owner, attribute = engine._layer_stack()
     blocks = getattr(owner, attribute, None) if owner is not None and attribute else None
     norm = engine.final_norm()
-    width = config.get("hidden_size")
+    width = text.get("hidden_size")
     if (
         not isinstance(blocks, list) or norm is None or type(width) is not int
-        or len(blocks) != config.get("num_hidden_layers")
+        or len(blocks) != text.get("num_hidden_layers")
     ):
-        raise ValueError("This model's decoder layout is not supported by the Jacobian inspector.")
+        raise ValueError(UNSUPPORTED_LAYOUT)
     return Layout("mlx", blocks, norm, width, config["model_type"])
 
 
@@ -167,13 +190,17 @@ class FittedLens:
         fitted = check_identity(layout, model_id, fitted_model_id)
         path = Path(path)
         if not path.is_file() or not 0 < path.stat().st_size <= MAX_FILE_BYTES:
-            raise ValueError("Choose a saved lens.pt file no larger than 2 GiB.")
+            raise ValueError(f"Choose a saved lens.pt file no larger than {SIZE_LIMIT}.")
         # mmap keeps the whole set of dense matrices off the accelerator and
         # avoids eagerly copying the file into RAM. Never load arbitrary pickle.
         data = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         if not isinstance(data, dict) or not isinstance(data.get("J"), dict) or not data["J"]:
             raise ValueError("Expected a saved Jacobian lens with a nonempty J dictionary.")
+        # Neuronpedia's fit_lens.py records the fitted model under provenance.
         declared_model = data.get("model_id")
+        provenance = data.get("provenance")
+        if declared_model is None and isinstance(provenance, dict):
+            declared_model = provenance.get("model_id")
         if declared_model is not None and declared_model != fitted:
             raise ValueError("The lens file names a different model.")
         revision = data.get("model_revision")
@@ -202,7 +229,7 @@ class FittedLens:
                 raise ValueError("Every lens matrix must be a dense floating-point d_model × d_model tensor.")
             total += matrix.numel() * matrix.element_size()
             if total > MAX_FILE_BYTES:
-                raise ValueError("The lens matrices exceed the 2 GiB limit.")
+                raise ValueError(f"The lens matrices exceed the {SIZE_LIMIT} limit.")
             if not torch.isfinite(matrix).all():
                 raise ValueError("The lens contains non-finite matrix entries.")
         return cls(matrices, width, count, path.name)
@@ -441,7 +468,7 @@ def download(repository: str, filename: str) -> Path:
     try:
         metadata = get_hf_file_metadata(hf_hub_url(repository, filename))
         if metadata.size is not None and metadata.size > MAX_FILE_BYTES:
-            raise ValueError("That lens file is larger than the 2 GiB limit.")
+            raise ValueError(f"That lens file is larger than the {SIZE_LIMIT} limit.")
         owner, name = repository.split("/")
         target = lens_directory() / owner / name
         target.mkdir(parents=True, exist_ok=True)

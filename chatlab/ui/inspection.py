@@ -546,7 +546,7 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
     source = {}
     if repository or filename:
         # The slot is checked, not held, over the download. A transfer of up
-        # to 2 GiB can take minutes, and holding the slot for it would block
+        # to 8 GiB can take minutes, and holding the slot for it would block
         # chat and loading the whole time; the import below validates the
         # lens against whatever model is loaded when it runs, under the model
         # lock, so a model swapped in mid-download is refused rather than
