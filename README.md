@@ -121,6 +121,23 @@ Model files use the standard Hugging Face cache. ChatLab lists complete download
 
 On Apple silicon the requirements also bring in [mlx-lm](https://github.com/ml-explore/mlx-lm), which is what runs the MLX models described next; it is skipped everywhere else, and the rest of the app does not need it.
 
+### On a remote GPU
+
+The desktop app can run ChatLab on another machine, such as a Linux host with NVIDIA cards, and show it in the same window. The remote host needs a checkout with its environment installed, the same way as above:
+
+```bash
+git clone https://github.com/jss367/chatlab ~/chatlab
+cd ~/chatlab && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+Then choose **Remote → Connect to Remote Host…** and enter the host as SSH knows it, optionally followed by the checkout's path: `gpu-box`, or `me@gpu-box:/srv/chatlab`. To specify a port directly, use `ssh://me@gpu-box:2222`; append `#/srv/chatlab` to name its checkout. IPv6 addresses go in brackets, such as `ssh://me@[::1]:2222`. The path defaults to `~/chatlab`, and the last host entered is offered next time. The app connects over SSH, runs `.venv/bin/python -m chatlab --remote` in the checkout, forwards a local port to it, and loads the remote page. The window title shows the host while it is connected. Models, conversations, settings and the log are all the remote host's while connected.
+
+SSH signs in with your keys, agent and `~/.ssh/config`, and never asks for anything, so a host that wants a password or an unknown host key is refused with SSH's message. Connect once with `ssh gpu-box` from Terminal first. The remote server listens on its own loopback address only and is reached through the forward.
+
+**Remote → Disconnect** stops the remote server and shows this Mac's again. Quitting does the same. If the connection drops, the remote server stops too, so a GPU is not left holding a model nobody can reach, and the window goes back to this Mac with the reason. Reconnecting starts a fresh server, so a loaded model has to be loaded again.
+
+Without the desktop app, the same works by hand. Run `.venv/bin/python -m chatlab` on the host, forward its port with `ssh -L 7860:localhost:7860 gpu-box`, and open `http://localhost:7860`.
+
 ### MLX models
 
 A repository quantized with `mlx_lm.convert`, which is what `mlx-community` publishes, keeps its weights in safetensors files under the names Transformers uses, but packed the way MLX packs them: a 4-bit matrix plus per-group scales and biases per linear layer, which `AutoModelForCausalLM` cannot read. ChatLab recognises one by the `quantization` block in its `config.json`, lists it under **My Models** marked *MLX*, and loads it through mlx-lm rather than through Transformers. It runs on the GPU through Metal at the width it was converted to, so a 7B model at four bits takes about 4 GB and the **Weight precision** radio does not apply; the badge above the chat says *Apple Metal (MLX), 4-bit weights*.
