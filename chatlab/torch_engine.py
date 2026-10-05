@@ -204,6 +204,9 @@ class TorchEngine:
         model = self.model
         logits = model.get_output_embeddings()(vector)
         config = getattr(model, "config", None)
+        # An image-text wrapper (Gemma 4) keeps its head's soft-cap in the text config.
+        if callable(getattr(config, "get_text_config", None)):
+            config = config.get_text_config()
         scale = getattr(config, "logit_scale", None)
         if scale:
             logits = logits * scale

@@ -1,6 +1,7 @@
 """Numerical and lifecycle checks using small, real Transformers decoders."""
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -11,18 +12,21 @@ from unittest import mock
 import numpy as np
 import torch
 from transformers import (
-    LlamaConfig, LlamaForCausalLM, MistralConfig, MistralForCausalLM,
-    Qwen2Config, Qwen2ForCausalLM, Qwen3Config, Qwen3ForCausalLM,
+    Gemma4Config, Gemma4ForConditionalGeneration, LlamaConfig, LlamaForCausalLM,
+    MistralConfig, MistralForCausalLM, Qwen2Config, Qwen2ForCausalLM, Qwen3Config,
+    Qwen3ForCausalLM, Qwen3_5Config, Qwen3_5ForConditionalGeneration,
 )
 
 from chatlab import charts
 from chatlab import jacobian_lens
 from chatlab import model_loading
+from chatlab import steering
 from chatlab.jacobian_lens import FittedLens
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
 from mlx_support import needs_mlx
 from tiny_tokenizer import build
+from tiny_tokenizer import build as build_tokenizer
 
 
 def small_manager(config_type=LlamaConfig, model_type=LlamaForCausalLM):
@@ -183,6 +187,7 @@ class JacobianLensTests(unittest.TestCase):
         original = dict(self.data)
         cases = [
             {"d_model": 17}, {"n_prompts": 0}, {"model_id": "other/model"},
+            {"provenance": {"model_id": "other/model"}},
             {"model_revision": "unknown"}, {"source_layers": [0]},
             {"J": {3: torch.eye(16)}, "source_layers": [3]},
             {"J": {0: torch.ones(16, 15)}, "source_layers": [0]},
@@ -215,6 +220,16 @@ class JacobianLensTests(unittest.TestCase):
         self.manager.precision = "4-bit"
         with self.assertRaisesRegex(ValueError, "full-precision"):
             self.import_lens()
+
+    def test_provenance_names_the_fitted_model_when_the_top_level_does_not(self):
+        self.data["provenance"] = {"model_id": self.manager.model_id, "dataset": "wikitext"}
+        self.save()
+        self.assertIn("import_id", self.import_lens())
+        # A top-level model_id is the declaration when both are present.
+        self.data["model_id"] = self.manager.model_id
+        self.data["provenance"] = {"model_id": "other/model"}
+        self.save()
+        self.assertIn("import_id", self.import_lens())
 
     def test_multitoken_pins_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "one vocabulary token"):
@@ -429,7 +444,7 @@ class JacobianLensTests(unittest.TestCase):
             metadata.size = jacobian_lens.MAX_FILE_BYTES + 1
             _, status = inspection.import_jacobian_lens(None, self.manager.model_id, "org/lenses", "lenses/tiny.pt")
             self.assertIn("Could not fetch", status)
-            self.assertIn("2 GiB", status)
+            self.assertIn(jacobian_lens.SIZE_LIMIT, status)
             self.assertIsNone(self.manager.occupant)
 
             # A busy model is reported before any bytes move; the slot is not
@@ -689,6 +704,218 @@ class JacobianLensTests(unittest.TestCase):
                 inspection.INSPECTION_CONTROLS.forget(other)
 
 
+def qwen3_5_model(vocab):
+    """A tiny Qwen3.5 image-text checkpoint: Gated DeltaNet and full attention alternate."""
+    config = Qwen3_5Config(
+        text_config=dict(
+            vocab_size=vocab, hidden_size=16, intermediate_size=32, num_hidden_layers=4,
+            num_attention_heads=2, num_key_value_heads=1, head_dim=8, linear_num_value_heads=2,
+            linear_num_key_heads=1, linear_key_head_dim=8, linear_value_head_dim=8,
+            full_attention_interval=2, tie_word_embeddings=False, max_position_embeddings=128,
+        ),
+        vision_config=dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=16),
+        tie_word_embeddings=False,
+    )
+    return Qwen3_5ForConditionalGeneration(config)
+
+
+def gemma4_model(vocab):
+    """A tiny Gemma 4 image-text checkpoint: sliding and full attention alternate.
+
+    The soft-cap is set low enough that leaving it out of the readout moves
+    the final-block replay outside its tolerance; on the real checkpoints it
+    is 30.
+    """
+    config = Gemma4Config(text_config=dict(
+        vocab_size=vocab, hidden_size=16, intermediate_size=32, num_hidden_layers=4,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=8, global_head_dim=8,
+        sliding_window=4, layer_types=["sliding_attention", "full_attention"] * 2,
+        final_logit_softcapping=0.05, hidden_size_per_layer_input=4,
+        vocab_size_per_layer_input=vocab, num_kv_shared_layers=1, max_position_embeddings=128,
+    ))
+    return Gemma4ForConditionalGeneration(config)
+
+
+class ImageTextWrapperTests(unittest.TestCase):
+    """Qwen3.5 and Gemma 4 keep their language model inside an image-text wrapper."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "lens.pt"
+
+    def manager_for(self, build):
+        torch.manual_seed(3)
+        manager = ModelManager()
+        manager.tokenizer = build_tokenizer()
+        manager.model = build(len(manager.tokenizer)).eval()
+        manager.model_id = "test/tiny-wrapper"
+        manager.precision = "full"
+        self.ids = manager.tokenizer.encode("the cat sat on the mat")
+        self.data = {
+            "J": {layer: torch.randn(16, 16) for layer in (0, 1, 2)},
+            "source_layers": [0, 1, 2], "n_prompts": 10, "d_model": 16,
+        }
+        torch.save(self.data, self.path)
+        return manager
+
+    def inspect(self, manager, index, **kwargs):
+        imported = manager.import_jacobian_lens(str(self.path), manager.model_id)
+        return manager.inspect_jacobian(
+            self.ids, index, lens_id=imported["import_id"], load_id=manager.load_id, **kwargs,
+        ).to_dict()
+
+    def test_the_layout_is_the_language_model_inside_the_wrapper(self):
+        for build_model, model_type in ((qwen3_5_model, "qwen3_5"), (gemma4_model, "gemma4")):
+            with self.subTest(model=model_type):
+                manager = self.manager_for(build_model)
+                model = manager.model
+                # Depth and width live in the text config alone.
+                self.assertFalse(hasattr(model.config, "num_hidden_layers"))
+                layout = jacobian_lens.model_layout(manager._engine())
+                language = model.model.language_model
+                self.assertEqual(layout.model_type, model_type)
+                self.assertEqual(layout.width, 16)
+                self.assertEqual(len(layout.blocks), 4)
+                self.assertTrue(all(a is b for a, b in zip(layout.blocks, language.layers)))
+                self.assertIs(layout.norm, language.norm)
+                self.assertTrue(all(a is b for a, b in zip(layout.blocks, steering.decoder_layers(model))))
+
+    def test_text_only_loads_of_the_same_families_are_allowed(self):
+        for model_type in ("qwen3_5", "qwen3_5_text", "gemma4", "gemma4_text"):
+            jacobian_lens._check_type(model_type)
+        with self.assertRaisesRegex(ValueError, "Qwen3.5, Gemma 2, 3 and 4"):
+            jacobian_lens._check_type("qwen3_5_moe")
+
+    def test_readout_matches_the_wrapped_blocks_through_norm_head_and_soft_cap(self):
+        for build_model in (qwen3_5_model, gemma4_model):
+            with self.subTest(model=build_model.__name__):
+                manager = self.manager_for(build_model)
+                model = manager.model
+                language = model.model.language_model
+                captured, handles = {}, []
+                for layer in self.data["J"]:
+                    def capture(_module, _inputs, output, layer=layer):
+                        captured[layer] = output.detach().clone()
+                    handles.append(language.layers[layer].register_forward_hook(capture))
+                with torch.no_grad():
+                    reference = model(torch.tensor([self.ids])).logits[0]
+                for handle in handles:
+                    handle.remove()
+                softcap = getattr(model.config.get_text_config(), "final_logit_softcapping", None)
+                index = 3
+                result = self.inspect(manager, index, pinned_id=self.ids[index])
+                self.assertEqual(
+                    [cell["token_id"] for cell in result["slice"]["output"]],
+                    reference[: index + 1].argmax(dim=-1).tolist(),
+                )
+                for row in result["layers"]:
+                    with torch.no_grad():
+                        expected = model.lm_head(language.norm(captured[row["layer"]] @ self.data["J"][row["layer"]].T))
+                        if softcap:
+                            expected = torch.tanh(expected / softcap) * softcap
+                    values, ids = expected[0, index].topk(5)
+                    self.assertEqual([c["token_id"] for c in row["candidates"]], ids.tolist())
+                    np.testing.assert_allclose([c["score"] for c in row["candidates"]], values.numpy(), atol=1e-5)
+
+    def test_the_head_applies_the_soft_cap_the_text_config_holds(self):
+        manager = self.manager_for(gemma4_model)
+        normed = torch.randn(2, 16)
+        with torch.no_grad():
+            raw = manager.model.lm_head(normed)
+            capped = manager._engine().read_head(normed)
+        torch.testing.assert_close(capped, torch.tanh(raw / 0.05) * 0.05)
+
+    def test_a_steered_pass_is_what_the_lens_reads(self):
+        for build_model in (qwen3_5_model, gemma4_model):
+            with self.subTest(model=build_model.__name__):
+                manager = self.manager_for(build_model)
+                steered_layer = 1
+                vector = {
+                    "format": steering.FORMAT, "model_id": manager.model_id, "layer": steered_layer,
+                    "strength": 4.0, "vector": torch.randn(16).tolist(),
+                }
+                index = 4
+                plain = self.inspect(manager, index, pinned_id=self.ids[index])
+                steered = self.inspect(manager, index, pinned_id=self.ids[index], steering=vector)
+                ranks = lambda result: {  # noqa: E731
+                    row["layer"]: [cell["pinned_rank"] for cell in row["cells"]]
+                    for row in result["slice"]["layers"]
+                }
+                scores = lambda result: {  # noqa: E731
+                    row["layer"]: [cell["pinned_score"] for cell in row["cells"]]
+                    for row in result["slice"]["layers"]
+                }
+                # Blocks before the steered one are untouched; it and later ones move.
+                np.testing.assert_allclose(scores(plain)[0], scores(steered)[0], atol=1e-5)
+                for layer in (1, 2):
+                    self.assertFalse(np.allclose(scores(plain)[layer], scores(steered)[layer], atol=1e-3))
+                self.assertNotEqual(
+                    [ranks(plain)[layer] for layer in (1, 2)], [ranks(steered)[layer] for layer in (1, 2)],
+                )
+                # The model's own row comes from the steered pass as well.
+                self.assertNotEqual(
+                    [c["pinned_score"] for c in plain["slice"]["output"]],
+                    [c["pinned_score"] for c in steered["slice"]["output"]],
+                )
+                # Turning steering off reads the plain pass again.
+                again = self.inspect(manager, index, pinned_id=self.ids[index])
+                np.testing.assert_allclose(scores(plain)[2], scores(again)[2], atol=1e-5)
+
+
+class LargeLensTests(unittest.TestCase):
+    """A lens over 2 GiB, the size of the published 27B and 31B ones, imports both ways."""
+
+    WIDTH = 8192
+    LAYERS = 17  # 17 float16 8192 × 8192 matrices are 2.125 GiB.
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        if shutil.disk_usage(cls.directory.name).free < 6 * 1024**3:
+            cls.directory.cleanup()
+            raise unittest.SkipTest("needs 6 GiB of free disk: the lens and the copy an import keeps")
+        cls.path = Path(cls.directory.name) / "large.pt"
+        matrix = torch.eye(cls.WIDTH, dtype=torch.float16)
+        torch.save({
+            "J": {layer: matrix.clone() for layer in range(cls.LAYERS)},
+            "source_layers": list(range(cls.LAYERS)), "n_prompts": 1000, "d_model": cls.WIDTH,
+            "provenance": {"model_id": "test/tiny-decoder"},
+        }, cls.path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def test_a_lens_over_2_gib_imports_from_disk_and_from_the_hub(self):
+        from chatlab.ui import inspection, runtime
+
+        self.assertGreater(self.path.stat().st_size, 2 * 1024**3)
+        manager = small_manager()
+        layout = jacobian_lens.Layout("torch", [None] * (self.LAYERS + 1), None, self.WIDTH, "llama")
+        store = Path(self.directory.name) / "config" / "jacobian_lenses.json"
+
+        def fake_download(repository, filename, local_dir):
+            target = Path(local_dir) / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.link(self.path, target)
+            return str(target)
+
+        metadata = mock.Mock(size=self.path.stat().st_size)
+        with mock.patch.object(jacobian_lens, "model_layout", return_value=layout), mock.patch.object(
+            jacobian_lens, "store_path", return_value=store,
+        ), mock.patch.object(runtime, "MANAGER", manager), mock.patch(
+            "huggingface_hub.hf_hub_download", side_effect=fake_download,
+        ), mock.patch("huggingface_hub.get_hf_file_metadata", return_value=metadata):
+            imported, status = inspection.import_jacobian_lens(str(self.path), manager.model_id)
+            self.assertIn("import_id", imported, status)
+            self.assertIn(f"{self.LAYERS} fitted layers", status)
+            imported, status = inspection.import_jacobian_lens(
+                None, manager.model_id, "org/lenses", "large/lens.pt",
+            )
+            self.assertIn("import_id", imported, status)
+
+
 @needs_mlx
 class MlxJacobianLensTests(unittest.TestCase):
     """The same lens read through an MLX conversion of the fitted model."""
@@ -776,6 +1003,36 @@ class MlxJacobianLensTests(unittest.TestCase):
         rendered = charts.jacobian_lens_chart(result)
         self.assertIn("4-bit MLX weights", rendered)
 
+    def test_a_half_precision_conversion_passes_the_replay_over_a_long_slice(self):
+        # The model's head reads every fed position at once; a replay of the
+        # last row alone, or in float32, rounds differently in bfloat16.
+        from mlx.utils import tree_map
+
+        from chatlab.mlx_runtime import MLX_THREAD, MlxEngine
+        from mlx_support import HIDDEN, LAYERS, tiny_llama
+
+        mx = self.mx
+
+        def build():
+            model = tiny_llama(vocab=512)
+            model.update(tree_map(lambda array: array.astype(mx.bfloat16) * 8, model.parameters()))
+            mx.eval(model.parameters())
+            return model
+
+        model = MLX_THREAD.run(build)
+        self.manager.model = model
+        self.manager.engine = MlxEngine(model, {
+            "eos_token_id": 99, "model_type": "llama",
+            "hidden_size": HIDDEN, "num_hidden_layers": LAYERS,
+        })
+        self.manager.tokenizer = type(self.manager.tokenizer)(tuple(f"t{i}" for i in range(512)), 1)
+        self.manager.load_count += 1
+        imported = self.manager.import_jacobian_lens(str(self.path), "test/tiny-decoder")
+        result = self.manager.inspect_jacobian(
+            list(range(3, 60)), 56, lens_id=imported["import_id"], load_id=self.manager.load_id,
+        ).to_dict()
+        self.assertEqual(len(result["slice"]["tokens"]), 57)
+
     def test_the_declared_source_must_name_the_conversion(self):
         with self.assertRaisesRegex(ValueError, "MLX conversion"):
             self.manager.import_jacobian_lens(str(self.path), "test/other-decoder")
@@ -791,6 +1048,96 @@ class MlxJacobianLensTests(unittest.TestCase):
         ):
             self.manager.model_id = conversion
             self.assertIn("import_id", self.manager.import_jacobian_lens(str(self.path), "test/tiny-decoder"))
+
+
+@needs_mlx
+class MlxImageTextWrapperTests(unittest.TestCase):
+    """MLX conversions of Qwen3.5 and Gemma 4 keep their settings under text_config."""
+
+    QWEN = {
+        "model_type": "qwen3_5", "text_config": {
+            "model_type": "qwen3_5_text", "hidden_size": 16, "intermediate_size": 32,
+            "num_hidden_layers": 4, "num_attention_heads": 2, "num_key_value_heads": 1,
+            "head_dim": 8, "linear_num_value_heads": 2, "linear_num_key_heads": 1,
+            "linear_key_head_dim": 8, "linear_value_head_dim": 8, "full_attention_interval": 2,
+            "vocab_size": 32, "tie_word_embeddings": False, "rms_norm_eps": 1e-6,
+        },
+    }
+    GEMMA = {
+        "model_type": "gemma4", "vocab_size": 32, "text_config": {
+            "model_type": "gemma4_text", "hidden_size": 16, "intermediate_size": 32,
+            "num_hidden_layers": 4, "num_attention_heads": 2, "num_key_value_heads": 1,
+            "head_dim": 8, "global_head_dim": 8, "sliding_window": 4,
+            "layer_types": ["sliding_attention", "full_attention"] * 2,
+            "hidden_size_per_layer_input": 4, "vocab_size_per_layer_input": 32,
+            "num_kv_shared_layers": 1, "final_logit_softcapping": 0.05,
+            "use_double_wide_mlp": False,
+        },
+    }
+
+    def manager_for(self, config):
+        import mlx.core as mx
+        from mlx_lm.models import gemma4, qwen3_5
+
+        from chatlab.mlx_runtime import MLX_THREAD, MlxEngine
+
+        module = {"qwen3_5": qwen3_5, "gemma4": gemma4}[config["model_type"]]
+
+        def build():
+            # Built on the MLX thread: these models hold arrays outside
+            # parameters() that are evaluated on their first forward.
+            mx.random.seed(5)
+            model = module.Model(module.ModelArgs.from_dict(config))
+            model.eval()
+            mx.eval(model.parameters())
+            return model
+
+        model = MLX_THREAD.run(build)
+        manager = ModelManager()
+        manager.model = model
+        manager.engine = MlxEngine(model, dict(config, eos_token_id=31))
+        manager.tokenizer = build_tokenizer()
+        manager.model_id = "mlx-community/tiny-wrapper-4bit"
+        manager.kind = "mlx"
+        manager.precision = "4-bit"
+        return manager
+
+    def test_a_conversion_reads_its_lens_through_the_language_model(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "lens.pt"
+        torch.manual_seed(1)
+        torch.save({
+            "J": {layer: torch.randn(16, 16) for layer in range(3)},
+            "source_layers": [0, 1, 2], "n_prompts": 10, "d_model": 16,
+        }, path)
+        for config in (self.QWEN, self.GEMMA):
+            with self.subTest(model=config["model_type"]):
+                manager = self.manager_for(config)
+                layout = jacobian_lens.model_layout(manager.engine)
+                self.assertEqual((layout.width, len(layout.blocks)), (16, 4))
+                imported = manager.import_jacobian_lens(str(path), "test/tiny-wrapper")
+                # The final-block replay inside the read is what checks the
+                # head: an untied lm_head under language_model for Qwen3.5,
+                # the soft-cap from text_config for Gemma 4.
+                result = manager.inspect_jacobian(
+                    [3, 5, 7, 11, 13], 3, lens_id=imported["import_id"],
+                    load_id=manager.load_id, pinned_id=7,
+                ).to_dict()
+                self.assertEqual([row["layer"] for row in result["layers"]], [0, 1, 2])
+                for column in result["slice"]["layers"]:
+                    self.assertEqual(len(column["cells"]), 4)
+                if config is self.GEMMA:
+                    for row in result["layers"]:
+                        self.assertLessEqual(max(abs(c["score"]) for c in row["candidates"]), 0.05 + 1e-6)
+
+    def test_text_settings_lay_the_text_config_over_the_top_level(self):
+        from chatlab.mlx_runtime import text_settings
+
+        merged = text_settings(self.GEMMA)
+        self.assertEqual(merged["model_type"], "gemma4_text")
+        self.assertEqual(merged["final_logit_softcapping"], 0.05)
+        self.assertEqual(text_settings({"hidden_size": 8}), {"hidden_size": 8})
 
 
 if __name__ == "__main__":

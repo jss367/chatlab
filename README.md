@@ -349,9 +349,12 @@ probabilities or evidence, by themselves, that a concept caused the
 response. Visible decoder blocks are numbered from 1; artifact layer indices
 start at 0 and refer to block outputs before the final normalization.
 
-Supported are Llama, Mistral, Qwen2, Qwen3, Gemma 2 and 3, OLMo 2 and 3,
-GLM-4, Phi-3, Granite, Cohere, and SmolLM3 text models, loaded either as
-unquantized Transformers weights or as MLX conversions. An MLX conversion
+Supported are Llama, Mistral, Qwen2, Qwen3, Qwen3.5, Gemma 2, 3 and 4,
+OLMo 2 and 3, GLM-4, Phi-3, Granite, Cohere, and SmolLM3 text models, loaded
+either as unquantized Transformers weights or as MLX conversions. Qwen3.5
+(and Qwen3.6) and Gemma 4 checkpoints are image-text models; the lens reads
+their language model's blocks, the same ones a steering vector is added to,
+so with steering on the readout shows the steered pass. An MLX conversion
 runs at the width it was converted to, while every published lens was
 fitted on full-precision weights, so its readouts are approximate and the
 panel says so; the final-block check below still applies. For an MLX load,
@@ -374,9 +377,10 @@ redownloaded at a new revision is not brought back; import it again. To fit
 your own, use the
 [reference fitting tools](https://github.com/anthropics/jacobian-lens#fit)
 outside ChatLab and export with `lens.save("lens.pt")`. ChatLab accepts that
-saved artifact directly, up to 2 GiB; a resumable fitting checkpoint is a
+saved artifact directly, up to 8 GiB; a resumable fitting checkpoint is a
 different format. It expects `J`, `d_model`, `source_layers`, and
-`n_prompts`. Matrices are mapped into CPU memory and the transport runs
+`n_prompts`, and checks a recorded `model_id` (or `provenance["model_id"]`,
+as Neuronpedia's `fit_lens.py` writes it) against the fitted model ID. Matrices are mapped into CPU memory and the transport runs
 there one block at a time, so the lens never takes accelerator memory; only
 the model's own norm and head run where its weights are.
 
