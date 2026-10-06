@@ -488,6 +488,30 @@ class ArchiveFileTests(unittest.TestCase):
             self.assertEqual(restored["archived_updated"], forks["archived_updated"])
             self.assertNotIn(library.ARCHIVE_COMPAT_KEY, restored["sampling"].get("Chat 1", {}))
 
+    def test_archive_advances_the_wire_carrier_without_claiming_sampling(self):
+        forks = new_forks()
+        put_branch(forks, "Chat 1", [make_turn("user", "kept")])
+        put_branch_sampling(forks, "Chat 1", {"temperature": 0.4})
+        stale_wire = json.loads(library.dump(forks))["branches"][1]
+        put_branch_archived(forks, "Chat 1", True)
+        current_wire = json.loads(library.dump(forks))["branches"][1]
+        self.assertGreater(current_wire["sampling_updated"], stale_wire["sampling_updated"])
+        restored = library.parse(library.dump(forks))
+        self.assertEqual(restored["sampling_updated"], forks["sampling_updated"])
+        self.assertEqual(restored["sampling"]["Chat 1"], {"temperature": 0.4})
+
+    def test_an_older_writers_new_sampling_stamp_is_retained(self):
+        payload = json.loads(library.dump(self.archived()))
+        branch = payload["branches"][1]
+        branch.pop("archived")
+        branch.pop("archived_updated")
+        branch["sampling"]["temperature"] = 0.7
+        stamp = branch["sampling_updated"] = branch_stamp()
+        restored = library.parse(json.dumps(payload))
+        self.assertEqual(restored["sampling_updated"]["Chat 1"], stamp)
+        self.assertEqual(restored["sampling"]["Chat 1"], {"temperature": 0.7})
+        self.assertTrue(restored["archived"]["Chat 1"])
+
     def test_native_restore_stamp_overrides_a_stale_compatibility_copy(self):
         payload = json.loads(library.dump(self.archived()))
         branch = payload["branches"][1]

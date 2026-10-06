@@ -167,13 +167,18 @@ def dump(forks: dict | None) -> str:
             sampling[ARCHIVE_COMPAT_KEY] = {
                 "branch": name, "archived": bool(forks["archived"].get(name)),
                 "updated": forks["archived_updated"][name],
+                "sampling_updated": forks["sampling_updated"].get(name),
             }
         if sampling:
             entry["sampling"] = sampling
         # Written whether or not there is sampling beside it: a stamp on its
         # own says the sampling was taken away, and another page holding an
         # older copy must not put it back.
-        stamp = forks["sampling_updated"].get(name)
+        # Older writers merge this carrier by the sampling stamp. Advance the
+        # wire stamp for archival too, retaining the real sampling stamp in
+        # the compatibility record so current writers still merge independently.
+        stamp = max(forks["sampling_updated"].get(name, ""),
+                    forks["archived_updated"].get(name, ""))
         if stamp:
             entry["sampling_updated"] = stamp
         if forks["archived"].get(name):
@@ -255,6 +260,10 @@ def parse(payload: str) -> dict:
         # Read whether or not any sampling came with it: on its own it says
         # the sampling was taken away, and when it was.
         sampling_stamp = entry.get("sampling_updated")
+        if (isinstance(legacy_archive, dict) and legacy_archive.get("branch") == name
+                and sampling_stamp == legacy_archive.get("updated")
+                and "sampling_updated" in legacy_archive):
+            sampling_stamp = legacy_archive["sampling_updated"]
         if sampling_stamp is not None:
             if not isinstance(sampling_stamp, str):
                 raise ValueError(
