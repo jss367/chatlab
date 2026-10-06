@@ -503,6 +503,36 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertNotIn("Fork 1", self.state[self.forks._id]["branches"])
         self.assertNotIn("Fork 1", library.read()["branches"])
 
+    def test_deleting_from_another_page_waits_for_the_shared_run(self):
+        self.state[self.forks._id]["active"] = "Chat 1"
+        self.state[self.turns._id] = [make_turn("user", "Another conversation")]
+        self.start()
+        self.call("archive_conversation", {0: json.dumps({"name": "Chat 1", "archived": True})})
+        source_state = self.state
+        self.state = SessionState(self.demo)
+        self.state[self.forks._id] = library.read()
+        try:
+            self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+            self.assertIn("Chat 1", library.read()["branches"])
+            self.assertTrue(self.manager.busy)
+            self.finish()
+            self.assertEqual(library.read()["branches"]["Chat 1"][-1]["content"], "Hello world")
+            self.state[self.forks._id] = library.read()
+            self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+            self.assertNotIn("Chat 1", library.read()["branches"])
+            self.assertFalse(self.manager.busy)
+            self.state = source_state
+            self.call("poll")
+            self.assertNotIn("Chat 1", library.read()["branches"])
+        finally:
+            self.state = source_state
+
+    def test_failed_delete_releases_the_shared_slot(self):
+        with mock.patch.object(library, "write", side_effect=OSError("write failed")):
+            with self.assertRaisesRegex(OSError, "write failed"):
+                self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+        self.assertFalse(self.manager.busy)
+
 
 class BackgroundSnapshotTests(unittest.TestCase):
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):

@@ -351,7 +351,7 @@ class ConversationEvents:
             None,
         )
 
-        def handler(*args):
+        def apply_handler(args, held=None):
             data = dict(zip(actual_inputs, args))
             job = data[self.state]
             forks, turns = job.merge(data[self.forks], data[self.turns])
@@ -377,6 +377,10 @@ class ConversationEvents:
                 result[status_output] = (
                     f"{job.owner} is generating. Press Stop or wait for it to finish first."
                 )
+            elif held is not None:
+                from chatlab.ui.generation import busy_status
+
+                result[status_output] = busy_status(held)
             else:
                 call_args = [data[component] for component in inputs]
                 if event:
@@ -442,6 +446,22 @@ class ConversationEvents:
             result[self.outputs["send"]], result[self.outputs["stop"]] = job.controls(forks)
             library.write(library.as_seen(forks, turns))
             return tuple(result.get(component, gr.skip()) for component in actual_outputs)
+
+        def handler(*args):
+            if not exclusive:
+                return apply_handler(args)
+            from chatlab.ui import runtime
+
+            # A different browser session can own the worker. Hold the shared
+            # slot through the deletion's final write so its next frame cannot
+            # resurrect the conversation, nor start between the check and write.
+            manager = runtime.MANAGER
+            held = manager.claim_generation()
+            try:
+                return apply_handler(args, held)
+            finally:
+                if held is None:
+                    manager.release_generation()
 
         handler.__name__ = fn.__name__
         parameters = [
