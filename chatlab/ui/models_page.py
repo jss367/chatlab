@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
 import threading
@@ -1468,7 +1469,7 @@ def go_to_image_models(
 def select_model_to_load(model_id, title="Model selected", note=""):
     """Put ``model_id`` in the ID box and open Models; loading stays a click away.
 
-    Update the ID, both model selections and removal confirmation together.
+    Update the ID and both model selections together.
     Programmatic ID changes do not fire the typing listener that normally
     clears the selected row, which would otherwise override this ID.
 
@@ -1490,7 +1491,6 @@ def select_model_to_load(model_id, title="Model selected", note=""):
             f"`{model_id}` is selected. Choose **Load cached** to use local files, "
             "or **Download and load** to fetch the model and load it." + note,
         ),
-        *hide_remove_confirm(),
         *go_to_models(),
     )
 
@@ -2084,120 +2084,73 @@ def downloading_refusal(selected: str) -> tuple[str, str]:
     )
 
 
-def removal_refusal(selected: str | None) -> tuple[str, str] | None:
-    """Why ``selected`` cannot be removed right now, as a card, or None.
+def remove_my_model(name: str | None):
+    """Delete ``name`` from the cache and report the space freed.
 
-    An early answer for the confirmation step only. The deletion itself goes
-    through :meth:`ModelManager.remove`, which makes the same checks under
-    the manager's locks; this look is not atomic with anything.
+    ``name`` is the model whose row's Remove was pressed twice, not the
+    radio's selection, so the model deleted is always the one the reader
+    pressed on. The deletion goes through :meth:`ModelManager.remove`, which
+    refuses a model that is loaded, downloading or busy under the manager's
+    locks.
     """
 
-    if not selected:
-        return "Nothing to remove", NO_MODEL_TO_MANAGE
-    if runtime.MANAGER.model_id == selected:
-        return loaded_refusal(selected)
-    if selected in runtime.MANAGER.active_downloads:
-        return downloading_refusal(selected)
-    return None
-
-
-def ask_remove_my_model(selected: str | None):
-    """Show the confirmation for removing the chosen model, or say why not.
-
-    Returns the card, the confirmation's visibility, its question, and the
-    model the question is about. That last value is what the confirm button
-    deletes: the radio can be moved to another model in the moment between
-    a click on **Remove from disk** and the response that hides the panel,
-    and a deletion that read the live selection would then take the model
-    the reader never agreed to lose.
-    """
-
-    hidden = gr.update(visible=False)
-    refusal = removal_refusal(selected)
-    if refusal is not None:
-        return status_card(*refusal), hidden, "", None
-    entry = next(
-        (entry for entry in list_cached_models() if entry.model_id == selected), None
-    )
-    if entry is None:
-        return (
-            status_card("Nothing to remove", f"`{selected}` is no longer in the cache."),
-            hidden,
-            "",
-            None,
-        )
-    question = (
-        f"Remove `{selected}` ({format_bytes(entry.size_bytes)}) from disk? "
-        "This deletes its folder from the Hugging Face cache and cannot be undone."
-    )
-    return gr.skip(), gr.update(visible=True), question, selected
-
-
-def remove_my_model(pending: str | None):
-    """Delete the model the confirmation named and report the space freed.
-
-    ``pending`` is the ID :func:`ask_remove_my_model` stored, not the radio's
-    current value, so the model deleted is always the one the question
-    showed. The pending ID is cleared on every path.
-    """
-
-    hidden = gr.update(visible=False)
-    if not pending:
-        return status_card("Nothing to remove", NO_MODEL_TO_MANAGE), hidden, None
-    logger.info("Removal confirmed for %s", pending)
+    if not name:
+        return status_card("Nothing to remove", NO_MODEL_TO_MANAGE)
+    logger.info("Removal confirmed for %s", name)
     try:
-        freed = runtime.MANAGER.remove(pending)
+        freed = runtime.MANAGER.remove(name)
     except ModelLoaded:
-        logger.info("Removal of %s refused: it is loaded", pending)
-        return status_card(*loaded_refusal(pending)), hidden, None
+        logger.info("Removal of %s refused: it is loaded", name)
+        return status_card(*loaded_refusal(name))
     except ModelDownloading:
-        logger.info("Removal of %s refused: it is downloading", pending)
-        return status_card(*downloading_refusal(pending)), hidden, None
+        logger.info("Removal of %s refused: it is downloading", name)
+        return status_card(*downloading_refusal(name))
     except ModelBusy:
-        logger.info("Removal of %s refused: the manager is busy", pending)
-        return (
-            status_card(
-                "Model busy",
-                f"`{pending}` cannot be removed while a model is loading, generating, "
-                "scoring, or being inspected. Try again when it is idle.",
-            ),
-            hidden,
-            None,
+        logger.info("Removal of %s refused: the manager is busy", name)
+        return status_card(
+            "Model busy",
+            f"`{name}` cannot be removed while a model is loading, generating, "
+            "scoring, or being inspected. Try again when it is idle.",
         )
     except FileNotFoundError:
-        logger.info("Removal of %s found nothing: it is no longer cached", pending)
-        return (
-            status_card("Nothing to remove", f"`{pending}` is no longer in the cache."),
-            hidden,
-            None,
-        )
+        logger.info("Removal of %s found nothing: it is no longer cached", name)
+        return status_card("Nothing to remove", f"`{name}` is no longer in the cache.")
     except (OSError, ValueError) as error:
-        logger.warning("Could not remove %s", pending, exc_info=True)
-        return (
-            failure_card(
-                "Could not remove model",
-                f"Removing `{pending}` failed: {html.escape(str(error))}",
-            ),
-            hidden,
-            None,
+        logger.warning("Could not remove %s", name, exc_info=True)
+        return failure_card(
+            "Could not remove model",
+            f"Removing `{name}` failed: {html.escape(str(error))}",
         )
-    logger.info("Removed %s from the cache, freeing %s", pending, format_bytes(freed))
-    return (
-        status_card(
-            "Model removed",
-            f"Removed `{pending}` from the Hugging Face cache, "
-            f"freeing {format_bytes(freed)}.",
-            "success",
-        ),
-        hidden,
-        None,
+    logger.info("Removed %s from the cache, freeing %s", name, format_bytes(freed))
+    return status_card(
+        "Model removed",
+        f"Removed `{name}` from the Hugging Face cache, freeing {format_bytes(freed)}.",
+        "success",
     )
 
 
-def hide_remove_confirm():
-    """Withdraw a pending removal: hide the question and forget its model."""
+def act_on_my_model(action: str | None, hf_token: str):
+    """Redownload or remove the model a My Models row's button named.
 
-    return gr.update(visible=False), None
+    ``action`` is what the row script in ui.model_rows writes to its bridge:
+    the model's ID, which button was pressed, and a nonce. Anything else is
+    ignored rather than guessed at.
+    """
+
+    try:
+        request = json.loads(action or "")
+    except ValueError:
+        request = None
+    if not isinstance(request, dict) or not isinstance(request.get("name"), str):
+        yield gr.skip()
+        return
+    name = request["name"]
+    if request.get("action") == "redownload":
+        yield from redownload_my_model(name, hf_token)
+    elif request.get("action") == "remove":
+        yield remove_my_model(name)
+    else:
+        yield gr.skip()
 
 
 # The columns a search result can fill, in the order they are shown. A column

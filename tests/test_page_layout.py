@@ -15,6 +15,7 @@ import gradio as gr
 from chatlab import app
 from chatlab.ui import common, icons, models_page, runtime
 from chatlab.ui.conversation_rows import ARCHIVE_BRIDGE_ID, CONVERSATION_ROWS_JS, DELETE_BRIDGE_ID
+from chatlab.ui.model_rows import MODEL_ACTION_BRIDGE_ID, MODEL_LIST_ID, MODEL_ROWS_JS
 from chatlab import settings
 from chatlab.model_cache import CacheStatus
 from chatlab.model_runtime import ModelManager
@@ -480,9 +481,9 @@ class PageLayoutTests(unittest.TestCase):
         # that started while the chat page was out of sight, and the timer
         # catches one another tab started.
         # The four that change memory (the switcher included), the download
-        # that only changes what is on disk, redownload and a confirmed
-        # removal, plus the page load, the nav and the timer.
-        self.assertEqual(len(listeners_named(self.demo, "refresh_model_badge")), 10)
+        # that only changes what is on disk, a row's redownload or removal,
+        # plus the page load, the nav and the timer.
+        self.assertEqual(len(listeners_named(self.demo, "refresh_model_badge")), 9)
 
     def test_the_timer_also_un_sticks_the_scored_token_count(self):
         # A count asked for during a reply gives up and says so, and that
@@ -620,13 +621,13 @@ class PageLayoutTests(unittest.TestCase):
         self.assertIn(self.by_id("model-search-results"), listener.outputs)
 
     def test_every_model_change_rescans_the_cache(self):
-        # Download, download-and-load, load cached, unload, redownload,
-        # confirmed removal, the refresh button, a new sort order, a new kind
+        # Download, download-and-load, load cached, unload, a row's
+        # redownload or removal, the refresh button, a new sort order, a new kind
         # filter, a typed name, a new weight precision, the page load and a
         # pick in the chat page's switcher each rescan. Selecting the default
         # only navigates, and the Images page's button rescans inside
         # go_to_image_models.
-        self.assertEqual(len(listeners_named(self.demo, "refresh_my_models")), 13)
+        self.assertEqual(len(listeners_named(self.demo, "refresh_my_models")), 12)
 
     def test_model_actions_follow_selections_and_cache_refreshes(self):
         listeners = listeners_named(self.demo, "refresh_model_actions")
@@ -650,10 +651,10 @@ class PageLayoutTests(unittest.TestCase):
             if dependency["id"] in {fn._id for fn in listeners}
             and dependency["trigger_after"] in refresh_ids
         ]
-        # All seven mutations (the switcher included), manual refresh, and
+        # All six mutations (the switcher included), manual refresh, and
         # startup refresh the controls even when the radio's selected value
         # stays the same.
-        self.assertEqual(len(chained), 9)
+        self.assertEqual(len(chained), 8)
 
     def test_the_timer_refreshes_the_actions_through_the_gated_handler(self):
         # The timer ticks in every open session for the life of the app, so
@@ -735,7 +736,7 @@ class PageLayoutTests(unittest.TestCase):
             if dependency["id"] in {fn._id for fn in views}
             and dependency["trigger_after"] in action_ids
         ]
-        self.assertEqual(len(chained), 9)
+        self.assertEqual(len(chained), 8)
 
     def test_every_load_reads_the_my_models_selection(self):
         # The ID box lags a row selection by a server round trip, so a button
@@ -812,32 +813,20 @@ class PageLayoutTests(unittest.TestCase):
         for fn in listeners:
             self.assertIn(radio, fn.outputs)
 
-    def test_removal_asks_before_deleting(self):
-        # The Remove button only opens the question; deleting is the
-        # confirm button's job. Cancelling withdraws it, and so does naming
-        # another model, whether by choosing a row or by typing an ID.
-        (ask,) = listeners_named(self.demo, "ask_remove_my_model")
-        (remove,) = listeners_named(self.demo, "remove_my_model")
-        buttons = {
-            self.demo.blocks[block_id].value: fn
-            for fn in (ask, remove)
-            for block_id, _ in fn.targets
-        }
-        self.assertIs(buttons["Remove"], ask)
-        self.assertIs(buttons["Remove from disk"], remove)
-        self.assertEqual(len(listeners_named(self.demo, "hide_remove_confirm")), 3)
-
-    def test_the_confirm_button_deletes_the_model_the_question_named(self):
-        # The confirm handler reads the stored pending ID, not the radio, so
-        # a selection moved after the question opened cannot redirect it.
-        (ask,) = listeners_named(self.demo, "ask_remove_my_model")
-        (remove,) = listeners_named(self.demo, "remove_my_model")
-        radio = self.labelled("Downloaded models")
-        (pending,) = remove.inputs
-        self.assertIsInstance(pending, gr.State)
-        self.assertIsNot(pending, radio)
-        self.assertIn(pending, ask.outputs)
-        self.assertIn(pending, remove.outputs)
+    def test_each_row_acts_on_the_model_it_names(self):
+        # Redownload and Remove are on the rows, and their presses come in
+        # through one hidden bridge that carries the row's model ID. The
+        # handler reads that, never the radio, so a selection elsewhere
+        # cannot redirect a press.
+        (act,) = listeners_named(self.demo, "act_on_my_model")
+        bridge = self.by_id(MODEL_ACTION_BRIDGE_ID)
+        self.assertEqual(act.targets, [(bridge._id, "input")])
+        self.assertNotIn(self.labelled("Downloaded models"), act.inputs)
+        self.assertEqual(act.inputs[0], bridge)
+        self.assertEqual(act.outputs, [self.by_id("model-status")])
+        self.assertIn(MODEL_ACTION_BRIDGE_ID, MODEL_ROWS_JS)
+        self.assertIn(MODEL_LIST_ID, MODEL_ROWS_JS)
+        self.assertEqual(self.labelled("Downloaded models").elem_id, MODEL_LIST_ID)
 
     def test_clear_asks_before_it_takes_every_conversation(self):
         # Clear reaches past the conversation on screen: it deletes every
@@ -960,8 +949,6 @@ class PageLayoutTests(unittest.TestCase):
                 listeners_named(self.demo, "select_search_result")[0].outputs[2],
                 listeners_named(self.demo, "select_search_result")[0].outputs[1],
                 self.by_id("model-status"),
-                listeners_named(self.demo, "hide_remove_confirm")[0].outputs[0],
-                listeners_named(self.demo, "hide_remove_confirm")[0].outputs[1],
                 self.by_id("nav"),
                 self.by_id("conversation-pane"),
                 self.by_id("chat-page"),
