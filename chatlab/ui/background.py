@@ -452,7 +452,7 @@ class ConversationEvents:
             result[self.turns], result[self.forks] = turns, forks
             result[self.picker] = job.choices(forks, turns)
             result[self.outputs["send"]], result[self.outputs["stop"]] = job.controls(forks)
-            library.write(library.as_seen(forks, turns))
+            library.write(library.as_seen(forks, turns), preserve_archived=clear)
             return tuple(result.get(component, gr.skip()) for component in actual_outputs)
 
         def handler(*args):

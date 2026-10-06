@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from chatlab import library
+
 import contextlib
 import logging
 import time
@@ -1873,10 +1875,12 @@ def clear_chat(
     """
 
     reset = panel_reset([], scale_name)
-    known = copy_forks(forks)
-    if turns is not None:
-        known["branches"][known["active"]] = copy_turns(turns)
-    archived = [name for name in known["branches"] if branch_archived(known, name)]
+    known = library.as_seen(forks, turns) if turns is not None else copy_forks(forks)
+    # Archival can have changed in another page since this page loaded. Keep
+    # its latest transcript and metadata; newly created unarchived branches
+    # remain outside the clear's original scope.
+    latest = library.merge(known, library.read())
+    archived = [name for name in latest["branches"] if branch_archived(latest, name)]
     forks = new_forks()
     stamp = branch_stamp()
     forks["updated"] = {
@@ -1886,11 +1890,11 @@ def clear_chat(
         name: stamp for name in (MAIN_BRANCH, *known["sampling"]) if name not in archived
     }
     for name in archived:
-        forks["branches"][name] = known["branches"][name]
+        forks["branches"][name] = latest["branches"][name]
         forks["archived"][name] = True
         for field in ("sampling", "sampling_updated", "archived_updated", "origins", "updated"):
-            if name in known[field]:
-                forks[field][name] = known[field][name]
+            if name in latest[field]:
+                forks[field][name] = latest[field][name]
     return Frame(
         CLEAR_OUTPUT_NAMES,
         chatbot=[],

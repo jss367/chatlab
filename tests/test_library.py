@@ -450,6 +450,22 @@ class ArchiveFileTests(unittest.TestCase):
         put_branch_archived(forks, "Chat 1", True)
         return forks
 
+    def test_clear_write_preserves_an_archive_and_its_followup_state_save(self):
+        archived = self.archived()
+        library.write(archived, self.path)
+        cleared = new_forks()
+        cleared["updated"]["Chat 1"] = branch_stamp()
+        library.write(cleared, self.path, preserve_archived=True)
+        # The state-change callback can still hold the clear's tombstone.
+        library.write(cleared, self.path)
+        saved = library.read(self.path)
+        self.assertTrue(saved["archived"]["Chat 1"])
+        self.assertEqual(saved["branches"]["Chat 1"][0]["content"], "put away")
+        # An explicit later delete is still permanent.
+        drop_branch(saved, "Chat 1")
+        library.write(saved, self.path)
+        self.assertNotIn("Chat 1", library.read(self.path)["branches"])
+
     def test_an_archived_conversation_comes_back_archived(self):
         library.write(self.archived(), self.path)
 

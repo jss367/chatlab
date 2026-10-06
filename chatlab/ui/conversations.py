@@ -17,6 +17,7 @@ from chatlab import settings
 from chatlab.steering import from_controls as steering_from_controls, compact as compact_steering
 from chatlab.conversation import (
     ARCHIVED_VIEW,
+    branch_archived,
     CHAT_PREFIX,
     FORK_PREFIX,
     MAIN_BRANCH,
@@ -146,6 +147,8 @@ def restore_conversations():
     metrics = empty_metrics()
     if forks is None:
         return Frame(RESTORE_OUTPUT_NAMES, metrics=metrics)
+    if branch_archived(forks, forks["active"]):
+        forks[ARCHIVED_VIEW] = True
     turns = copy_turns(forks["branches"][forks["active"]])
     messages, _ = display_messages(turns)
     return Frame(

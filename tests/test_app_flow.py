@@ -4738,6 +4738,34 @@ class ConversationLibraryTests(unittest.TestCase):
         self.assertEqual(update["value"], "Fork 1")
         self.assertEqual([name for _label, name in update["choices"]], [MAIN_BRANCH, "Fork 1"])
 
+    def test_reload_of_an_archived_active_branch_shows_the_archive(self):
+        forks = new_forks()
+        put_branch(forks, "Chat 1", [make_turn("user", "kept")])
+        from chatlab.conversation import put_branch_archived
+        put_branch_archived(forks, "Chat 1", True)
+        forks["active"] = "Chat 1"
+        library.write(forks, self.path)
+        restored = app.restore_conversations()
+        self.assertTrue(restored["forks"][ARCHIVED_VIEW])
+        self.assertEqual(restored["conversation_list"]["value"], "Chat 1")
+        self.assertEqual(names_of(restored["conversation_list"]), ["Chat 1"])
+        self.assertEqual(restored["turns"][0]["content"], "kept")
+
+    def test_clear_from_a_stale_page_keeps_another_pages_archive(self):
+        forks = new_forks()
+        put_branch(forks, "Chat 1", [make_turn("user", "kept")])
+        put_branch(forks, "Chat 2", [make_turn("user", "clear")])
+        library.write(forks, self.path)
+        archived = app.archive_conversation(request("Chat 1"), [], forks)
+        app.remember_forks([], archived["forks"])
+        cleared = app.clear_chat(DEFAULT_COLOR_SCALE, forks, [])
+        app.remember_forks([], cleared["forks"])
+        self.assertTrue(cleared["forks"]["archived"]["Chat 1"])
+        self.assertIn("Archived conversations kept", cleared["status"])
+        saved = library.read(self.path)
+        self.assertEqual(saved["branches"]["Chat 1"][0]["content"], "kept")
+        self.assertNotIn("Chat 2", saved["branches"])
+
 
 class CancelWiringTests(unittest.TestCase):
     """All view writers serialize; background workers never publish to the view."""

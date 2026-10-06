@@ -506,7 +506,10 @@ def _replace(target: Path, text: str) -> bool:
     return True
 
 
-def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool = False) -> Path | None:
+def write(
+    forks: dict | None, path: Path | None = None, *,
+    preserve_active: bool = False, preserve_archived: bool = False,
+) -> Path | None:
     """Merge the pane into the file on disk and return the path; ``None`` if it could not be.
 
     What is on disk is read first and merged with ``forks`` as :func:`merge`
@@ -516,6 +519,8 @@ def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool
 
     Background jobs use ``preserve_active`` to save their source transcript
     without changing which conversation the reader selected most recently.
+    Clear all uses ``preserve_archived`` to keep branches archived by another
+    page, including one that saves between the clear handler and this write.
     """
 
     target = path or library_path()
@@ -524,6 +529,20 @@ def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool
             existing = _read_for_save(target)
         except OSError:
             return None
+        if preserve_archived and existing:
+            forks = copy_forks(forks)
+            for name in existing["archived"]:
+                if name not in forks["branches"] and name in forks["updated"]:
+                    forks["branches"][name] = existing["branches"][name]
+                    for field in ("sampling", "sampling_updated", "archived", "archived_updated", "origins"):
+                        if name in existing[field]:
+                            forks[field][name] = existing[field][name]
+                    # Keep the clear's stamp with the preserved branch. Its
+                    # next state-change save may still carry this tombstone;
+                    # at equal stamps, merge keeps the side with the branch.
+                    forks["updated"][name] = max(
+                        forks["updated"][name], existing["updated"].get(name, "")
+                    )
         merged = merge(forks, existing)
         if preserve_active and existing and existing["active"] in merged["branches"]:
             merged["active"] = existing["active"]
