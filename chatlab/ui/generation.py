@@ -13,6 +13,7 @@ from chatlab.steering import SteeringError, compact as compact_steering, from_co
 from chatlab import charts
 from chatlab.conversation import (
     MAIN_BRANCH,
+    branch_archived,
     branch_stamp,
     copy_forks,
     copy_turns,
@@ -1803,21 +1804,33 @@ def ask_clear_chat(turns: list[dict] | None, forks: dict | None):
 
     hidden = gr.update(visible=False)
     forks = copy_forks(forks)
-    others = max(len(forks["branches"]) - 1, 0)
-    if not turns and not others:
-        return NOTHING_TO_CLEAR, hidden, ""
-    if others:
-        loss = (
-            f"the conversation on screen and {others} other"
-            f"{'s' if others != 1 else ''}"
-        )
+    # Clear takes the conversations in the list and leaves the archive be.
+    listed = [name for name in forks["branches"] if not branch_archived(forks, name)]
+    kept = len(forks["branches"]) - len(listed)
+    on_screen = forks["active"] in listed
+    if on_screen:
+        others = len(listed) - 1
+        if not turns and not others:
+            return NOTHING_TO_CLEAR, hidden, ""
+        if others:
+            loss = (
+                f"the conversation on screen and {others} other"
+                f"{'s' if others != 1 else ''}"
+            )
+        else:
+            loss = "the conversation on screen"
     else:
-        loss = "the conversation on screen"
+        # The conversation on screen is an archived one, which Clear keeps.
+        if listed == [MAIN_BRANCH] and not forks["branches"][MAIN_BRANCH]:
+            return NOTHING_TO_CLEAR, hidden, ""
+        loss = f"the {len(listed)} conversation{'s' if len(listed) != 1 else ''} in the list"
     advice = (
-        " To remove only this one, use **Delete** above."
-        if forks["active"] != MAIN_BRANCH
+        " To remove only this one, archive it from the list."
+        if on_screen and forks["active"] != MAIN_BRANCH
         else ""
     )
+    if kept:
+        advice += f" The {kept} archived conversation{'s are' if kept != 1 else ' is'} kept."
     return (
         gr.skip(),
         gr.update(visible=True),
@@ -1829,8 +1842,12 @@ def hide_clear_confirm():
     return gr.update(visible=False)
 
 
-def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None):
-    """Empty everything the conversation owns.
+def clear_chat(
+    scale_name: str = DEFAULT_COLOR_SCALE,
+    forks: dict | None = None,
+    turns: list[dict] | None = None,
+):
+    """Empty everything the conversation owns, short of the archive.
 
     Clear cancels a running generation (see ``cancels`` on its listener), and a
     cancelled ``generate_reply`` never reaches its final yield, so this has to
@@ -1849,16 +1866,31 @@ def clear_chat(scale_name: str = DEFAULT_COLOR_SCALE, forks: dict | None = None)
     its own the file's older copy would look like the newer of the two and
     the emptied main conversation would come back pinned to the sampling of
     the one that was cleared.
+
+    Archived conversations are kept as they are, the one on screen included:
+    archiving is how a conversation is put out of Clear's reach. ``turns``
+    is the conversation on screen, which is kept that way when it is one.
     """
 
     reset = panel_reset([], scale_name)
     known = copy_forks(forks)
+    if turns is not None:
+        known["branches"][known["active"]] = copy_turns(turns)
+    archived = [name for name in known["branches"] if branch_archived(known, name)]
     forks = new_forks()
     stamp = branch_stamp()
-    forks["updated"] = {name: stamp for name in (MAIN_BRANCH, *known["branches"])}
-    forks["sampling_updated"] = {
-        name: stamp for name in (MAIN_BRANCH, *known["sampling"])
+    forks["updated"] = {
+        name: stamp for name in (MAIN_BRANCH, *known["branches"]) if name not in archived
     }
+    forks["sampling_updated"] = {
+        name: stamp for name in (MAIN_BRANCH, *known["sampling"]) if name not in archived
+    }
+    for name in archived:
+        forks["branches"][name] = known["branches"][name]
+        forks["archived"][name] = True
+        for field in ("sampling", "sampling_updated", "archived_updated", "origins", "updated"):
+            if name in known[field]:
+                forks[field][name] = known[field][name]
     return Frame(
         CLEAR_OUTPUT_NAMES,
         chatbot=[],

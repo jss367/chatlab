@@ -16,6 +16,7 @@ from chatlab.conversation import (
     make_turn,
     new_forks,
     put_branch,
+    put_branch_archived,
     put_branch_sampling,
 )
 
@@ -433,6 +434,86 @@ class SamplingFileTests(unittest.TestCase):
         merged = library.merge(stamped(MAIN_BRANCH, Main="mine"), theirs)
 
         self.assertEqual(merged["sampling"], {"Fork 1": self.SAMPLING})
+
+
+class ArchiveFileTests(unittest.TestCase):
+    """Whether a conversation is archived, through the file and through a merge."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "conversations.json"
+
+    def archived(self) -> dict:
+        forks = new_forks()
+        put_branch(forks, "Chat 1", [make_turn("user", "put away")])
+        put_branch_archived(forks, "Chat 1", True)
+        return forks
+
+    def test_an_archived_conversation_comes_back_archived(self):
+        library.write(self.archived(), self.path)
+
+        restored = library.read(self.path)
+
+        self.assertEqual(restored["archived"], {"Chat 1": True})
+        self.assertEqual(restored["branches"]["Chat 1"][0]["content"], "put away")
+        self.assertIn("Chat 1", restored["archived_updated"])
+
+    def test_a_file_written_before_archiving_reads_with_nothing_archived(self):
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        saved = json.loads(self.path.read_text())
+        self.assertNotIn("archived", saved["branches"][0])
+
+        restored = library.read(self.path)
+
+        self.assertEqual((restored["archived"], restored["archived_updated"]), ({}, {}))
+
+    def test_the_main_conversation_is_never_read_as_archived(self):
+        library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
+        saved = json.loads(self.path.read_text())
+        saved["branches"][0]["archived"] = True
+        self.path.write_text(json.dumps(saved))
+
+        self.assertEqual(library.read(self.path)["archived"], {})
+
+    def test_archiving_survives_a_save_from_a_page_a_reply_ahead(self):
+        # This page archived Chat 1 while another page, which loaded before
+        # the archiving, went on answering in it. Each keeps its own change.
+        theirs = self.archived()
+        theirs["archived"], theirs["archived_updated"] = {}, {}
+        library.write(theirs, self.path)
+        mine = self.archived()
+        library.write(mine, self.path)
+
+        put_branch(theirs, "Chat 1", [make_turn("user", "put away"), reply("answered")])
+        library.write(theirs, self.path)
+
+        saved = library.read(self.path)
+        self.assertEqual(saved["archived"], {"Chat 1": True})
+        self.assertEqual(saved["branches"]["Chat 1"][-1]["content"], "answered")
+
+    def test_bringing_a_conversation_back_is_not_undone_by_an_older_archived_copy(self):
+        stale = self.archived()
+        library.write(stale, self.path)
+        restored = copy_forks(stale)
+        put_branch_archived(restored, "Chat 1", False)
+        library.write(restored, self.path)
+
+        library.write(stale, self.path)
+
+        saved = library.read(self.path)
+        self.assertEqual(saved["archived"], {})
+        self.assertEqual(saved["archived_updated"], restored["archived_updated"])
+
+    def test_a_deleted_conversation_leaves_no_archive_entry_behind(self):
+        forks = self.archived()
+        drop_branch(forks, "Chat 1")
+
+        library.write(forks, self.path)
+
+        saved = library.read(self.path)
+        self.assertNotIn("Chat 1", saved["branches"])
+        self.assertEqual((saved["archived"], saved["archived_updated"]), ({}, {}))
 
 
 class AsSeenTests(unittest.TestCase):

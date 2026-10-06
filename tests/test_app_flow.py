@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import inspect
+import json
 import os
 import stat
 import unittest
@@ -20,6 +21,7 @@ from chatlab.ui import runtime
 from chatlab.ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from chatlab import charts
 from chatlab.conversation import (
+    ARCHIVED_VIEW,
     MAIN_BRANCH,
     branch_sampling,
     display_messages,
@@ -35,6 +37,8 @@ from chatlab.conversation import (
     to_json,
 )
 from chatlab.model_inspection import TokenInsight
+from chatlab.ui.common import ARCHIVED_VIEW_CLASS
+from chatlab.ui.conversations import show_archive
 from chatlab.model_runtime import GENERATING
 from chatlab.text_generation import GenerationUpdate, ModelChanged
 from chatlab.token_metrics import DEFAULT_COLOR_SCALE
@@ -453,8 +457,8 @@ class ChatFlowTests(unittest.TestCase):
         resets = {
             "chat", "retry_last", "retry_message", "edit_message", "branch_from",
             "branch_with_text", "next_token", "undo_last", "undo_message", "clear_chat",
-            "fork_conversation", "new_conversation", "switch_fork", "delete_fork",
-            "load_with_steering", "score_text",
+            "fork_conversation", "new_conversation", "switch_fork", "delete_conversation",
+            "archive_conversation", "load_with_steering", "score_text",
         }
         for fn in demo.fns.values():
             if getattr(fn.fn, "__name__", None) in resets:
@@ -2503,6 +2507,12 @@ def contents(turns):
     return [turn["content"] for turn in turns]
 
 
+def request(name, archived=True):
+    """What a row's Archive, Restore or Delete writes into its bridge."""
+
+    return json.dumps({"name": name, "archived": archived, "nonce": 1})
+
+
 def names_of(list_update):
     """The branch names behind a conversation-list update's (label, name) choices."""
 
@@ -3833,14 +3843,14 @@ class ForkTests(unittest.TestCase):
 
     def test_deleting_a_fork_returns_to_main(self):
         forked = app.fork_conversation(self.turns(), new_forks(), None)
-        result = app.delete_fork(forked["turns"], forked["forks"])
+        result = app.delete_conversation(request("Fork 1"), forked["turns"], forked["forks"])
         self.assertEqual(contents(result["turns"]), contents(self.turns()))
         self.assertEqual(list(result["forks"]["branches"]), [MAIN_BRANCH])
         self.assertEqual(names_of(result["conversation_list"]), [MAIN_BRANCH])
         self.assertIn("Deleted Fork 1", result["status"])
 
     def test_the_main_conversation_cannot_be_deleted(self):
-        result = app.delete_fork(self.turns(), new_forks())
+        result = app.delete_conversation(request(MAIN_BRANCH), self.turns(), new_forks())
         self.assertEqual(contents(result["turns"]), contents(self.turns()))
         self.assertIn("cannot be deleted", result["status"])
 
@@ -3916,9 +3926,117 @@ class ForkTests(unittest.TestCase):
 
     def test_a_new_chat_can_be_deleted_back_to_main(self):
         fresh = app.new_conversation(self.turns(), new_forks())
-        result = app.delete_fork(fresh["turns"], fresh["forks"])
+        result = app.delete_conversation(request("Chat 1"), fresh["turns"], fresh["forks"])
         self.assertEqual(result["forks"]["active"], MAIN_BRANCH)
         self.assertEqual(contents(result["turns"]), contents(self.turns()))
+        self.assertEqual(names_of(result["conversation_list"]), [MAIN_BRANCH])
+
+    def two_chats(self):
+        """Main on screen, with Chat 1 and Chat 2 beside it."""
+
+        first = app.new_conversation(self.turns(), new_forks())
+        second = app.new_conversation([make_turn("user", "first chat")], first["forks"])
+        return app.switch_fork(MAIN_BRANCH, [make_turn("user", "second chat")], second["forks"])
+
+    def test_archiving_another_conversation_leaves_the_screen_alone(self):
+        shown = self.two_chats()
+
+        result = app.archive_conversation(request("Chat 1"), shown["turns"], shown["forks"])
+
+        self.assertTrue(result["forks"]["archived"]["Chat 1"])
+        self.assertEqual(result["forks"]["active"], MAIN_BRANCH)
+        self.assertEqual(result["turns"], gr.skip())
+        self.assertEqual(names_of(result["conversation_list"]), [MAIN_BRANCH, "Chat 2"])
+        self.assertEqual(result["conversation_list"]["value"], MAIN_BRANCH)
+        self.assertEqual(result["status"], "Archived Chat 1.")
+
+    def test_archiving_the_conversation_on_screen_goes_back_to_main(self):
+        shown = self.two_chats()
+        on_chat = app.switch_fork("Chat 2", shown["turns"], shown["forks"])
+        edited = on_chat["turns"] + [make_turn("user", "more")]
+
+        result = app.archive_conversation(request("Chat 2"), edited, on_chat["forks"])
+
+        self.assertEqual(result["forks"]["active"], MAIN_BRANCH)
+        self.assertEqual(contents(result["turns"]), contents(self.turns()))
+        # What was on screen is archived as it stood, not as it was last put away.
+        self.assertEqual(contents(result["forks"]["branches"]["Chat 2"]), contents(edited))
+        self.assertEqual(names_of(result["conversation_list"]), [MAIN_BRANCH, "Chat 1"])
+        self.assertEqual(result["status"], "Archived Chat 2. Back on Main.")
+
+    def test_the_main_conversation_cannot_be_archived(self):
+        result = app.archive_conversation(request(MAIN_BRANCH), self.turns(), new_forks())
+
+        self.assertEqual(result["forks"], gr.skip())
+        self.assertIn("cannot be archived", result["status"])
+
+    def test_a_request_for_a_missing_conversation_changes_nothing(self):
+        for action in (request("Chat 9"), "", "not json", json.dumps(["Chat 1"])):
+            with self.subTest(action=action):
+                result = app.archive_conversation(action, self.turns(), new_forks())
+                self.assertEqual(result["forks"], gr.skip())
+                self.assertIn("no longer exists", result["status"])
+
+    def test_the_archive_lists_the_archived_and_can_bring_one_back(self):
+        shown = self.two_chats()
+        archived = app.archive_conversation(request("Chat 1"), shown["turns"], shown["forks"])
+        forks = show_archive(archived["forks"], True)
+        archive = app.conversation_list_update(forks, shown["turns"])
+        self.assertEqual(names_of(archive), ["Chat 1"])
+        # Main is on screen but not in the archive, so nothing is selected.
+        self.assertIsNone(archive["value"])
+        self.assertEqual(archive["elem_classes"], [ARCHIVED_VIEW_CLASS])
+
+        result = app.archive_conversation(request("Chat 1", archived=False), shown["turns"], forks)
+
+        self.assertEqual(result["forks"]["archived"], {})
+        self.assertEqual(names_of(result["conversation_list"]), [])
+        self.assertEqual(result["status"], "Restored Chat 1 to the list.")
+        back = app.conversation_list_update(show_archive(result["forks"], False), shown["turns"])
+        self.assertEqual(names_of(back), [MAIN_BRANCH, "Chat 1", "Chat 2"])
+        self.assertEqual(back["elem_classes"], [])
+
+    def test_new_and_fork_turn_the_list_back_to_the_conversations_in_use(self):
+        shown = self.two_chats()
+        archived = app.archive_conversation(request("Chat 1"), shown["turns"], shown["forks"])
+        forks = show_archive(archived["forks"], True)
+        opened = app.switch_fork("Chat 1", shown["turns"], forks)
+
+        for name, result in (
+            ("new", app.new_conversation(opened["turns"], opened["forks"])),
+            ("fork", app.fork_conversation(opened["turns"], opened["forks"], None)),
+        ):
+            with self.subTest(handler=name):
+                self.assertNotIn(ARCHIVED_VIEW, result["forks"])
+                self.assertIn(result["forks"]["active"], names_of(result["conversation_list"]))
+                self.assertNotIn("Chat 1", names_of(result["conversation_list"]))
+
+    def test_deleting_another_conversation_leaves_the_screen_alone(self):
+        shown = self.two_chats()
+
+        result = app.delete_conversation(request("Chat 1"), shown["turns"], shown["forks"])
+
+        self.assertNotIn("Chat 1", result["forks"]["branches"])
+        self.assertEqual(result["forks"]["active"], MAIN_BRANCH)
+        self.assertEqual(result["turns"], gr.skip())
+        self.assertEqual(result["status"], "Deleted Chat 1.")
+
+    def test_clear_all_keeps_the_archive(self):
+        shown = self.two_chats()
+        archived = app.archive_conversation(request("Chat 1"), shown["turns"], shown["forks"])
+        on_screen = app.switch_fork("Chat 1", shown["turns"], archived["forks"])
+        edited = on_screen["turns"] + [make_turn("user", "said since")]
+
+        result = app.clear_chat(DEFAULT_COLOR_SCALE, on_screen["forks"], edited)
+
+        forks = result["forks"]
+        self.assertEqual(list(forks["branches"]), [MAIN_BRANCH, "Chat 1"])
+        self.assertEqual(forks["branches"][MAIN_BRANCH], [])
+        self.assertEqual(contents(forks["branches"]["Chat 1"]), contents(edited))
+        self.assertEqual(forks["archived"], {"Chat 1": True})
+        self.assertEqual(forks["archived_updated"], on_screen["forks"]["archived_updated"])
+        # Chat 2 is gone for good: its deletion is remembered.
+        self.assertIn("Chat 2", forks["updated"])
         self.assertEqual(names_of(result["conversation_list"]), [MAIN_BRANCH])
 
 
@@ -4067,7 +4185,10 @@ class ConversationListWiringTests(unittest.TestCase):
 
     def test_every_branch_handler_redraws_the_list(self):
         radio = self.conversation_list()
-        for name in ("fork_conversation", "delete_fork", "new_conversation", "clear_chat"):
+        for name in (
+            "fork_conversation", "delete_conversation", "archive_conversation",
+            "new_conversation", "clear_chat", "toggle_archive",
+        ):
             with self.subTest(handler=name):
                 self.assertIn(radio, listener_named(self.demo, name).outputs)
 
@@ -4502,7 +4623,7 @@ class ConversationSamplingTests(unittest.TestCase):
         put_branch_sampling(forks, "Fork 1", self.OWN)
         forks["active"] = "Fork 1"
 
-        result = app.delete_fork([], forks)
+        result = app.delete_conversation(request("Fork 1"), [], forks)
         left = result["forks"]
 
         self.assertEqual(left["active"], MAIN_BRANCH)
@@ -4678,7 +4799,8 @@ class CancelWiringTests(unittest.TestCase):
                 "edit_prompt_from_menu",
                 "fork_conversation",
                 "switch_fork",
-                "delete_fork",
+                "archive_conversation",
+                "delete_conversation",
                 "new_conversation",
                 "restore_conversations",
             },

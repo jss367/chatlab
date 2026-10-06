@@ -461,6 +461,34 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(forks["origins"]["Fork 1"]["parent"], "Main")
         self.assertEqual(forks["branches"]["Main"][-1]["content"], "Hello world")
 
+    def test_archiving_a_conversation_while_it_answers_keeps_both(self):
+        # Archiving the conversation on screen while it answers goes back to
+        # Main and leaves the run to finish into the archived conversation.
+        self.state[self.forks._id]["active"] = "Chat 1"
+        self.state[self.turns._id] = [make_turn("user", "Another conversation")]
+        self.start()
+        self.call("archive_conversation", {0: json.dumps({"name": "Chat 1", "archived": True})})
+        self.assertTrue(self.job.running)
+        self.assertEqual(self.state[self.forks._id]["active"], MAIN_BRANCH)
+        self.finish()
+        self.call("poll")
+        forks = self.state[self.forks._id]
+        self.assertEqual(forks["archived"], {"Chat 1": True})
+        self.assertEqual(forks["branches"]["Chat 1"][-1]["content"], "Hello world")
+        saved = library.read()
+        self.assertEqual(saved["archived"], {"Chat 1": True})
+        self.assertEqual(saved["branches"]["Chat 1"][-1]["content"], "Hello world")
+
+    def test_deleting_waits_for_the_run_to_finish(self):
+        self.start()
+        self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+        self.assertIn("Chat 1", self.state[self.forks._id]["branches"])
+        self.finish()
+        self.call("poll")
+        self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+        self.assertNotIn("Chat 1", self.state[self.forks._id]["branches"])
+        self.assertNotIn("Chat 1", library.read()["branches"])
+
     def test_deleted_token_fork_is_not_resurrected_by_poll(self):
         self.start()
         self.finish()
@@ -470,7 +498,7 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("branch_from", dict(enumerate(SETTINGS, 3)))
         self.finish()
         self.call("poll")
-        self.call("delete_fork")
+        self.call("delete_conversation", {0: json.dumps({"name": "Fork 1"})})
         self.call("poll")
         self.assertNotIn("Fork 1", self.state[self.forks._id]["branches"])
         self.assertNotIn("Fork 1", library.read()["branches"])

@@ -1793,15 +1793,43 @@ class ClearConfirmationTests(unittest.TestCase):
         # Delete refuses the main conversation, so do not send the reader there.
         self.assertNotIn("Delete", question)
 
-    def test_a_deletable_conversation_offers_delete_as_the_narrower_action(self):
+    def test_an_archivable_conversation_offers_archiving_as_the_narrower_action(self):
         forks = self.forks("Fork 1", "Fork 2")
         forks["active"] = "Fork 1"
 
         _status, _panel, question = app.ask_clear_chat(self.turns(), forks)
 
         self.assertIn("2 others", question)
-        self.assertIn("To remove only this one", question)
-        self.assertIn("Delete", question)
+        self.assertIn("To remove only this one, archive it", question)
+
+    def test_the_archive_is_left_out_of_the_count_and_said_to_be_kept(self):
+        forks = self.forks("Fork 1", "Fork 2", "Fork 3")
+        forks["archived"] = {"Fork 2": True, "Fork 3": True}
+
+        _status, _panel, question = app.ask_clear_chat(self.turns(), forks)
+
+        self.assertIn("1 other?", question)
+        self.assertIn("The 2 archived conversations are kept.", question)
+
+    def test_an_archived_conversation_on_screen_is_not_counted_as_cleared(self):
+        forks = self.forks("Fork 1", "Fork 2")
+        forks["archived"] = {"Fork 1": True}
+        forks["active"] = "Fork 1"
+
+        _status, _panel, question = app.ask_clear_chat(self.turns(), forks)
+
+        self.assertIn("Clear the 2 conversations in the list?", question)
+        self.assertIn("The 1 archived conversation is kept.", question)
+
+    def test_nothing_but_the_archive_and_an_empty_main_is_nothing_to_clear(self):
+        forks = self.forks("Fork 1")
+        forks["archived"] = {"Fork 1": True}
+
+        status, _panel, _question = app.ask_clear_chat([], forks)
+        self.assertEqual(status, app.NOTHING_TO_CLEAR)
+        forks["active"] = "Fork 1"
+        status, _panel, _question = app.ask_clear_chat(self.turns(), forks)
+        self.assertEqual(status, app.NOTHING_TO_CLEAR)
 
     def test_one_other_conversation_is_named_in_the_singular(self):
         _status, _panel, question = app.ask_clear_chat(

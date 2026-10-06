@@ -24,10 +24,11 @@ import gradio as gr
 from chatlab import library
 from chatlab import settings
 from chatlab.conversation import (
-    FORK_PREFIX, SAMPLING_FIELDS, branch_choices, copy_forks, copy_turns,
+    ARCHIVED_VIEW, FORK_PREFIX, SAMPLING_FIELDS, copy_forks, copy_turns,
     display_messages, put_branch, put_branch_sampling,
 )
 from chatlab.ui.common import STOP_LABEL, finalize_partial
+from chatlab.ui.conversations import conversation_list_update, show_archive
 from chatlab.ui.outputs import (
     COMPOSER_OUTPUT_NAMES, EDITOR_OUTPUT_NAMES, POLL_OUTPUT_NAMES, positional, skipped,
 )
@@ -231,14 +232,9 @@ class ConversationJob:
             )
 
     def choices(self, forks, turns):
-        choices = branch_choices(forks, turns)
         with self.lock:
-            if self.running:
-                choices = [
-                    (f"{label} · Generating…" if name == self.owner else label, name)
-                    for label, name in choices
-                ]
-        return gr.update(choices=choices, value=forks["active"])
+            running = self.owner if self.running else None
+        return conversation_list_update(forks, turns, running)
 
     def render(self, forks, turns, scale):
         with self.lock:
@@ -316,9 +312,16 @@ class ConversationEvents:
         navigation=False,
         stop=False,
         clear=False,
+        exclusive=False,
         **kwargs,
     ):
-        """Wire ``fn`` to ``trigger``; ``outputs`` names what its frames may publish."""
+        """Wire ``fn`` to ``trigger``; ``outputs`` names what its frames may publish.
+
+        ``exclusive`` refuses the handler while any conversation is
+        generating, as ``clear`` does, without retiring the finished run's
+        frames afterwards: for deleting a conversation by name, which may be
+        the one the run is still writing to the file.
+        """
 
         inputs = list(inputs or [])
         names = tuple(outputs)
@@ -368,7 +371,8 @@ class ConversationEvents:
                     f"Stopping {job.owner}…" if job.running else "No response is running."
                 )
             elif job.running and (
-                generation or (not navigation and (clear or forks["active"] == job.owner))
+                generation or exclusive
+                or (not navigation and (clear or forks["active"] == job.owner))
             ):
                 result[status_output] = (
                     f"{job.owner} is generating. Press Stop or wait for it to finish first."
@@ -470,3 +474,9 @@ class ConversationEvents:
     def refresh_conversation_list(self, turns, forks, job):
         seen = library.as_seen(forks, turns)
         return job.choices(seen, turns), seen
+
+    def toggle_archive(self, turns, forks, job):
+        """Turn the list to the archive, or back to the conversations in use."""
+
+        forks = show_archive(forks, not (forks or {}).get(ARCHIVED_VIEW))
+        return job.choices(forks, turns), forks

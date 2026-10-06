@@ -50,8 +50,10 @@ from chatlab.ui.common import (
     QUIET_TICK,
     show_page,
 )
+from chatlab.ui.conversation_rows import ARCHIVE_BRIDGE_ID, CONVERSATION_ROWS_JS, DELETE_BRIDGE_ID
 from chatlab.ui.conversations import (
-    delete_fork,
+    archive_conversation,
+    delete_conversation,
     fork_conversation,
     new_conversation,
     remember_forks,
@@ -186,7 +188,10 @@ class ConversationPane:
     conversation_list: gr.Radio
     new_button: gr.Button
     fork_button: gr.Button
-    delete_fork_button: gr.Button
+    archive_button: gr.Button
+    # The bridges a row's Archive, Restore and Delete write into.
+    archive_action: gr.Textbox
+    delete_action: gr.Textbox
     clear_button: gr.Button
     clear_confirm: gr.Column
     clear_question: gr.Markdown
@@ -488,7 +493,16 @@ def _build_conversation_pane() -> ConversationPane:
             # minimum width to share one row.
             new_button = gr.Button("New", size="sm", min_width=60, elem_classes=icon_classes("plus"))
             fork_button = gr.Button("Fork", size="sm", min_width=60, elem_classes=icon_classes("git-branch"))
-            delete_fork_button = gr.Button("Delete", size="sm", min_width=60, elem_classes=icon_classes("trash"))
+            # Turns the list to the archive and back. Archiving itself is on
+            # each conversation's row; see ui.conversation_rows.
+            archive_button = gr.Button(
+                "Archived", size="sm", min_width=60,
+                elem_id="archive-toggle", elem_classes=icon_classes("archive"),
+            )
+        # Hidden by the bridge class, not visible=False, which would take
+        # them out of the DOM where the page script has to find them.
+        archive_action = gr.Textbox(elem_id=ARCHIVE_BRIDGE_ID, elem_classes=[MENU_BRIDGE_CLASS])
+        delete_action = gr.Textbox(elem_id=DELETE_BRIDGE_ID, elem_classes=[MENU_BRIDGE_CLASS])
         # Named for what it takes: this empties the conversation on
         # screen and deletes every other one with it. It stands under
         # the list of everything it would take rather than under one
@@ -513,7 +527,9 @@ def _build_conversation_pane() -> ConversationPane:
         conversation_list=conversation_list,
         new_button=new_button,
         fork_button=fork_button,
-        delete_fork_button=delete_fork_button,
+        archive_button=archive_button,
+        archive_action=archive_action,
+        delete_action=delete_action,
         clear_button=clear_button,
         clear_confirm=clear_confirm,
         clear_question=clear_question,
@@ -695,6 +711,7 @@ def _wire_page_scripts(
     # The menu handles Escape before the global generation shortcut.
     demo.load(None, None, None, js=TOKEN_MENU_JS)
     demo.load(None, None, None, js=TREE_JS)
+    demo.load(None, None, None, js=CONVERSATION_ROWS_JS)
     demo.load(None, None, None, js=JACOBIAN_JS)
     demo.load(None, None, None, js=ATTENTION_TRACE_JS)
     demo.load(None, None, None, js=PICTURES_JS)
@@ -938,13 +955,14 @@ def _wire_conversations(
     # that would take more than the promise says - the same reason
     # choosing another model withdraws the removal question. Pressing
     # Clear again re-asks with the numbers as they are now.
-    for control in (pane.new_button, pane.fork_button, pane.delete_fork_button):
+    for control in (pane.new_button, pane.fork_button):
         control.click(hide_clear_confirm, None, pane.clear_confirm)
-    pane.conversation_list.input(hide_clear_confirm, None, pane.clear_confirm)
+    for control in (pane.conversation_list, pane.archive_action, pane.delete_action):
+        control.input(hide_clear_confirm, None, pane.clear_confirm)
     brings_its_sampling(conversation_events.bind(
         pane.confirm_clear_button.click, clear_chat,
         clear=True,
-        inputs=[chat_page.inspector.color_scale, states.forks],
+        inputs=[chat_page.inspector.color_scale, states.forks, states.conversation],
         concurrency_id=CONVERSATION_PANE_QUEUE,
         outputs=CLEAR_OUTPUT_NAMES,
     ))
@@ -985,13 +1003,32 @@ def _wire_conversations(
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
     )
+    # Archiving the conversation on screen goes back to the main one, which
+    # is navigation: a run in the archived conversation carries on.
     brings_its_sampling(
-        conversation_events.bind(
-            pane.delete_fork_button.click, delete_fork,
-            [states.conversation, states.forks, chat_page.inspector.color_scale],
+        navigate(
+            pane.archive_action.input, archive_conversation,
+            [pane.archive_action, states.conversation, states.forks, chat_page.inspector.color_scale],
             FORK_OUTPUT_NAMES,
             concurrency_id=CONVERSATION_PANE_QUEUE,
         )
+    )
+    # Deleting waits for a run to finish: the run may be writing the very
+    # conversation deleted, and would put it back in the file.
+    brings_its_sampling(
+        conversation_events.bind(
+            pane.delete_action.input, delete_conversation,
+            [pane.delete_action, states.conversation, states.forks, chat_page.inspector.color_scale],
+            FORK_OUTPUT_NAMES,
+            exclusive=True,
+            concurrency_id=CONVERSATION_PANE_QUEUE,
+        )
+    )
+    pane.archive_button.click(
+        conversation_events.toggle_archive,
+        [states.conversation, states.forks, background_state],
+        [pane.conversation_list, states.forks],
+        concurrency_id=CONVERSATION_PANE_QUEUE,
     )
     # Every other path that changes the conversation lands here, and
     # the list's model tag, running indicator and token count

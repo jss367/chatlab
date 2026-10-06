@@ -68,6 +68,8 @@ SAVE_FORMAT = "chatlab-conversation-1"
 MAIN_BRANCH = "Main"
 FORK_PREFIX = "Fork"
 CHAT_PREFIX = "Chat"
+# The key in the forks that says the pane is showing the archive.
+ARCHIVED_VIEW = "_archived_view"
 
 # How much of a conversation's first message the list shows as its title.
 TITLE_LIMIT = 40
@@ -478,7 +480,8 @@ def model_messages(
 # ``gr.State``:
 #
 #     {"active": name, "branches": {name: [turns...], ...},
-#      "sampling": {name: {...}, ...}, "updated": {name: stamp, ...}}
+#      "sampling": {name: {...}, ...}, "archived": {name: True, ...},
+#      "updated": {name: stamp, ...}}
 #
 # Only the *inactive* branches are current in ``branches``: the active one is
 # whatever the conversation state holds, and its entry is refreshed whenever
@@ -506,6 +509,11 @@ def new_forks() -> dict:
     ``origins`` records each fork's parent and message/token coordinates.
     It survives deletion of the parent, so a surviving child still explains
     where it came from. Older conversations have no recorded origin.
+
+    ``archived`` names the branches put away out of the list - see
+    :func:`put_branch_archived` - and ``archived_updated`` stamps when each
+    was archived or brought back, on a stamp of its own for the reason
+    ``sampling_updated`` has one.
     """
 
     return {
@@ -513,6 +521,8 @@ def new_forks() -> dict:
         "branches": {MAIN_BRANCH: []},
         "sampling": {},
         "sampling_updated": {},
+        "archived": {},
+        "archived_updated": {},
         "origins": {},
         "updated": {},
     }
@@ -525,6 +535,8 @@ def copy_forks(forks: dict | None) -> dict:
         # This is the live view's reservation ledger, shared across queued copies.
         **({"_steering_generation": forks["_steering_generation"]} if "_steering_generation" in forks else {}),
         **({"_steering_requests": forks["_steering_requests"]} if "_steering_requests" in forks else {}),
+        # Which of its two lists the pane is showing. A page's view, never saved.
+        **({ARCHIVED_VIEW: True} if forks.get(ARCHIVED_VIEW) else {}),
         "active": forks.get("active", MAIN_BRANCH),
         "branches": {
             name: copy_turns(turns) for name, turns in forks.get("branches", {}).items()
@@ -535,6 +547,8 @@ def copy_forks(forks: dict | None) -> dict:
             for name, values in (forks.get("sampling") or {}).items()
         },
         "sampling_updated": dict(forks.get("sampling_updated") or {}),
+        "archived": dict(forks.get("archived") or {}),
+        "archived_updated": dict(forks.get("archived_updated") or {}),
         "origins": copy.deepcopy(forks.get("origins") or {}),
         "updated": dict(forks.get("updated") or {}),
     }
@@ -571,6 +585,8 @@ def drop_branch(forks: dict, name: str) -> None:
     del forks["branches"][name]
     forks.setdefault("sampling", {}).pop(name, None)
     forks.setdefault("sampling_updated", {}).pop(name, None)
+    forks.setdefault("archived", {}).pop(name, None)
+    forks.setdefault("archived_updated", {}).pop(name, None)
     forks.setdefault("origins", {}).pop(name, None)
     forks["updated"][name] = branch_stamp()
 
@@ -609,6 +625,38 @@ def put_branch_sampling(forks: dict, name: str, values: dict) -> bool:
         return False
     sampling[name] = copy.deepcopy(kept)
     forks.setdefault("sampling_updated", {})[name] = branch_stamp()
+    return True
+
+
+def branch_archived(forks: dict | None, name: str) -> bool:
+    """Whether branch ``name`` is put away in the archive."""
+
+    return bool(((forks or {}).get("archived") or {}).get(name))
+
+
+def put_branch_archived(forks: dict, name: str, archived: bool) -> bool:
+    """Archive branch ``name``, or bring it back; say whether that changed anything.
+
+    An archived branch keeps everything it had and drops out of the list
+    into the archive, where it can be opened, brought back or deleted for
+    good. The main conversation is never archived: it is where deleting and
+    archiving the conversation on screen fall back to.
+
+    Stamped on its own, as sampling is, so archiving a conversation another
+    page is still answering in neither takes the newer reply off the file
+    nor is undone by it.
+    """
+
+    if name == MAIN_BRANCH or name not in forks["branches"]:
+        return False
+    if branch_archived(forks, name) == archived:
+        return False
+    held = forks.setdefault("archived", {})
+    if archived:
+        held[name] = True
+    else:
+        held.pop(name, None)
+    forks.setdefault("archived_updated", {})[name] = branch_stamp()
     return True
 
 
@@ -796,16 +844,21 @@ def branch_label(name: str, turns: list[dict] | None) -> str:
 
 
 def branch_choices(forks: dict | None, turns: list[dict] | None) -> list[tuple[str, str]]:
-    """``(label, name)`` for every branch, the active one read from ``turns``.
+    """``(label, name)`` for every branch in the list on show, the active one read from ``turns``.
 
-    The active branch's entry in ``forks`` is stale by design (see the forks
-    section above), so its turns come from the conversation state instead.
+    The pane shows either the branches in use or, with ``ARCHIVED_VIEW`` set,
+    the archived ones. The active branch's entry in ``forks`` is stale by
+    design (see the forks section above), so its turns come from the
+    conversation state instead.
     """
 
     forks = forks or new_forks()
     active = forks.get("active", MAIN_BRANCH)
+    archive = bool(forks.get(ARCHIVED_VIEW))
     choices = []
     for name, stored in forks.get("branches", {}).items():
+        if branch_archived(forks, name) != archive:
+            continue
         branch = turns if name == active else stored
         choices.append((branch_label(name, branch), name))
     return choices

@@ -28,6 +28,10 @@ transcript it may be a reply behind on, and a newer transcript does not undo
 a slider moved on another page. A branch with no sampling of its own answers
 with the saved settings.
 
+Whether a branch is archived is kept the same way, on a stamp of its own, so
+archiving a conversation another page is still answering in survives that
+page's next save, and the reply it saves survives the archiving.
+
 Where it lives::
 
     ~/.local/share/chatlab/conversations.json
@@ -165,6 +169,12 @@ def dump(forks: dict | None) -> str:
         stamp = forks["sampling_updated"].get(name)
         if stamp:
             entry["sampling_updated"] = stamp
+        if forks["archived"].get(name):
+            entry["archived"] = True
+        # Written for a branch brought back too: the stamp alone says so.
+        stamp = forks["archived_updated"].get(name)
+        if stamp:
+            entry["archived_updated"] = stamp
         if name in updated:
             entry["updated"] = updated[name]
         branches.append(entry)
@@ -198,6 +208,8 @@ def parse(payload: str) -> dict:
     origins: dict[str, dict] = {}
     sampling: dict[str, dict] = {}
     sampling_updated: dict[str, str] = {}
+    archived: dict[str, bool] = {}
+    archived_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
     for entry in raw_branches:
         if not isinstance(entry, dict):
@@ -240,6 +252,15 @@ def parse(payload: str) -> dict:
                     f"The branch {name!r} has a sampling time that is not a string."
                 )
             sampling_updated[name] = sampling_stamp
+        if entry.get("archived") is True and name != MAIN_BRANCH:
+            archived[name] = True
+        archived_stamp = entry.get("archived_updated")
+        if archived_stamp is not None:
+            if not isinstance(archived_stamp, str):
+                raise ValueError(
+                    f"The branch {name!r} has an archived time that is not a string."
+                )
+            archived_updated[name] = archived_stamp
         turns = turns_from_entries(entry.get("turns"))
         # A response that was still streaming when the file was written is
         # kept as far as it got, and closed, so its reasoning block does not
@@ -275,6 +296,8 @@ def parse(payload: str) -> dict:
         "origins": origins,
         "sampling": sampling,
         "sampling_updated": sampling_updated,
+        "archived": archived,
+        "archived_updated": archived_updated,
         "updated": updated,
     }
 
@@ -306,6 +329,8 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
     origins: dict[str, dict] = {}
     sampling: dict[str, dict] = {}
     sampling_updated: dict[str, str] = {}
+    archived: dict[str, bool] = {}
+    archived_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
 
     def newer(name: str, times: str) -> dict:
@@ -342,6 +367,15 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
             held = side["sampling"].get(name)
             if held:
                 sampling[name] = held
+            # Archiving is merged on its own stamp too, and for the same
+            # reason: the page that archived a conversation may be a reply
+            # behind the page still answering in it.
+            side = newer(name, "archived_updated")
+            stamp = side["archived_updated"].get(name)
+            if stamp:
+                archived_updated[name] = stamp
+            if side["archived"].get(name):
+                archived[name] = True
         stamp = winner["updated"].get(name)
         if stamp:
             updated[name] = stamp
@@ -355,6 +389,8 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
         "origins": origins,
         "sampling": sampling,
         "sampling_updated": sampling_updated,
+        "archived": archived,
+        "archived_updated": archived_updated,
         "updated": updated,
     }
 
