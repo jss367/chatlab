@@ -84,7 +84,8 @@ once: in Keychain Access choose **Certificate Assistant → Create a
 Certificate…**, name it `ChatLab Local`, and set **Identity Type** to *Self
 Signed Root* and **Certificate Type** to *Code Signing*. The build signs the
 bundle with it when it is in the keychain (`CHATLAB_CODESIGN_IDENTITY` names a
-different one). Without it the bundle is signed ad hoc, and macOS treats each
+different one, by name or SHA-1 fingerprint, and a fingerprint picks one of two
+certificates that share a name). Without it the bundle is signed ad hoc, and macOS treats each
 build as a new app, so the Local Network permission that **Remote → Connect to
 Remote Host…** needs has to be granted again after every install. The first
 signed build needs the permission toggled once, and the first signing asks to
