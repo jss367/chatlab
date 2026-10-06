@@ -877,6 +877,10 @@ it was when it loaded, and a reload brings it up to date. The file is:
 ~/.local/share/chatlab/conversations.json
 ```
 
+Archive flags also have a private `conversations.json.archive` companion, so
+an older ChatLab version saving the same library cannot discard them. Keep
+this companion beside the conversation file when backing up a shared library.
+
 `XDG_DATA_HOME` moves the directory and `CHATLAB_LIBRARY_PATH` names the file
 outright, the same two knobs the settings file answers to. It is written whole
 and swapped into place, so a crash mid-write leaves the previous copy rather

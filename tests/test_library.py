@@ -512,6 +512,35 @@ class ArchiveFileTests(unittest.TestCase):
         self.assertEqual(restored["sampling"]["Chat 1"], {"temperature": 0.7})
         self.assertTrue(restored["archived"]["Chat 1"])
 
+    def test_stale_old_sampling_rewrite_cannot_erase_the_archive(self):
+        archived = self.archived()
+        library.write(archived, self.path)
+        payload = json.loads(self.path.read_text())
+        branch = payload["branches"][1]
+        branch.pop("archived")
+        branch.pop("archived_updated")
+        branch["sampling"] = {"temperature": 0.7}
+        branch["sampling_updated"] = branch_stamp()
+        self.path.write_text(json.dumps(payload))
+        restored = library.read(self.path)
+        self.assertTrue(restored["archived"]["Chat 1"])
+        self.assertEqual(restored["sampling"]["Chat 1"], {"temperature": 0.7})
+        self.assertEqual(restored["archived_updated"], archived["archived_updated"])
+        put_branch_archived(restored, "Chat 1", False)
+        library.write(restored, self.path)
+        self.assertEqual(library.read(self.path)["archived"], {})
+        drop_branch(restored, "Chat 1")
+        library.write(restored, self.path)
+        self.assertEqual(json.loads(library._archive_path(self.path).read_text()), {})
+
+    def test_archive_companion_is_private_and_ignored_for_a_missing_library(self):
+        library.write(self.archived(), self.path)
+        self.assertEqual(stat.S_IMODE(library._archive_path(self.path).stat().st_mode), 0o600)
+        self.path.unlink()
+        self.assertIsNone(library.read(self.path))
+        library.write(new_forks(), self.path)
+        self.assertEqual(json.loads(library._archive_path(self.path).read_text()), {})
+
     def test_native_restore_stamp_overrides_a_stale_compatibility_copy(self):
         payload = json.loads(library.dump(self.archived()))
         branch = payload["branches"][1]

@@ -437,10 +437,39 @@ def read(path: Path | None = None) -> dict | None:
         logger.warning("Could not read the conversations in %s: %s", target, error)
         return None
     try:
-        return parse(raw)
+        return _restore_archive_metadata(parse(raw), target)
     except ValueError as error:
         logger.warning("Ignoring the conversations in %s: %s", target, error)
         return None
+
+
+def _archive_path(target: Path) -> Path:
+    return target.with_name(f"{target.name}.archive")
+
+
+def _restore_archive_metadata(forks: dict, target: Path) -> dict:
+    """Recover independent archive stamps that older sampling writers cannot erase."""
+    try:
+        records = json.loads(_archive_path(target).read_text(encoding="utf-8"))
+        if not isinstance(records, dict):
+            raise ValueError("Archive metadata must be an object.")
+        for name, record in records.items():
+            if (name == MAIN_BRANCH or name not in forks["branches"]
+                    or not isinstance(record, dict) or type(record.get("archived")) is not bool
+                    or not isinstance(record.get("updated"), str)):
+                continue
+            stamp = record["updated"]
+            if stamp > forks["archived_updated"].get(name, ""):
+                forks["archived_updated"][name] = stamp
+                if record["archived"]:
+                    forks["archived"][name] = True
+                else:
+                    forks["archived"].pop(name, None)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as error:
+        logger.warning("Could not read archive metadata for %s: %s", target, error)
+    return forks
 
 
 def taken_names(path: Path | None = None) -> set[str]:
@@ -573,6 +602,19 @@ def write(
             merged["active"] = existing["active"]
         if not _replace(target, dump(merged)):
             return None
+        # Older versions can replace the entire sampling dictionary after a
+        # slider edit, losing every in-file compatibility copy. This private
+        # companion is written only by archive-aware versions and follows the
+        # same locked, atomic-replace path as the library itself.
+        records = {
+            name: {"archived": bool(merged["archived"].get(name)), "updated": stamp}
+            for name, stamp in merged["archived_updated"].items()
+            if name in merged["branches"] and name != MAIN_BRANCH
+        }
+        archive_path = _archive_path(target)
+        if records or archive_path.exists():
+            if not _replace(archive_path, json.dumps(records, indent=2)):
+                return None
     return target
 
 
