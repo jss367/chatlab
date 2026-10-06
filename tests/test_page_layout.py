@@ -1,6 +1,7 @@
 """The page around every page: the nav, the shell, the panes and how they resize,
 and which controls each page holds."""
 
+import json
 import re
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ import gradio as gr
 
 from chatlab import app
 from chatlab.ui import common, icons, models_page, runtime
+from chatlab.ui.conversation_rows import ARCHIVE_BRIDGE_ID, CONVERSATION_ROWS_JS, DELETE_BRIDGE_ID
 from chatlab import settings
 from chatlab.model_cache import CacheStatus
 from chatlab.model_runtime import ModelManager
@@ -874,11 +876,39 @@ class PageLayoutTests(unittest.TestCase):
             if isinstance(self.demo.blocks[block_id], gr.Button)
         }
 
-        self.assertEqual(buttons, {"Cancel", "New", "Fork", "Delete"})
-        # Switching conversations counts too, and it is the list itself.
-        self.assertIn(self.by_id("conversation-list")._id, triggered_by)
+        self.assertEqual(buttons, {"Cancel", "New", "Fork"})
+        # Switching conversations counts too, and it is the list itself, and
+        # so do archiving and deleting, which a row's buttons write into
+        # their bridges.
+        for elem_id in ("conversation-list", ARCHIVE_BRIDGE_ID, DELETE_BRIDGE_ID):
+            self.assertIn(self.by_id(elem_id)._id, triggered_by)
         for fn in withdrawals:
             self.assertEqual(fn.outputs, [self.by_id("clear-confirm")])
+
+    def test_each_row_gets_its_buttons_from_a_script_that_writes_to_the_bridges(self):
+        # The list is a Radio, which draws nothing but its labels; the
+        # Archive, Restore and Delete on each row come from the page script,
+        # and reach the server through two hidden boxes it has to find.
+        self.assertTrue(any(fn.js == CONVERSATION_ROWS_JS for fn in self.demo.fns.values()))
+        pane = self.by_id("conversation-pane")
+        for elem_id, handler in (
+            (ARCHIVE_BRIDGE_ID, "archive_conversation"),
+            (DELETE_BRIDGE_ID, "delete_conversation"),
+        ):
+            with self.subTest(bridge=elem_id):
+                bridge = self.by_id(elem_id)
+                self.assertTrue(bridge.visible)
+                self.assertTrue(self.within(bridge, pane))
+                self.assertIn(json.dumps(elem_id), CONVERSATION_ROWS_JS)
+                ((block_id, event),) = listeners_named(self.demo, handler)[0].targets
+                self.assertEqual((block_id, event), (bridge._id, "input"))
+
+    def test_the_archived_button_turns_the_list(self):
+        (toggle,) = listeners_named(self.demo, "toggle_archive")
+        ((block_id, _),) = toggle.targets
+
+        self.assertEqual(self.demo.blocks[block_id].value, "Archived")
+        self.assertIn(self.by_id("conversation-list"), toggle.outputs)
 
     def test_the_clear_button_is_named_for_everything_it_takes(self):
         # "Clear" alone reads as emptying the chat on screen, which is what
@@ -1188,11 +1218,11 @@ class PageLayoutTests(unittest.TestCase):
         # The others are the paths that move a slider without a hand on it:
         # the settings file read back on load, the context limit committed,
         # which can pull the response length down with it, the five resets,
-        # and the six that change which conversation is on screen - forking,
-        # starting one, switching, deleting, clearing, and the page load that
-        # brings the saved conversations back - each of which brings that
-        # conversation's own sampling onto the sliders.
-        self.assertEqual(len(listeners) - len(moved), 14)
+        # and the seven that change which conversation is on screen - forking,
+        # starting one, switching, archiving, deleting, clearing, and the page
+        # load that brings the saved conversations back - each of which
+        # brings that conversation's own sampling onto the sliders.
+        self.assertEqual(len(listeners) - len(moved), 15)
 
     def test_everything_that_writes_the_summary_shares_one_queue(self):
         # always_last coalesces each slider's own requests; across four

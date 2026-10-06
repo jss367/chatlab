@@ -851,7 +851,7 @@ On the Chat page, the pane beside the nav lists every conversation. Each entry s
 
 The token count is the size of the conversation as the model last saw it: every token in the prompt behind the latest reply - system prompt, transcript, and chat template - plus every token of the reply, reasoning included. It updates as a reply streams, so a reply that is stopped part way shows how far it got. The count belongs to the reply the model generated, and a conversation loaded from an older file, or whose only replies were typed in by hand, says so instead of showing a number. A conversation answered by more than one model names each of them, most recent first.
 
-**New** puts the conversation on screen away and starts an empty one. **Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. **Delete** removes the conversation on screen and returns to the main one, which cannot be deleted; **Clear all**, under the list, empties it and removes every other conversation with it, which is why it asks first and names how many it would take.
+**New** puts the conversation on screen away and starts an empty one. **Fork** copies the conversation into a new fork and switches to it, so you can ask something different without losing the original. Hovering a conversation in the list shows **Archive**, which takes it out of the list and keeps everything it had; archiving the one on screen returns to the main one, which cannot be archived. **Archived** turns the list to the archive, where each conversation can be opened, restored to the list, or deleted for good (Delete asks for a second press). **Clear all**, under the list, empties the main conversation and removes every other conversation in the list with it, which is why it asks first and names how many it would take. It leaves the archive alone.
 
 Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
 
@@ -876,6 +876,10 @@ it was when it loaded, and a reload brings it up to date. The file is:
 ```
 ~/.local/share/chatlab/conversations.json
 ```
+
+Archive flags also have a private `conversations.json.archive` companion, so
+an older ChatLab version saving the same library cannot discard them. Keep
+this companion beside the conversation file when backing up a shared library.
 
 `XDG_DATA_HOME` moves the directory and `CHATLAB_LIBRARY_PATH` names the file
 outright, the same two knobs the settings file answers to. It is written whole

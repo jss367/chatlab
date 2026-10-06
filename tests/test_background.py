@@ -14,7 +14,7 @@ from chatlab import app
 from chatlab import library
 import settings_sandbox
 from chatlab.ui import conversations
-from chatlab.conversation import MAIN_BRANCH, make_turn, new_forks, put_branch
+from chatlab.conversation import ARCHIVED_VIEW, MAIN_BRANCH, make_turn, new_forks, put_branch
 from chatlab.ui import runtime
 from chatlab.ui.background import ConversationJob
 from fakes import THINK_EOS, THINK_PIECES
@@ -442,6 +442,27 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(self.state[self.forks._id]["origins"], {})
         self.assertEqual(self.state[self.forks._id]["active"], "Main")
 
+    def test_token_fork_from_the_archive_returns_to_the_active_list(self):
+        self.state[self.forks._id]["active"] = "Chat 1"
+        self.state[self.turns._id] = [make_turn("user", "Another conversation")]
+        self.start()
+        self.finish()
+        self.call("poll")
+        self.call("archive_conversation", {0: json.dumps({"name": "Chat 1", "archived": True})})
+        self.call("toggle_archive")
+        self.switch("Chat 1")
+        self.assertTrue(self.state[self.forks._id][ARCHIVED_VIEW])
+        fn = listener_named(self.demo, "branch_from")
+        self.state[fn.inputs[0]._id] = self.token_pick()
+        self.call("branch_from", dict(enumerate(SETTINGS, 3)))
+        self.finish()
+        self.call("poll")
+        forks = self.state[self.forks._id]
+        self.assertEqual(forks["active"], "Fork 1")
+        self.assertNotIn(ARCHIVED_VIEW, forks)
+        self.assertTrue(forks["archived"]["Chat 1"])
+        self.assertEqual(self.view[self.demo.conversation_outputs["conversation_list"]._id], "Fork 1")
+
     def test_navigation_during_replay_does_not_switch_back_when_fork_arrives(self):
         self.start()
         self.finish()
@@ -461,6 +482,34 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(forks["origins"]["Fork 1"]["parent"], "Main")
         self.assertEqual(forks["branches"]["Main"][-1]["content"], "Hello world")
 
+    def test_archiving_a_conversation_while_it_answers_keeps_both(self):
+        # Archiving the conversation on screen while it answers goes back to
+        # Main and leaves the run to finish into the archived conversation.
+        self.state[self.forks._id]["active"] = "Chat 1"
+        self.state[self.turns._id] = [make_turn("user", "Another conversation")]
+        self.start()
+        self.call("archive_conversation", {0: json.dumps({"name": "Chat 1", "archived": True})})
+        self.assertTrue(self.job.running)
+        self.assertEqual(self.state[self.forks._id]["active"], MAIN_BRANCH)
+        self.finish()
+        self.call("poll")
+        forks = self.state[self.forks._id]
+        self.assertEqual(forks["archived"], {"Chat 1": True})
+        self.assertEqual(forks["branches"]["Chat 1"][-1]["content"], "Hello world")
+        saved = library.read()
+        self.assertEqual(saved["archived"], {"Chat 1": True})
+        self.assertEqual(saved["branches"]["Chat 1"][-1]["content"], "Hello world")
+
+    def test_deleting_waits_for_the_run_to_finish(self):
+        self.start()
+        self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+        self.assertIn("Chat 1", self.state[self.forks._id]["branches"])
+        self.finish()
+        self.call("poll")
+        self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+        self.assertNotIn("Chat 1", self.state[self.forks._id]["branches"])
+        self.assertNotIn("Chat 1", library.read()["branches"])
+
     def test_deleted_token_fork_is_not_resurrected_by_poll(self):
         self.start()
         self.finish()
@@ -470,10 +519,74 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("branch_from", dict(enumerate(SETTINGS, 3)))
         self.finish()
         self.call("poll")
-        self.call("delete_fork")
+        self.call("delete_conversation", {0: json.dumps({"name": "Fork 1"})})
         self.call("poll")
         self.assertNotIn("Fork 1", self.state[self.forks._id]["branches"])
         self.assertNotIn("Fork 1", library.read()["branches"])
+
+    def test_deleting_from_another_page_waits_for_the_shared_run(self):
+        self.state[self.forks._id]["active"] = "Chat 1"
+        self.state[self.turns._id] = [make_turn("user", "Another conversation")]
+        self.start()
+        self.call("archive_conversation", {0: json.dumps({"name": "Chat 1", "archived": True})})
+        source_state = self.state
+        self.state = SessionState(self.demo)
+        self.state[self.forks._id] = library.read()
+        try:
+            self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+            self.assertIn("Chat 1", library.read()["branches"])
+            self.assertTrue(self.manager.busy)
+            self.finish()
+            self.assertEqual(library.read()["branches"]["Chat 1"][-1]["content"], "Hello world")
+            self.state[self.forks._id] = library.read()
+            self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+            self.assertNotIn("Chat 1", library.read()["branches"])
+            self.assertFalse(self.manager.busy)
+            self.state = source_state
+            self.call("poll")
+            self.assertNotIn("Chat 1", library.read()["branches"])
+        finally:
+            self.state = source_state
+
+    def test_failed_delete_releases_the_shared_slot(self):
+        with mock.patch.object(library, "write", side_effect=OSError("write failed")):
+            with self.assertRaisesRegex(OSError, "write failed"):
+                self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+        self.assertFalse(self.manager.busy)
+
+    def test_other_page_delete_waits_for_the_final_persistence_frame(self):
+        self.state[self.forks._id]["active"] = "Chat 1"
+        self.state[self.turns._id] = [make_turn("user", "Another conversation")]
+        finishing, persist = threading.Event(), threading.Event()
+        finish = self.job._finish
+
+        def delayed_finish(error=None):
+            finishing.set()
+            if not persist.wait(5):
+                raise RuntimeError("Test did not release final persistence")
+            finish(error)
+
+        self.job._finish = delayed_finish
+        self.addCleanup(persist.set)
+        self.start()
+        self.release.set()
+        self.assertTrue(finishing.wait(2))
+        self.assertFalse(self.manager.busy)
+        source_state = self.state
+        self.state = SessionState(self.demo)
+        self.state[self.forks._id] = library.read()
+        try:
+            self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+            self.assertIn("Chat 1", library.read()["branches"])
+            self.assertFalse(self.manager.busy)
+            persist.set()
+            self.finish()
+            self.state[self.forks._id] = library.read()
+            self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+            self.assertNotIn("Chat 1", library.read()["branches"])
+        finally:
+            persist.set()
+            self.state = source_state
 
 
 class BackgroundSnapshotTests(unittest.TestCase):

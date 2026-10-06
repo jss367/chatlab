@@ -18,22 +18,28 @@ import inspect
 import logging
 import threading
 import typing
+import weakref
 
 import gradio as gr
 
 from chatlab import library
 from chatlab import settings
+from chatlab.model_runtime import GENERATING
 from chatlab.conversation import (
-    FORK_PREFIX, SAMPLING_FIELDS, branch_choices, copy_forks, copy_turns,
+    ARCHIVED_VIEW, FORK_PREFIX, SAMPLING_FIELDS, copy_forks, copy_turns,
     display_messages, put_branch, put_branch_sampling,
 )
 from chatlab.ui.common import STOP_LABEL, finalize_partial
+from chatlab.ui.conversations import conversation_list_update, show_archive
 from chatlab.ui.outputs import (
     COMPOSER_OUTPUT_NAMES, EDITOR_OUTPUT_NAMES, POLL_OUTPUT_NAMES, positional, skipped,
 )
 from chatlab.ui.panel import restore_chat_metrics_generation, transcript_update
 
 logger = logging.getLogger(__name__)
+
+_JOBS = weakref.WeakSet()
+_JOBS_LOCK = threading.Lock()
 
 # The frame entries that are a stamp and a list of token measurements. The
 # measurements are never changed once published, so a copy shares them.
@@ -71,6 +77,8 @@ class ConversationJob:
         self.rendered = None
         self.fork_created = False
         self.new_branch = None
+        with _JOBS_LOCK:
+            _JOBS.add(self)
 
     def __deepcopy__(self, memo):
         return type(self)()
@@ -205,6 +213,7 @@ class ConversationJob:
                         put_branch_sampling(forks, name, self.saved["sampling"][name])
                 if forks["active"] == parent:
                     forks["active"] = self.owner
+                    forks.pop(ARCHIVED_VIEW, None)
             if self.saved is not None and self.owner in forks["branches"]:
                 stamp = self.saved["updated"].get(self.owner, "")
                 if stamp >= forks["updated"].get(self.owner, ""):
@@ -231,14 +240,9 @@ class ConversationJob:
             )
 
     def choices(self, forks, turns):
-        choices = branch_choices(forks, turns)
         with self.lock:
-            if self.running:
-                choices = [
-                    (f"{label} · Generating…" if name == self.owner else label, name)
-                    for label, name in choices
-                ]
-        return gr.update(choices=choices, value=forks["active"])
+            running = self.owner if self.running else None
+        return conversation_list_update(forks, turns, running)
 
     def render(self, forks, turns, scale):
         with self.lock:
@@ -316,9 +320,16 @@ class ConversationEvents:
         navigation=False,
         stop=False,
         clear=False,
+        exclusive=False,
         **kwargs,
     ):
-        """Wire ``fn`` to ``trigger``; ``outputs`` names what its frames may publish."""
+        """Wire ``fn`` to ``trigger``; ``outputs`` names what its frames may publish.
+
+        ``exclusive`` refuses the handler while any conversation is
+        generating, as ``clear`` does, without retiring the finished run's
+        frames afterwards: for deleting a conversation by name, which may be
+        the one the run is still writing to the file.
+        """
 
         inputs = list(inputs or [])
         names = tuple(outputs)
@@ -348,7 +359,7 @@ class ConversationEvents:
             None,
         )
 
-        def handler(*args):
+        def apply_handler(args, held=None):
             data = dict(zip(actual_inputs, args))
             job = data[self.state]
             forks, turns = job.merge(data[self.forks], data[self.turns])
@@ -368,11 +379,16 @@ class ConversationEvents:
                     f"Stopping {job.owner}…" if job.running else "No response is running."
                 )
             elif job.running and (
-                generation or (not navigation and (clear or forks["active"] == job.owner))
+                generation or exclusive
+                or (not navigation and (clear or forks["active"] == job.owner))
             ):
                 result[status_output] = (
                     f"{job.owner} is generating. Press Stop or wait for it to finish first."
                 )
+            elif held is not None:
+                from chatlab.ui.generation import busy_status
+
+                result[status_output] = busy_status(held)
             else:
                 call_args = [data[component] for component in inputs]
                 if event:
@@ -436,8 +452,33 @@ class ConversationEvents:
             result[self.turns], result[self.forks] = turns, forks
             result[self.picker] = job.choices(forks, turns)
             result[self.outputs["send"]], result[self.outputs["stop"]] = job.controls(forks)
-            library.write(library.as_seen(forks, turns))
+            library.write(library.as_seen(forks, turns), preserve_archived=clear)
             return tuple(result.get(component, gr.skip()) for component in actual_outputs)
+
+        def handler(*args):
+            if not exclusive:
+                return apply_handler(args)
+            from chatlab.ui import runtime
+
+            # A different browser session can own the worker. Hold the shared
+            # slot through the deletion's final write so its next frame cannot
+            # resurrect the conversation, nor start between the check and write.
+            manager = runtime.MANAGER
+            held = manager.claim_generation()
+            claimed = held is None
+            try:
+                if claimed:
+                    # The iterator releases the model before the worker's
+                    # final persistence frame. That worker still owns its
+                    # conversation until its thread has actually finished.
+                    with _JOBS_LOCK:
+                        jobs = list(_JOBS)
+                    if any(job.worker is not None and job.worker.is_alive() for job in jobs):
+                        held = GENERATING
+                return apply_handler(args, held)
+            finally:
+                if claimed:
+                    manager.release_generation()
 
         handler.__name__ = fn.__name__
         parameters = [
@@ -470,3 +511,9 @@ class ConversationEvents:
     def refresh_conversation_list(self, turns, forks, job):
         seen = library.as_seen(forks, turns)
         return job.choices(seen, turns), seen
+
+    def toggle_archive(self, turns, forks, job):
+        """Turn the list to the archive, or back to the conversations in use."""
+
+        forks = show_archive(forks, not (forks or {}).get(ARCHIVED_VIEW))
+        return job.choices(forks, turns), forks

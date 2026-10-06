@@ -5,6 +5,7 @@ from __future__ import annotations
 import gradio as gr
 
 from chatlab.ui.common import (
+    ARCHIVED_VIEW_CLASS,
     CONVERSATION_PANE_WIDTH,
     NAV_PANE_WIDTH,
 )
@@ -610,13 +611,17 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
 {ICON_CSS}
 #shell button {{ box-shadow: none; }}
 #conversation-pane button {{ font-size: 12px; padding: 6px; white-space: nowrap; }}
-/* New, Fork and Delete share one row in a pane 248px wide, and an icon in
+/* New, Fork and Archived share one row in a pane 248px wide, and an icon in
    front of each label is three more icons than the row was measured for. The
    drawings are set a size smaller here and the buttons give up the minimum
    width they ask for, which is what keeps the three on one line. */
 #conversation-pane .{ICON_CLASS} {{ gap: 4px; padding: 6px 4px; }}
 #conversation-pane .{ICON_CLASS}::before {{ width: 13px; height: 13px; }}
 #conversation-pane .row button {{ min-width: 0 !important; }}
+/* Archived is the longest of the three words, and at a third of the row each
+   it would put its icon on a line of its own. The row is shared out by what
+   each label needs instead, and the icon stays beside its word. */
+#conversation-pane .row button {{ flex: 1 1 auto; flex-wrap: nowrap; }}
 #chat-tab button {{ font-size: 13px; }}
 #shell button:focus-visible {{ outline: 2px solid var(--color-accent); outline-offset: 2px; }}
 /* Each sampling slider carries its own ↺, in the corner Gradio draws one in.
@@ -927,6 +932,55 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
 #conversation-list label span {{
   white-space: pre-line; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
+}}
+/* Archive, or Restore and Delete in the archive, on each row; the page
+   script in ui/conversation_rows.py puts them there. They show while the
+   row is hovered or focused, over the end of its title, on a fill the same
+   as the row's so the title does not show through. */
+#conversation-list .conversation-actions {{
+  position: absolute; top: 6px; right: 6px; display: flex; gap: 2px;
+  padding: 2px; border-radius: 6px; background: var(--block-background-fill);
+  opacity: 0; pointer-events: none; transition: opacity 120ms ease;
+}}
+#conversation-list label.selected .conversation-actions {{ background: var(--primary-50); }}
+.dark #conversation-list label.selected .conversation-actions {{ background: var(--neutral-800); }}
+#conversation-list label:hover .conversation-actions,
+#conversation-list label:focus-within .conversation-actions {{
+  opacity: 1; pointer-events: auto;
+}}
+#conversation-list .conversation-action {{
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--body-text-color-subdued); cursor: pointer;
+}}
+#conversation-list .conversation-action::before {{
+  content: ""; width: 14px; height: 14px; background-color: currentColor;
+}}
+#conversation-list .conversation-action:hover,
+#conversation-list .conversation-action:focus-visible {{
+  color: var(--body-text-color); background: var(--border-color-primary);
+}}
+#conversation-list .conversation-action.armed {{
+  color: var(--color-red-500); background: var(--color-red-50);
+}}
+.dark #conversation-list .conversation-action.armed {{ background: var(--neutral-700); }}
+/* The archive is the same list showing other conversations, so it is titled
+   as such, says so when there is nothing in it, and Archived stays pressed
+   until it is turned back. */
+#conversation-list.{ARCHIVED_VIEW_CLASS}::before {{
+  content: "Archived"; display: block; padding: 0 2px 6px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--body-text-color-subdued);
+}}
+#conversation-list.{ARCHIVED_VIEW_CLASS} .wrap:empty::after {{
+  content: "Nothing archived."; padding: 4px 2px;
+  font-size: 12px; color: var(--body-text-color-subdued);
+}}
+#conversation-pane:has(#conversation-list.{ARCHIVED_VIEW_CLASS}) #archive-toggle {{
+  background: var(--primary-50); border-color: var(--color-accent);
+}}
+.dark #conversation-pane:has(#conversation-list.{ARCHIVED_VIEW_CLASS}) #archive-toggle {{
+  background: var(--neutral-800);
 }}
 
 .viz-root {{

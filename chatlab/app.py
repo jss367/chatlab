@@ -134,8 +134,9 @@ from chatlab.ui.common import (
     status_card,
 )
 from chatlab.ui.conversations import (
+    archive_conversation,
     conversation_list_update,
-    delete_fork,
+    delete_conversation,
     fork_conversation,
     fork_refused,
     load_conversation,

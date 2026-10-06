@@ -53,6 +53,10 @@ NAV_PANE_WIDTH = 72
 
 
 CONVERSATION_PANE_WIDTH = 248
+# Worn by the conversation list while it shows the archive. The page script
+# reads it to offer Restore and Delete on each row in place of Archive, and
+# the stylesheet to title the list and mark the Archived button as pressed.
+ARCHIVED_VIEW_CLASS = "archived-view"
 
 
 CHAT_PAGE, IMAGES_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = (

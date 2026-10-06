@@ -16,6 +16,8 @@ from chatlab import library
 from chatlab import settings
 from chatlab.steering import from_controls as steering_from_controls, compact as compact_steering
 from chatlab.conversation import (
+    ARCHIVED_VIEW,
+    branch_archived,
     CHAT_PREFIX,
     FORK_PREFIX,
     MAIN_BRANCH,
@@ -30,6 +32,7 @@ from chatlab.conversation import (
     from_json,
     locate,
     put_branch,
+    put_branch_archived,
     put_branch_sampling,
     to_json,
 )
@@ -38,6 +41,7 @@ from chatlab.token_metrics import (
 )
 from chatlab.trace_export import write_private_text
 from chatlab.ui.common import (
+    ARCHIVED_VIEW_CLASS,
     NO_TOKEN_SELECTED,
     failure_status,
     finalize_partial,
@@ -65,10 +69,25 @@ from chatlab.ui.pictures import strip_html as picture_strip
 logger = logging.getLogger(__name__)
 
 
-def conversation_list_update(forks: dict, turns: list[dict] | None):
-    """Redraw the list, with the active branch's turns read from ``turns``."""
+def conversation_list_update(forks: dict, turns: list[dict] | None, running: str | None = None):
+    """Redraw the list, with the active branch's turns read from ``turns``.
 
-    return gr.update(choices=branch_choices(forks, turns), value=forks["active"])
+    ``running`` names a branch answering in the background, which the list
+    marks as generating. The active branch is selected only where the list
+    shows it: an archived conversation opened from the archive is not in the
+    list of those in use.
+    """
+
+    choices = [
+        (f"{label} · Generating…" if name == running else label, name)
+        for label, name in branch_choices(forks, turns)
+    ]
+    listed = forks["active"] in {name for _label, name in choices}
+    return gr.update(
+        choices=choices,
+        value=forks["active"] if listed else None,
+        elem_classes=[ARCHIVED_VIEW_CLASS] if forks.get(ARCHIVED_VIEW) else [],
+    )
 
 
 def refresh_conversation_list(turns: list[dict] | None, forks: dict | None):
@@ -128,6 +147,8 @@ def restore_conversations():
     metrics = empty_metrics()
     if forks is None:
         return Frame(RESTORE_OUTPUT_NAMES, metrics=metrics)
+    if branch_archived(forks, forks["active"]):
+        forks[ARCHIVED_VIEW] = True
     turns = copy_turns(forks["branches"][forks["active"]])
     messages, _ = display_messages(turns)
     return Frame(
@@ -375,6 +396,8 @@ def fork_conversation(
     put_branch_sampling(forks, forks["active"], inherited)
     put_branch_sampling(forks, name, inherited)
     forks["active"] = name
+    # A fork of an archived conversation is a new one in use.
+    forks.pop(ARCHIVED_VIEW, None)
     messages, _ = display_messages(forked)
 
     truncated = len(forked) < len(turns)
@@ -452,15 +475,87 @@ def switch_fork(
     )
 
 
-def delete_fork(
+def conversation_request(action: str | None) -> dict | None:
+    """What a row's button in the list asked for, as the page script wrote it."""
+
+    try:
+        request = json.loads(action or "")
+    except ValueError:
+        return None
+    if not isinstance(request, dict) or not isinstance(request.get("name"), str):
+        return None
+    return request
+
+
+def show_archive(forks: dict | None, shown: bool) -> dict:
+    """``forks`` with the list turned to the archive, or back to the conversations in use."""
+
+    forks = copy_forks(forks)
+    if shown:
+        forks[ARCHIVED_VIEW] = True
+    else:
+        forks.pop(ARCHIVED_VIEW, None)
+    return forks
+
+
+def archive_conversation(
+    action: str | None,
+    turns: list[dict] | None,
+    forks: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+    *,
+    preserve_source: bool = False,
+):
+    """Archive the conversation a row's button named, or bring it back from the archive.
+
+    Archiving keeps everything the conversation had and takes it out of the
+    list. Archiving the one on screen goes back to the main conversation, as
+    deleting it does; any other stays where it is.
+    """
+
+    forks = copy_forks(forks)
+    request = conversation_request(action)
+    name = request and request["name"]
+    archived = bool(request and request.get("archived", True))
+    if name not in forks["branches"]:
+        return fork_refused(turns, forks, "That conversation no longer exists.")
+    if name == MAIN_BRANCH:
+        return fork_refused(turns, forks, "The main conversation cannot be archived.")
+    if not put_branch_archived(forks, name, archived):
+        return fork_refused(turns, forks, f"{name} is already {'archived' if archived else 'in the list'}.")
+    logger.info("%s %s", "Archived" if archived else "Restored", name)
+    if archived and name == forks["active"]:
+        frame = switch_fork(MAIN_BRANCH, turns, forks, scale_name, preserve_source=preserve_source)
+        frame["status"] = f"Archived {name}. Back on {MAIN_BRANCH}."
+        return frame
+    if not archived and name == forks["active"]:
+        forks.pop(ARCHIVED_VIEW, None)
+    return Frame(
+        FORK_OUTPUT_NAMES,
+        forks=forks,
+        conversation_list=conversation_list_update(forks, turns),
+        status=f"Archived {name}." if archived else f"Restored {name} to the list.",
+    )
+
+
+def delete_conversation(
+    action: str | None,
     turns: list[dict] | None,
     forks: dict | None,
     scale_name: str = DEFAULT_COLOR_SCALE,
 ):
-    """Drop the active fork and go back to the main conversation."""
+    """Delete the conversation a row's button named, for good.
+
+    Offered in the archive alone, so a conversation is archived on its way to
+    being deleted. Deleting the one on screen goes back to the main
+    conversation; any other leaves the screen as it is.
+    """
 
     forks = copy_forks(forks)
-    name = forks["active"]
+    request = conversation_request(action)
+    name = request and request["name"]
+    if name not in forks["branches"]:
+        return fork_refused(turns, forks, "That conversation no longer exists.")
     if name == MAIN_BRANCH:
         return fork_refused(
             turns,
@@ -470,7 +565,15 @@ def delete_fork(
 
     logger.info("Deleted %s (%s messages)", name, len(forks["branches"].get(name) or []))
     drop_branch(forks, name)
+    if name != forks["active"]:
+        return Frame(
+            FORK_OUTPUT_NAMES,
+            forks=forks,
+            conversation_list=conversation_list_update(forks, turns),
+            status=f"Deleted {name}.",
+        )
     forks["active"] = MAIN_BRANCH
+    forks.pop(ARCHIVED_VIEW, None)
     target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
     messages, _ = display_messages(target)
     return Frame(
@@ -516,6 +619,9 @@ def new_conversation(
     # touched on any other conversation.
     put_branch_sampling(forks, name, sampling_on_screen(sampling))
     forks["active"] = name
+    # The new chat is in the list of conversations in use, so that is the
+    # list to show it in.
+    forks.pop(ARCHIVED_VIEW, None)
     return Frame(
         NEW_CONVERSATION_OUTPUT_NAMES,
         chatbot=[],

@@ -2,10 +2,12 @@ import json
 import unittest
 
 from chatlab.conversation import (
+    ARCHIVED_VIEW,
     MAIN_BRANCH,
     REASONING_TITLE,
     SAVE_FORMAT,
     TITLE_LIMIT,
+    branch_archived,
     branch_choices,
     branch_label,
     branch_sampling,
@@ -27,6 +29,7 @@ from chatlab.conversation import (
     next_branch_name,
     next_fork_name,
     put_branch,
+    put_branch_archived,
     put_branch_sampling,
     short_model_name,
     split_reasoning,
@@ -487,6 +490,78 @@ def measured(content, model="allenai/Olmo-3-7B-Think", prompt=100, generated=20)
     turn["prompt_tokens"] = prompt
     turn["generated_tokens"] = generated
     return turn
+
+
+class ArchiveTests(unittest.TestCase):
+    def forks(self) -> dict:
+        forks = new_forks()
+        put_branch(forks, "Chat 1", [make_turn("user", "one")])
+        put_branch(forks, "Chat 2", [make_turn("user", "two")])
+        return forks
+
+    def test_archiving_takes_a_conversation_out_of_the_list_and_into_the_archive(self):
+        forks = self.forks()
+
+        self.assertTrue(put_branch_archived(forks, "Chat 1", True))
+
+        self.assertTrue(branch_archived(forks, "Chat 1"))
+        self.assertEqual([name for _label, name in branch_choices(forks, [])], [MAIN_BRANCH, "Chat 2"])
+        forks[ARCHIVED_VIEW] = True
+        self.assertEqual([name for _label, name in branch_choices(forks, [])], ["Chat 1"])
+
+    def test_archiving_keeps_the_conversation_and_stamps_only_the_archiving(self):
+        forks = self.forks()
+        updated = dict(forks["updated"])
+
+        put_branch_archived(forks, "Chat 1", True)
+
+        self.assertEqual(forks["branches"]["Chat 1"][0]["content"], "one")
+        self.assertEqual(forks["updated"], updated)
+        self.assertIn("Chat 1", forks["archived_updated"])
+
+    def test_bringing_one_back_restores_it_to_the_list(self):
+        forks = self.forks()
+        put_branch_archived(forks, "Chat 1", True)
+
+        self.assertTrue(put_branch_archived(forks, "Chat 1", False))
+
+        self.assertFalse(branch_archived(forks, "Chat 1"))
+        self.assertIn("Chat 1", [name for _label, name in branch_choices(forks, [])])
+
+    def test_the_main_conversation_and_a_missing_one_are_never_archived(self):
+        forks = self.forks()
+
+        self.assertFalse(put_branch_archived(forks, MAIN_BRANCH, True))
+        self.assertFalse(put_branch_archived(forks, "Chat 9", True))
+        self.assertEqual((forks["archived"], forks["archived_updated"]), ({}, {}))
+
+    def test_archiving_twice_changes_nothing_the_second_time(self):
+        forks = self.forks()
+        put_branch_archived(forks, "Chat 1", True)
+        stamp = forks["archived_updated"]["Chat 1"]
+
+        self.assertFalse(put_branch_archived(forks, "Chat 1", True))
+        self.assertEqual(forks["archived_updated"]["Chat 1"], stamp)
+
+    def test_the_view_and_the_archive_survive_a_copy(self):
+        forks = self.forks()
+        put_branch_archived(forks, "Chat 1", True)
+        forks[ARCHIVED_VIEW] = True
+
+        copied = copy_forks(forks)
+
+        self.assertTrue(copied[ARCHIVED_VIEW])
+        self.assertEqual(copied["archived"], {"Chat 1": True})
+        copied["archived"].clear()
+        self.assertTrue(branch_archived(forks, "Chat 1"))
+
+    def test_deleting_an_archived_conversation_forgets_that_it_was(self):
+        forks = self.forks()
+        put_branch_archived(forks, "Chat 1", True)
+
+        drop_branch(forks, "Chat 1")
+
+        self.assertEqual((forks["archived"], forks["archived_updated"]), ({}, {}))
 
 
 class ConversationListTests(unittest.TestCase):

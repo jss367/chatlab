@@ -28,6 +28,10 @@ transcript it may be a reply behind on, and a newer transcript does not undo
 a slider moved on another page. A branch with no sampling of its own answers
 with the saved settings.
 
+Whether a branch is archived is kept the same way, on a stamp of its own, so
+archiving a conversation another page is still answering in survives that
+page's next save, and the reply it saves survives the archiving.
+
 Where it lives::
 
     ~/.local/share/chatlab/conversations.json
@@ -77,6 +81,7 @@ LIBRARY_FILENAME = "conversations.json"
 # Bind it to its branch name: an older release can also copy sampling to a
 # brand-new fork, which must not inherit its parent's own origin record.
 ORIGIN_COMPAT_KEY = "_chatlab_fork_origin"
+ARCHIVE_COMPAT_KEY = "_chatlab_archive"
 
 # Held across the whole of write(): read the file, merge, stage, replace. The
 # two listeners in app.py that save both run on Gradio's worker threads, and
@@ -155,16 +160,33 @@ def dump(forks: dict | None) -> str:
             entry["origin"] = forks["origins"][name]
         sampling = sampling_entry(forks["sampling"].get(name))
         sampling.pop(ORIGIN_COMPAT_KEY, None)
+        sampling.pop(ARCHIVE_COMPAT_KEY, None)
         if name in forks["origins"]:
             sampling[ORIGIN_COMPAT_KEY] = {"branch": name, "origin": forks["origins"][name]}
+        if name in forks["archived_updated"]:
+            sampling[ARCHIVE_COMPAT_KEY] = {
+                "branch": name, "archived": bool(forks["archived"].get(name)),
+                "updated": forks["archived_updated"][name],
+                "sampling_updated": forks["sampling_updated"].get(name),
+            }
         if sampling:
             entry["sampling"] = sampling
         # Written whether or not there is sampling beside it: a stamp on its
         # own says the sampling was taken away, and another page holding an
         # older copy must not put it back.
-        stamp = forks["sampling_updated"].get(name)
+        # Older writers merge this carrier by the sampling stamp. Advance the
+        # wire stamp for archival too, retaining the real sampling stamp in
+        # the compatibility record so current writers still merge independently.
+        stamp = max(forks["sampling_updated"].get(name, ""),
+                    forks["archived_updated"].get(name, ""))
         if stamp:
             entry["sampling_updated"] = stamp
+        if forks["archived"].get(name):
+            entry["archived"] = True
+        # Written for a branch brought back too: the stamp alone says so.
+        stamp = forks["archived_updated"].get(name)
+        if stamp:
+            entry["archived_updated"] = stamp
         if name in updated:
             entry["updated"] = updated[name]
         branches.append(entry)
@@ -198,6 +220,8 @@ def parse(payload: str) -> dict:
     origins: dict[str, dict] = {}
     sampling: dict[str, dict] = {}
     sampling_updated: dict[str, str] = {}
+    archived: dict[str, bool] = {}
+    archived_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
     for entry in raw_branches:
         if not isinstance(entry, dict):
@@ -216,6 +240,7 @@ def parse(payload: str) -> dict:
             if not isinstance(stamp, str):
                 raise ValueError(f"The branch {name!r} has an updated time that is not a string.")
             updated[name] = stamp
+        legacy_archive = None
         held = entry.get("sampling")
         if held is not None:
             if not isinstance(held, dict):
@@ -225,6 +250,7 @@ def parse(payload: str) -> dict:
             # a hand-edited settings file does.
             kept = sampling_entry(held)
             legacy_origin = kept.pop(ORIGIN_COMPAT_KEY, None)
+            legacy_archive = kept.pop(ARCHIVE_COMPAT_KEY, None)
             if (origin is None and isinstance(legacy_origin, dict)
                     and legacy_origin.get("branch") == name):
                 from chatlab.fork_tree import validate_origin
@@ -234,12 +260,32 @@ def parse(payload: str) -> dict:
         # Read whether or not any sampling came with it: on its own it says
         # the sampling was taken away, and when it was.
         sampling_stamp = entry.get("sampling_updated")
+        if (isinstance(legacy_archive, dict) and legacy_archive.get("branch") == name
+                and sampling_stamp == legacy_archive.get("updated")
+                and "sampling_updated" in legacy_archive):
+            sampling_stamp = legacy_archive["sampling_updated"]
         if sampling_stamp is not None:
             if not isinstance(sampling_stamp, str):
                 raise ValueError(
                     f"The branch {name!r} has a sampling time that is not a string."
                 )
             sampling_updated[name] = sampling_stamp
+        archive_entry = entry
+        if ("archived" not in entry and "archived_updated" not in entry
+                and isinstance(legacy_archive, dict) and legacy_archive.get("branch") == name):
+            archive_entry = {
+                "archived": legacy_archive.get("archived"),
+                "archived_updated": legacy_archive.get("updated"),
+            }
+        if archive_entry.get("archived") is True and name != MAIN_BRANCH:
+            archived[name] = True
+        archived_stamp = archive_entry.get("archived_updated")
+        if archived_stamp is not None:
+            if not isinstance(archived_stamp, str):
+                raise ValueError(
+                    f"The branch {name!r} has an archived time that is not a string."
+                )
+            archived_updated[name] = archived_stamp
         turns = turns_from_entries(entry.get("turns"))
         # A response that was still streaming when the file was written is
         # kept as far as it got, and closed, so its reasoning block does not
@@ -275,6 +321,8 @@ def parse(payload: str) -> dict:
         "origins": origins,
         "sampling": sampling,
         "sampling_updated": sampling_updated,
+        "archived": archived,
+        "archived_updated": archived_updated,
         "updated": updated,
     }
 
@@ -306,6 +354,8 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
     origins: dict[str, dict] = {}
     sampling: dict[str, dict] = {}
     sampling_updated: dict[str, str] = {}
+    archived: dict[str, bool] = {}
+    archived_updated: dict[str, str] = {}
     updated: dict[str, str] = {}
 
     def newer(name: str, times: str) -> dict:
@@ -342,6 +392,15 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
             held = side["sampling"].get(name)
             if held:
                 sampling[name] = held
+            # Archiving is merged on its own stamp too, and for the same
+            # reason: the page that archived a conversation may be a reply
+            # behind the page still answering in it.
+            side = newer(name, "archived_updated")
+            stamp = side["archived_updated"].get(name)
+            if stamp:
+                archived_updated[name] = stamp
+            if side["archived"].get(name):
+                archived[name] = True
         stamp = winner["updated"].get(name)
         if stamp:
             updated[name] = stamp
@@ -355,6 +414,8 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
         "origins": origins,
         "sampling": sampling,
         "sampling_updated": sampling_updated,
+        "archived": archived,
+        "archived_updated": archived_updated,
         "updated": updated,
     }
 
@@ -376,10 +437,39 @@ def read(path: Path | None = None) -> dict | None:
         logger.warning("Could not read the conversations in %s: %s", target, error)
         return None
     try:
-        return parse(raw)
+        return _restore_archive_metadata(parse(raw), target)
     except ValueError as error:
         logger.warning("Ignoring the conversations in %s: %s", target, error)
         return None
+
+
+def _archive_path(target: Path) -> Path:
+    return target.with_name(f"{target.name}.archive")
+
+
+def _restore_archive_metadata(forks: dict, target: Path) -> dict:
+    """Recover independent archive stamps that older sampling writers cannot erase."""
+    try:
+        records = json.loads(_archive_path(target).read_text(encoding="utf-8"))
+        if not isinstance(records, dict):
+            raise ValueError("Archive metadata must be an object.")
+        for name, record in records.items():
+            if (name == MAIN_BRANCH or name not in forks["branches"]
+                    or not isinstance(record, dict) or type(record.get("archived")) is not bool
+                    or not isinstance(record.get("updated"), str)):
+                continue
+            stamp = record["updated"]
+            if stamp > forks["archived_updated"].get(name, ""):
+                forks["archived_updated"][name] = stamp
+                if record["archived"]:
+                    forks["archived"][name] = True
+                else:
+                    forks["archived"].pop(name, None)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as error:
+        logger.warning("Could not read archive metadata for %s: %s", target, error)
+    return forks
 
 
 def taken_names(path: Path | None = None) -> set[str]:
@@ -470,7 +560,10 @@ def _replace(target: Path, text: str) -> bool:
     return True
 
 
-def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool = False) -> Path | None:
+def write(
+    forks: dict | None, path: Path | None = None, *,
+    preserve_active: bool = False, preserve_archived: bool = False,
+) -> Path | None:
     """Merge the pane into the file on disk and return the path; ``None`` if it could not be.
 
     What is on disk is read first and merged with ``forks`` as :func:`merge`
@@ -480,6 +573,8 @@ def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool
 
     Background jobs use ``preserve_active`` to save their source transcript
     without changing which conversation the reader selected most recently.
+    Clear all uses ``preserve_archived`` to keep branches archived by another
+    page, including one that saves between the clear handler and this write.
     """
 
     target = path or library_path()
@@ -488,11 +583,38 @@ def write(forks: dict | None, path: Path | None = None, *, preserve_active: bool
             existing = _read_for_save(target)
         except OSError:
             return None
+        if preserve_archived and existing:
+            forks = copy_forks(forks)
+            for name in existing["archived"]:
+                if name not in forks["branches"] and name in forks["updated"]:
+                    forks["branches"][name] = existing["branches"][name]
+                    for field in ("sampling", "sampling_updated", "archived", "archived_updated", "origins"):
+                        if name in existing[field]:
+                            forks[field][name] = existing[field][name]
+                    # Keep the clear's stamp with the preserved branch. Its
+                    # next state-change save may still carry this tombstone;
+                    # at equal stamps, merge keeps the side with the branch.
+                    forks["updated"][name] = max(
+                        forks["updated"][name], existing["updated"].get(name, "")
+                    )
         merged = merge(forks, existing)
         if preserve_active and existing and existing["active"] in merged["branches"]:
             merged["active"] = existing["active"]
         if not _replace(target, dump(merged)):
             return None
+        # Older versions can replace the entire sampling dictionary after a
+        # slider edit, losing every in-file compatibility copy. This private
+        # companion is written only by archive-aware versions and follows the
+        # same locked, atomic-replace path as the library itself.
+        records = {
+            name: {"archived": bool(merged["archived"].get(name)), "updated": stamp}
+            for name, stamp in merged["archived_updated"].items()
+            if name in merged["branches"] and name != MAIN_BRANCH
+        }
+        archive_path = _archive_path(target)
+        if records or archive_path.exists():
+            if not _replace(archive_path, json.dumps(records, indent=2)):
+                return None
     return target
 
 
