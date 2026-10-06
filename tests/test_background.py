@@ -533,6 +533,40 @@ class BackgroundConversationTests(unittest.TestCase):
                 self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
         self.assertFalse(self.manager.busy)
 
+    def test_other_page_delete_waits_for_the_final_persistence_frame(self):
+        self.state[self.forks._id]["active"] = "Chat 1"
+        self.state[self.turns._id] = [make_turn("user", "Another conversation")]
+        finishing, persist = threading.Event(), threading.Event()
+        finish = self.job._finish
+
+        def delayed_finish(error=None):
+            finishing.set()
+            if not persist.wait(5):
+                raise RuntimeError("Test did not release final persistence")
+            finish(error)
+
+        self.job._finish = delayed_finish
+        self.addCleanup(persist.set)
+        self.start()
+        self.release.set()
+        self.assertTrue(finishing.wait(2))
+        self.assertFalse(self.manager.busy)
+        source_state = self.state
+        self.state = SessionState(self.demo)
+        self.state[self.forks._id] = library.read()
+        try:
+            self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+            self.assertIn("Chat 1", library.read()["branches"])
+            self.assertFalse(self.manager.busy)
+            persist.set()
+            self.finish()
+            self.state[self.forks._id] = library.read()
+            self.call("delete_conversation", {0: json.dumps({"name": "Chat 1"})})
+            self.assertNotIn("Chat 1", library.read()["branches"])
+        finally:
+            persist.set()
+            self.state = source_state
+
 
 class BackgroundSnapshotTests(unittest.TestCase):
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):

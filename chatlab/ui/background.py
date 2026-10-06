@@ -18,11 +18,13 @@ import inspect
 import logging
 import threading
 import typing
+import weakref
 
 import gradio as gr
 
 from chatlab import library
 from chatlab import settings
+from chatlab.model_runtime import GENERATING
 from chatlab.conversation import (
     ARCHIVED_VIEW, FORK_PREFIX, SAMPLING_FIELDS, copy_forks, copy_turns,
     display_messages, put_branch, put_branch_sampling,
@@ -35,6 +37,9 @@ from chatlab.ui.outputs import (
 from chatlab.ui.panel import restore_chat_metrics_generation, transcript_update
 
 logger = logging.getLogger(__name__)
+
+_JOBS = weakref.WeakSet()
+_JOBS_LOCK = threading.Lock()
 
 # The frame entries that are a stamp and a list of token measurements. The
 # measurements are never changed once published, so a copy shares them.
@@ -72,6 +77,8 @@ class ConversationJob:
         self.rendered = None
         self.fork_created = False
         self.new_branch = None
+        with _JOBS_LOCK:
+            _JOBS.add(self)
 
     def __deepcopy__(self, memo):
         return type(self)()
@@ -457,10 +464,19 @@ class ConversationEvents:
             # resurrect the conversation, nor start between the check and write.
             manager = runtime.MANAGER
             held = manager.claim_generation()
+            claimed = held is None
             try:
+                if claimed:
+                    # The iterator releases the model before the worker's
+                    # final persistence frame. That worker still owns its
+                    # conversation until its thread has actually finished.
+                    with _JOBS_LOCK:
+                        jobs = list(_JOBS)
+                    if any(job.worker is not None and job.worker.is_alive() for job in jobs):
+                        held = GENERATING
                 return apply_handler(args, held)
             finally:
-                if held is None:
+                if claimed:
                     manager.release_generation()
 
         handler.__name__ = fn.__name__
