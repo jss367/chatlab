@@ -150,5 +150,11 @@ app = BUNDLE(
         "CFBundleVersion": __version__,
         "LSMinimumSystemVersion": "13.0",
         "NSHighResolutionCapable": True,
+        # Without a reason string macOS can refuse a LAN connection outright
+        # rather than asking, and Remote → Connect reaches hosts over ssh.
+        "NSLocalNetworkUsageDescription": (
+            "ChatLab connects over SSH to remote hosts you choose, "
+            "such as a GPU machine on your network."
+        ),
     },
 )
