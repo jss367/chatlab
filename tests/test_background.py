@@ -14,7 +14,7 @@ from chatlab import app
 from chatlab import library
 import settings_sandbox
 from chatlab.ui import conversations
-from chatlab.conversation import MAIN_BRANCH, make_turn, new_forks, put_branch
+from chatlab.conversation import ARCHIVED_VIEW, MAIN_BRANCH, make_turn, new_forks, put_branch
 from chatlab.ui import runtime
 from chatlab.ui.background import ConversationJob
 from fakes import THINK_EOS, THINK_PIECES
@@ -441,6 +441,27 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(self.state[self.turns._id], original)
         self.assertEqual(self.state[self.forks._id]["origins"], {})
         self.assertEqual(self.state[self.forks._id]["active"], "Main")
+
+    def test_token_fork_from_the_archive_returns_to_the_active_list(self):
+        self.state[self.forks._id]["active"] = "Chat 1"
+        self.state[self.turns._id] = [make_turn("user", "Another conversation")]
+        self.start()
+        self.finish()
+        self.call("poll")
+        self.call("archive_conversation", {0: json.dumps({"name": "Chat 1", "archived": True})})
+        self.call("toggle_archive")
+        self.switch("Chat 1")
+        self.assertTrue(self.state[self.forks._id][ARCHIVED_VIEW])
+        fn = listener_named(self.demo, "branch_from")
+        self.state[fn.inputs[0]._id] = self.token_pick()
+        self.call("branch_from", dict(enumerate(SETTINGS, 3)))
+        self.finish()
+        self.call("poll")
+        forks = self.state[self.forks._id]
+        self.assertEqual(forks["active"], "Fork 1")
+        self.assertNotIn(ARCHIVED_VIEW, forks)
+        self.assertTrue(forks["archived"]["Chat 1"])
+        self.assertEqual(self.view[self.demo.conversation_outputs["conversation_list"]._id], "Fork 1")
 
     def test_navigation_during_replay_does_not_switch_back_when_fork_arrives(self):
         self.start()

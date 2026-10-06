@@ -213,6 +213,7 @@ class ConversationJob:
                         put_branch_sampling(forks, name, self.saved["sampling"][name])
                 if forks["active"] == parent:
                     forks["active"] = self.owner
+                    forks.pop(ARCHIVED_VIEW, None)
             if self.saved is not None and self.owner in forks["branches"]:
                 stamp = self.saved["updated"].get(self.owner, "")
                 if stamp >= forks["updated"].get(self.owner, ""):
