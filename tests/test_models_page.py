@@ -1620,46 +1620,19 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertIn("Nothing to redownload", card)
         self.assertIn("Select a model", card)
 
-    def test_asking_to_remove_shows_the_question_with_the_size(self):
-        status, confirm, question, pending = app.ask_remove_my_model("org/partial")
-
-        self.assertEqual(status, gr.skip())
-        self.assertTrue(confirm["visible"])
-        self.assertIn("org/partial", question)
-        self.assertIn("150 B", question)
-        self.assertIn("cannot be undone", question)
-        self.assertEqual(pending, "org/partial")
-
-    def test_asking_with_nothing_selected_is_refused(self):
-        status, confirm, question, pending = app.ask_remove_my_model(None)
-
-        self.assertIn("Nothing to remove", status)
-        self.assertFalse(confirm["visible"])
-        self.assertEqual(question, "")
-        self.assertIsNone(pending)
-
     def test_the_loaded_model_cannot_be_removed(self):
         self.manager.model_id = OLMO
 
-        status, confirm, _, pending = app.ask_remove_my_model(OLMO)
-        self.assertIn("Unload", status)
-        self.assertFalse(confirm["visible"])
-        self.assertIsNone(pending)
+        status = app.remove_my_model(OLMO)
 
-        status, confirm, pending = app.remove_my_model(OLMO)
         self.assertIn("Unload", status)
-        self.assertFalse(confirm["visible"])
-        self.assertIsNone(pending)
         self.assertEqual(self.removed, [])
 
     def test_a_model_being_downloaded_cannot_be_removed(self):
         self.manager.active_downloads["org/partial"] = DownloadProgress()
 
-        status, confirm, _, _ = app.ask_remove_my_model("org/partial")
-        self.assertIn("Still downloading", status)
-        self.assertFalse(confirm["visible"])
+        status = app.remove_my_model("org/partial")
 
-        status, _, _ = app.remove_my_model("org/partial")
         self.assertIn("Still downloading", status)
         self.assertEqual(self.removed, [])
 
@@ -1669,11 +1642,10 @@ class ManageMyModelsTests(unittest.TestCase):
         self.manager._lock.acquire()
         self.addCleanup(self.manager._lock.release)
 
-        status, confirm, _ = app.remove_my_model("org/partial")
+        status = app.remove_my_model("org/partial")
 
         self.assertIn("Model busy", status)
         self.assertIn("idle", status)
-        self.assertFalse(confirm["visible"])
         self.assertEqual(self.removed, [])
 
     def test_a_refused_removal_says_why_in_the_log(self):
@@ -1689,37 +1661,19 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertIn("Removal confirmed for org/partial", logged.output[0])
         self.assertIn("refused: the manager is busy", logged.output[1])
 
-    def test_a_model_that_left_the_cache_is_reported_without_a_question(self):
-        status, confirm, _, pending = app.ask_remove_my_model("gone/model")
-
-        self.assertIn("no longer in the cache", status)
-        self.assertFalse(confirm["visible"])
-        self.assertIsNone(pending)
-
-    def test_confirming_removes_the_model_and_reports_the_space_freed(self):
-        status, confirm, pending = app.remove_my_model("org/partial")
+    def test_removing_reports_the_space_freed(self):
+        status = app.remove_my_model("org/partial")
 
         self.assertEqual(self.removed, ["org/partial"])
         self.assertIn("Model removed", status)
         self.assertIn("org/partial", status)
         self.assertIn("150 B", status)
-        self.assertFalse(confirm["visible"])
-        self.assertIsNone(pending)
 
-    def test_confirming_with_no_pending_model_removes_nothing(self):
-        # The question was withdrawn (another model chosen, or Cancel) before
-        # the click landed: nothing is pending, so nothing is deleted.
-        status, confirm, pending = app.remove_my_model(None)
+    def test_removing_with_no_model_named_removes_nothing(self):
+        status = app.remove_my_model(None)
 
         self.assertEqual(self.removed, [])
         self.assertIn("Nothing to remove", status)
-        self.assertFalse(confirm["visible"])
-        self.assertIsNone(pending)
-
-    def test_withdrawing_the_question_forgets_the_model(self):
-        confirm, pending = app.hide_remove_confirm()
-        self.assertFalse(confirm["visible"])
-        self.assertIsNone(pending)
 
     def test_a_removal_that_fails_is_reported(self):
         def refuse(model_id, cache_dir=None):
@@ -1727,21 +1681,38 @@ class ManageMyModelsTests(unittest.TestCase):
 
         model_cache.remove_cached_model = refuse
 
-        status, confirm, pending = app.remove_my_model("org/partial")
+        status = app.remove_my_model("org/partial")
 
         self.assertIn("Could not remove model", status)
         self.assertIn("Permission denied: &lt;blobs&gt;", status)
-        self.assertFalse(confirm["visible"])
-        self.assertIsNone(pending)
 
-    def test_a_model_gone_before_confirming_is_reported(self):
+    def test_a_model_gone_before_removing_is_reported(self):
         def gone(model_id, cache_dir=None):
             raise FileNotFoundError(model_id)
 
         model_cache.remove_cached_model = gone
 
-        status, _, _ = app.remove_my_model("org/partial")
+        status = app.remove_my_model("org/partial")
         self.assertIn("no longer in the cache", status)
+
+    def test_a_row_press_acts_on_the_model_it_names(self):
+        # The row script writes the model's ID and the button pressed; the
+        # radio's selection plays no part.
+        press = lambda action: json.dumps({"name": "org/partial", "action": action, "nonce": 1})
+
+        frames = list(app.act_on_my_model(press("redownload"), "tok"))
+        self.assertEqual(frames, ["downloading org/partial with 'tok'"])
+        self.assertEqual(self.removed, [])
+
+        (status,) = list(app.act_on_my_model(press("remove"), "tok"))
+        self.assertIn("Model removed", status)
+        self.assertEqual(self.removed, ["org/partial"])
+
+    def test_a_press_the_server_cannot_read_does_nothing(self):
+        for payload in (None, "", "not json", "[]", json.dumps({"action": "remove"}),
+                        json.dumps({"name": "org/partial", "action": "format"})):
+            self.assertEqual(list(app.act_on_my_model(payload, "")), [gr.skip()], payload)
+        self.assertEqual(self.removed, [])
 
 
 INSTRUCT = HubModel(

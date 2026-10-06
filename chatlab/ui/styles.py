@@ -757,15 +757,49 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
   color: var(--body-text-color-subdued);
 }}
 .model-sort label span {{ font-size: 0.8rem; }}
+/* Refresh shares the filter's line, taking only the width its word needs. */
+#my-models-filter-row {{ align-items: center; gap: 8px; flex-wrap: nowrap; }}
+#my-models-filter-row > button {{ flex: none; white-space: nowrap; }}
+/* Redownload and Remove on each row; the page script in ui/model_rows.py puts
+   them there. They show while the row is hovered, focused or selected, at its
+   right end, and the row keeps that end clear so a long name wraps short of
+   them rather than running under. */
+#models-page .model-list label {{ padding-right: 72px; }}
+.model-list .model-row-actions {{
+  position: absolute; top: 50%; right: 8px; transform: translateY(-50%);
+  display: flex; gap: 2px;
+  opacity: 0; pointer-events: none; transition: opacity 120ms ease;
+}}
+.model-list label:hover .model-row-actions,
+.model-list label:focus-within .model-row-actions,
+.model-list label.selected .model-row-actions {{
+  opacity: 1; pointer-events: auto;
+}}
+.model-list .model-row-action {{
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--body-text-color-subdued); cursor: pointer;
+}}
+.model-list .model-row-action::before {{
+  content: ""; width: 15px; height: 15px; background-color: currentColor;
+}}
+.model-list .model-row-action:hover,
+.model-list .model-row-action:focus-visible {{
+  color: var(--body-text-color); background: var(--border-color-primary);
+}}
+.model-list .model-row-action.armed {{
+  color: var(--color-red-500); background: var(--color-red-50);
+}}
+.dark .model-list .model-row-action.armed {{ background: var(--neutral-700); }}
 /* Restarting to apply an extension change costs the loaded model and any
-   running experiment, so it asks in the same amber panel. */
-.remove-confirm, .restart-confirm {{
+   running experiment, so it asks first, in an amber panel. */
+.restart-confirm {{
   border: 1px solid #d97706; border-radius: 8px; padding: 0.4rem 0.6rem;
   background: rgba(217, 119, 6, 0.09);
 }}
 .restart-confirm {{ flex-grow: 0; gap: 0.4rem; }}
 /* Clear deletes every conversation, so it asks first, in the same amber
-   panel the model removal uses. It stands in the conversations pane, which
+   panel the restart uses. It stands in the conversations pane, which
    is narrow, so the question is set smaller than body text and the two
    answers stack. */
 .clear-confirm {{

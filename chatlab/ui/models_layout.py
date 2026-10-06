@@ -16,20 +16,19 @@ from chatlab.model_cache import DEFAULT_MODEL_SORT, MODEL_SORT_ORDERS
 from chatlab.model_discovery import DISCOVERY_ORDERS
 from chatlab.ui.common import QUIET_TICK
 from chatlab.ui.icons import icon_classes
+from chatlab.ui.model_rows import MODEL_ACTION_BRIDGE_ID, MODEL_LIST_ID
 from chatlab.ui.model_repository import UNCHECKED, check_model_repository, repository_view
 from chatlab.ui.models_page import (
     ALL_KINDS,
     MODEL_KIND_FILTERS,
     SEARCH_HINT,
     SEARCH_KINDS,
-    ask_remove_my_model,
+    act_on_my_model,
     clear_my_model_selection,
     download_and_load_model,
     download_model,
     go_to_image_models,
-    hide_remove_confirm,
     load_cached_model,
-    redownload_my_model,
     refresh_after_device,
     refresh_model_actions,
     refresh_current_model,
@@ -38,7 +37,6 @@ from chatlab.ui.models_page import (
     refresh_my_models,
     refresh_search_results,
     refresh_stale_model_actions,
-    remove_my_model,
     search_models,
     search_table,
     select_default_model,
@@ -49,6 +47,7 @@ from chatlab.ui.models_page import (
 )
 from chatlab.ui.scoring import SCORE_BUDGET_QUEUE, score_token_count
 from chatlab.ui.settings_page import refresh_hardware, refresh_thinking_mode
+from chatlab.ui.token_menu import MENU_BRIDGE_CLASS
 
 if TYPE_CHECKING:
     from chatlab.ui.layout import Pages
@@ -88,14 +87,8 @@ class ModelsPage:
     name_filter: gr.Textbox
     my_models: gr.Radio
     my_model_detail: gr.Markdown
-    redownload_button: gr.Button
-    remove_button: gr.Button
     refresh_models_button: gr.Button
-    remove_confirm: gr.Column
-    remove_question: gr.Markdown
-    confirm_remove_button: gr.Button
-    cancel_remove_button: gr.Button
-    pending_removal: gr.State
+    model_action: gr.Textbox
     device_read: gr.State
 
     # Every handler that can change what is on disk or in memory rescans
@@ -306,36 +299,36 @@ def build_models_page(saved: settings.Settings) -> ModelsPage:
                 # A cache that has grown past a screenful is read by
                 # family ("every Qwen") more often than by kind, and
                 # the ID is the only place a family is written.
-                name_filter = gr.Textbox(
-                    placeholder="Filter by name",
-                    show_label=False,
-                    container=False,
-                    elem_id="my-models-filter",
-                )
+                # Refresh rescans the whole cache, so it stands above the
+                # list beside the other control that decides what it shows.
+                with gr.Row(elem_id="my-models-filter-row"):
+                    name_filter = gr.Textbox(
+                        placeholder="Filter by name",
+                        show_label=False,
+                        container=False,
+                        elem_id="my-models-filter",
+                    )
+                    refresh_models_button = gr.Button(
+                        "Refresh", size="sm", scale=0, min_width=0,
+                        elem_classes=icon_classes("refresh"),
+                    )
+                # Redownload and Remove are on each row; see ui.model_rows.
                 my_models = gr.Radio(
                     choices=[],
                     label="Downloaded models",
                     show_label=False,
+                    elem_id=MODEL_LIST_ID,
                     elem_classes=["model-list"],
                 )
                 my_model_detail = gr.Markdown(
                     "", elem_id="my-model-detail", elem_classes=["model-detail"]
                 )
-                with gr.Row():
-                    redownload_button = gr.Button("Redownload", size="sm", elem_classes=icon_classes("download"))
-                    remove_button = gr.Button("Remove", size="sm", elem_classes=icon_classes("trash"))
-                    refresh_models_button = gr.Button("Refresh", size="sm", elem_classes=icon_classes("refresh"))
-                with gr.Column(
-                    visible=False, elem_classes=["remove-confirm"]
-                ) as remove_confirm:
-                    remove_question = gr.Markdown("", elem_classes=["model-detail"])
-                    with gr.Row():
-                        confirm_remove_button = gr.Button(
-                            "Remove from disk", variant="stop", size="sm"
-                        )
-                        cancel_remove_button = gr.Button("Cancel", size="sm")
-                # The model the open confirmation is about; None when closed.
-                pending_removal = gr.State(None)
+                # Hidden by the bridge class, not visible=False, which would
+                # take it out of the DOM where the row script has to find it.
+                # It comes after the detail rather than straight after the
+                # radio: Gradio wraps neighbouring inputs in one form, and the
+                # rule that hides a bridge's form would hide the list with it.
+                model_action = gr.Textbox(elem_id=MODEL_ACTION_BRIDGE_ID, elem_classes=[MENU_BRIDGE_CLASS])
                 # Whether the fit verdicts on screen were given with
                 # the device known; see refresh_after_device.
                 device_read = gr.State(False)
@@ -370,14 +363,8 @@ def build_models_page(saved: settings.Settings) -> ModelsPage:
         name_filter=name_filter,
         my_models=my_models,
         my_model_detail=my_model_detail,
-        redownload_button=redownload_button,
-        remove_button=remove_button,
         refresh_models_button=refresh_models_button,
-        remove_confirm=remove_confirm,
-        remove_question=remove_question,
-        confirm_remove_button=confirm_remove_button,
-        cancel_remove_button=cancel_remove_button,
-        pending_removal=pending_removal,
+        model_action=model_action,
         device_read=device_read,
     )
 
@@ -604,8 +591,6 @@ def wire_model_choice(
             models.search_selection,
             models.search_detail,
             models.model_status,
-            models.remove_confirm,
-            models.pending_removal,
             pages.nav,
             pages.conversations,
             pages.chat,
@@ -624,29 +609,13 @@ def wire_model_choice(
     # .input again, for the same reason: only the reader's own typing
     # withdraws the selection, never a refresh writing the box.
     models.model_id.input(clear_my_model_selection, None, [models.my_models, models.my_model_detail])
-    # A pending removal is about the model that was selected when it was
-    # asked for, so changing the selection withdraws it.
-    confirm_outputs = [models.remove_confirm, models.pending_removal]
-    models.my_models.input(hide_remove_confirm, None, confirm_outputs)
-    models.model_id.input(hide_remove_confirm, None, confirm_outputs)
+    # A row's Redownload or Remove names its own model, never the radio's
+    # current value; see ui.model_rows.
     refresh.rescan(
-        models.redownload_button.click(
-            redownload_my_model, [models.my_models, models.hf_token], models.model_status
+        models.model_action.input(
+            act_on_my_model, [models.model_action, models.hf_token], models.model_status
         )
     )
-    models.remove_button.click(
-        ask_remove_my_model,
-        models.my_models,
-        [models.model_status, models.remove_confirm, models.remove_question, models.pending_removal],
-    )
-    # The confirm button deletes the model the question named, never the
-    # radio's current value: see ask_remove_my_model.
-    refresh.rescan(
-        models.confirm_remove_button.click(
-            remove_my_model, models.pending_removal, [models.model_status, *confirm_outputs]
-        )
-    )
-    models.cancel_remove_button.click(hide_remove_confirm, None, confirm_outputs)
 
     search_outputs = [
         models.search_results, models.search_detail, models.search_results_state, models.search_selection
