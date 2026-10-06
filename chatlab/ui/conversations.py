@@ -528,6 +528,8 @@ def archive_conversation(
         frame = switch_fork(MAIN_BRANCH, turns, forks, scale_name, preserve_source=preserve_source)
         frame["status"] = f"Archived {name}. Back on {MAIN_BRANCH}."
         return frame
+    if not archived and name == forks["active"]:
+        forks.pop(ARCHIVED_VIEW, None)
     return Frame(
         FORK_OUTPUT_NAMES,
         forks=forks,
@@ -571,6 +573,7 @@ def delete_conversation(
             status=f"Deleted {name}.",
         )
     forks["active"] = MAIN_BRANCH
+    forks.pop(ARCHIVED_VIEW, None)
     target = copy_turns(forks["branches"].setdefault(MAIN_BRANCH, []))
     messages, _ = display_messages(target)
     return Frame(

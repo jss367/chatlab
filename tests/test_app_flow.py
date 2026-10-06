@@ -4041,6 +4041,26 @@ class ForkTests(unittest.TestCase):
         self.assertIn("Chat 2", forks["updated"])
         self.assertEqual(names_of(result["conversation_list"]), [MAIN_BRANCH])
 
+    def test_restoring_the_open_archived_conversation_shows_the_active_list(self):
+        shown = self.two_chats()
+        archived = app.archive_conversation(request("Chat 1"), shown["turns"], shown["forks"])
+        forks = show_archive(archived["forks"], True)
+        opened = app.switch_fork("Chat 1", shown["turns"], forks)
+        restored = app.archive_conversation(request("Chat 1", False), opened["turns"], opened["forks"])
+        self.assertNotIn(ARCHIVED_VIEW, restored["forks"])
+        self.assertEqual(restored["conversation_list"]["value"], "Chat 1")
+        self.assertIn("Chat 1", names_of(restored["conversation_list"]))
+
+    def test_deleting_the_open_archived_conversation_shows_main_in_the_list(self):
+        shown = self.two_chats()
+        archived = app.archive_conversation(request("Chat 1"), shown["turns"], shown["forks"])
+        forks = show_archive(archived["forks"], True)
+        opened = app.switch_fork("Chat 1", shown["turns"], forks)
+        deleted = app.delete_conversation(request("Chat 1"), opened["turns"], opened["forks"])
+        self.assertNotIn(ARCHIVED_VIEW, deleted["forks"])
+        self.assertEqual(deleted["conversation_list"]["value"], MAIN_BRANCH)
+        self.assertIn(MAIN_BRANCH, names_of(deleted["conversation_list"]))
+
 
 class ConversationListTests(unittest.TestCase):
     """The pane lists every conversation with its model and token count."""
