@@ -475,6 +475,38 @@ class ArchiveFileTests(unittest.TestCase):
         self.assertEqual(restored["branches"]["Chat 1"][0]["content"], "put away")
         self.assertIn("Chat 1", restored["archived_updated"])
 
+    def test_archive_and_restore_survive_an_older_wire_format_save(self):
+        forks = self.archived()
+        for archived in (True, False):
+            put_branch_archived(forks, "Chat 1", archived)
+            payload = json.loads(library.dump(forks))
+            for entry in payload["branches"]:
+                entry.pop("archived", None)
+                entry.pop("archived_updated", None)
+            restored = library.parse(json.dumps(payload))
+            self.assertEqual(restored["archived"].get("Chat 1", False), archived)
+            self.assertEqual(restored["archived_updated"], forks["archived_updated"])
+            self.assertNotIn(library.ARCHIVE_COMPAT_KEY, restored["sampling"].get("Chat 1", {}))
+
+    def test_native_restore_stamp_overrides_a_stale_compatibility_copy(self):
+        payload = json.loads(library.dump(self.archived()))
+        branch = payload["branches"][1]
+        branch.pop("archived")
+        branch["archived_updated"] = branch_stamp()
+        restored = library.parse(json.dumps(payload))
+        self.assertEqual(restored["archived"], {})
+        self.assertEqual(restored["archived_updated"]["Chat 1"], branch["archived_updated"])
+
+    def test_a_new_fork_does_not_inherit_its_parents_wire_archive(self):
+        payload = json.loads(library.dump(self.archived()))
+        fork = dict(payload["branches"][1], name="Fork 1")
+        fork.pop("archived")
+        fork.pop("archived_updated")
+        payload["branches"].append(fork)
+        restored = library.parse(json.dumps(payload))
+        self.assertNotIn("Fork 1", restored["archived"])
+        self.assertNotIn("Fork 1", restored["archived_updated"])
+
     def test_a_file_written_before_archiving_reads_with_nothing_archived(self):
         library.write(stamped(MAIN_BRANCH, Main="hi"), self.path)
         saved = json.loads(self.path.read_text())

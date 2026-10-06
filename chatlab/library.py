@@ -81,6 +81,7 @@ LIBRARY_FILENAME = "conversations.json"
 # Bind it to its branch name: an older release can also copy sampling to a
 # brand-new fork, which must not inherit its parent's own origin record.
 ORIGIN_COMPAT_KEY = "_chatlab_fork_origin"
+ARCHIVE_COMPAT_KEY = "_chatlab_archive"
 
 # Held across the whole of write(): read the file, merge, stage, replace. The
 # two listeners in app.py that save both run on Gradio's worker threads, and
@@ -159,8 +160,14 @@ def dump(forks: dict | None) -> str:
             entry["origin"] = forks["origins"][name]
         sampling = sampling_entry(forks["sampling"].get(name))
         sampling.pop(ORIGIN_COMPAT_KEY, None)
+        sampling.pop(ARCHIVE_COMPAT_KEY, None)
         if name in forks["origins"]:
             sampling[ORIGIN_COMPAT_KEY] = {"branch": name, "origin": forks["origins"][name]}
+        if name in forks["archived_updated"]:
+            sampling[ARCHIVE_COMPAT_KEY] = {
+                "branch": name, "archived": bool(forks["archived"].get(name)),
+                "updated": forks["archived_updated"][name],
+            }
         if sampling:
             entry["sampling"] = sampling
         # Written whether or not there is sampling beside it: a stamp on its
@@ -228,6 +235,7 @@ def parse(payload: str) -> dict:
             if not isinstance(stamp, str):
                 raise ValueError(f"The branch {name!r} has an updated time that is not a string.")
             updated[name] = stamp
+        legacy_archive = None
         held = entry.get("sampling")
         if held is not None:
             if not isinstance(held, dict):
@@ -237,6 +245,7 @@ def parse(payload: str) -> dict:
             # a hand-edited settings file does.
             kept = sampling_entry(held)
             legacy_origin = kept.pop(ORIGIN_COMPAT_KEY, None)
+            legacy_archive = kept.pop(ARCHIVE_COMPAT_KEY, None)
             if (origin is None and isinstance(legacy_origin, dict)
                     and legacy_origin.get("branch") == name):
                 from chatlab.fork_tree import validate_origin
@@ -252,9 +261,16 @@ def parse(payload: str) -> dict:
                     f"The branch {name!r} has a sampling time that is not a string."
                 )
             sampling_updated[name] = sampling_stamp
-        if entry.get("archived") is True and name != MAIN_BRANCH:
+        archive_entry = entry
+        if ("archived" not in entry and "archived_updated" not in entry
+                and isinstance(legacy_archive, dict) and legacy_archive.get("branch") == name):
+            archive_entry = {
+                "archived": legacy_archive.get("archived"),
+                "archived_updated": legacy_archive.get("updated"),
+            }
+        if archive_entry.get("archived") is True and name != MAIN_BRANCH:
             archived[name] = True
-        archived_stamp = entry.get("archived_updated")
+        archived_stamp = archive_entry.get("archived_updated")
         if archived_stamp is not None:
             if not isinstance(archived_stamp, str):
                 raise ValueError(
