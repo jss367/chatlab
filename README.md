@@ -79,6 +79,18 @@ your Applications folder. ChatLab opens in its own native window and stops its
 local server when you quit. The app bundle contains Python and its runtime
 dependencies, so it does not need a separate Python installation.
 
+To keep macOS permissions across rebuilds, create a code signing certificate
+once: in Keychain Access choose **Certificate Assistant → Create a
+Certificate…**, name it `ChatLab Local`, and set **Identity Type** to *Self
+Signed Root* and **Certificate Type** to *Code Signing*. The build signs the
+bundle with it when it is in the keychain (`CHATLAB_CODESIGN_IDENTITY` names a
+different one, by name or SHA-1 fingerprint, and a fingerprint picks one of two
+certificates that share a name). Without it the bundle is signed ad hoc, and macOS treats each
+build as a new app, so the Local Network permission that **Remote → Connect to
+Remote Host…** needs has to be granted again after every install. The first
+signed build needs the permission toggled once, and the first signing asks to
+use the certificate's key; choose **Always Allow**.
+
 The app checks GitHub Releases for a newer version when it starts, and
 **ChatLab → Check for Updates…** does the same on demand. Accepting an update
 downloads the new bundle, swaps it into place, and relaunches ChatLab.
@@ -1258,8 +1270,9 @@ Installed apps offer the release the next time they start; the updater
 verifies the download against the published checksum and confirms the
 unpacked bundle is ChatLab at the release's version before installing it.
 
-The app is not code-signed or notarized, so the checksum only protects
-against a corrupted or tampered download in transit. Signing releases with a
+The app is not notarized, and its signature is at most a self-signed one, so
+the checksum only protects against a corrupted or tampered download in
+transit. Signing releases with a
 Developer ID is the step that would let clients verify who built them.
 
 ## Tests
