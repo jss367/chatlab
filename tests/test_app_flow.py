@@ -4029,6 +4029,8 @@ class ForkTests(unittest.TestCase):
 
         result = app.clear_chat(DEFAULT_COLOR_SCALE, on_screen["forks"], edited)
 
+        self.assertEqual(result["status"],
+                         "Conversations in the list cleared. Archived conversations kept.")
         forks = result["forks"]
         self.assertEqual(list(forks["branches"]), [MAIN_BRANCH, "Chat 1"])
         self.assertEqual(forks["branches"][MAIN_BRANCH], [])

@@ -1895,7 +1895,8 @@ def clear_chat(
         CLEAR_OUTPUT_NAMES,
         chatbot=[],
         turns=[],
-        status="Every conversation cleared.",
+        status=("Conversations in the list cleared. Archived conversations kept."
+                if archived else "Every conversation cleared."),
         **send_stop_values(False),
         **reset,
         forks=forks,
