@@ -732,16 +732,21 @@ class InspectionMixin:
             raise ValueError("Probe directions must be finite.")
         return directions
 
-    def check_projection(self, directions, *, load_id=None):
-        """Validate a probe against the pinned model without running a forward pass."""
-        with self._lock:
+    def check_projection(self, directions, *, load_id=None, held=False):
+        """Validate a probe against the pinned model without running a forward pass.
+
+        ``held`` says the caller already holds the model lock, as a session
+        inside ``transformers_model()`` does; the lock is not reentrant.
+        """
+        with contextlib.nullcontext() if held else self._lock:
             blocks = self._reading_blocks(load_id, missing="Load a model before reading a probe.",
                                           changed="this probe was to be read through",
                                           mlx="Reading a probe needs a PyTorch model; load its Transformers version.")
             self._projection_directions(directions, blocks)
 
     @_guards_device_memory
-    def project_blocks(self, token_ids: Sequence[int], directions, *, load_id: str | None = None, cancelled=None) -> np.ndarray:
+    def project_blocks(self, token_ids: Sequence[int], directions, *, load_id: str | None = None, cancelled=None,
+                       held=False) -> np.ndarray:
         """Every position's block output, read along one direction per block.
 
         ``directions`` holds one vector per decoder block, indexed as the
@@ -750,6 +755,10 @@ class InspectionMixin:
         position with that block's direction. Only the products leave the
         hook, so a passage of a few thousand tokens costs one forward pass
         and a few numbers per token, never every layer's full sequence.
+
+        ``held`` says the caller already holds the model lock, as a session
+        inside ``transformers_model()`` does, so hooks it installed there
+        are in place for this pass.
         """
 
         import torch
@@ -763,7 +772,7 @@ class InspectionMixin:
         if not ids:
             raise ValueError("There are no tokens to read.")
         directions = np.asarray(directions, dtype=np.float32)
-        with self._lock, torch.inference_mode():
+        with contextlib.nullcontext() if held else self._lock, torch.inference_mode():
             blocks = self._reading_blocks(
                 load_id,
                 missing="Load a model before reading a passage through it.",
@@ -972,6 +981,158 @@ class InspectionMixin:
             if imported is None or not self.loaded or imported[:2] != (self.load_id, import_id):
                 return "replaced"
             return "remembered" if jacobian_lens.remember(self.model_id, record) else "unwritable"
+
+    def recall_jacobian_lens(self) -> tuple[str | None, str | None]:
+        """Import the lens written down for the loaded model; ``(name, note)``.
+
+        Called under the generation claim with no lens imported for this load.
+        A record whose file has gone, or that the current weights refuse, leaves
+        the manager as it was and the ordinary "import a lens" message follows.
+        A record made for another revision of the same model ID is not tried at
+        all, since the lens was fitted for other weights; the note says so, for
+        the caller to add to that message.
+        """
+        record = jacobian_lens.remembered(self.model_id or "")
+        if record is None:
+            return None, None
+        remembered, current = record.get("model_revision"), self.model_revision()
+        if isinstance(remembered, str) and isinstance(current, str) and remembered != current:
+            return None, "The remembered lens was imported for another revision of this model; import it again."
+        try:
+            imported = self.import_jacobian_lens(record["path"], record.get("fitted_model_id") or "")
+        except Exception:  # noqa: BLE001 - the caller reports the missing lens itself
+            return None, None
+        return imported["name"], None
+
+    def jacobian_lens_summary(self) -> dict | None:
+        """The lens imported for the current load as a caller outside the UI needs it, or ``None``.
+
+        Its name, how many prompts it was fitted on, and the blocks it has a
+        matrix for, which are the only blocks it can read.
+        """
+        with self._lock:
+            imported = self._jacobian_lens
+            if imported is None or not self.loaded or imported[0] != self.load_id:
+                return None
+            lens = imported[2]
+            return {"name": lens.name, "n_prompts": lens.n_prompts, "layers": sorted(lens.matrices)}
+
+    @_guards_device_memory
+    def lens_log_probs(
+        self, token_ids: Sequence[int], targets, blocks: Sequence[int], positions: Sequence[int], *,
+        load_id: str | None = None, cancelled=None, held=False,
+    ) -> np.ndarray:
+        """The imported Jacobian lens's log probability of each target, at chosen blocks and positions.
+
+        ``targets`` holds one entry per target: a token ID, or a list of IDs
+        read as the mean of their logits, which for a linear head is the
+        logit of the mean of their unembeddings. The log probability
+        normalizes that over the whole vocabulary. The answer is shaped
+        ``(blocks, positions, targets)``.
+
+        The tokens are fed once, with no cache, up to the last position
+        asked for; nothing later can reach an earlier position. Forward hooks
+        already on the blocks are in place for the pass, so with ``held``,
+        inside ``transformers_model()``, the lens reads what the caller's
+        hooks made. As each Chat inspection does, the final block's readout
+        is replayed against the model's own output first, and the readings
+        are withheld if they disagree.
+        """
+
+        import torch
+
+        def check_cancelled(*_args):
+            if cancelled and cancelled():
+                raise ProjectionCancelled("Stopped reading the lens.")
+
+        check_cancelled()
+        ids = [int(value) for value in token_ids]
+        blocks = [int(value) for value in blocks]
+        positions = [int(value) for value in positions]
+        groups = [[int(target)] if isinstance(target, (int, np.integer)) else [int(value) for value in target]
+                  for target in targets]
+        if not ids or not blocks or not positions or not groups or not all(groups):
+            raise ValueError("Give tokens, blocks, positions and at least one target to read.")
+        if not all(0 <= position < len(ids) for position in positions):
+            raise ValueError(f"Read positions between 0 and {len(ids) - 1}.")
+        fed = ids[:max(positions) + 1]
+        with contextlib.nullcontext() if held else self._lock, torch.inference_mode():
+            self._reading_blocks(
+                load_id,
+                missing="Load a model before reading it through a lens.",
+                changed="this passage was to be read through",
+                mlx="Reading the lens under hooks needs a PyTorch model; load its Transformers version.",
+            )
+            imported = self._jacobian_lens
+            if imported is None or imported[0] != self.load_id:
+                raise ValueError("Import a Jacobian lens for the loaded model first, on the Chat page's Layers view.")
+            lens = imported[2]
+            engine = self._engine()
+            layout = jacobian_lens.model_layout(engine)
+            missing = sorted(set(blocks) - set(lens.matrices))
+            if missing:
+                fitted = sorted(lens.matrices)
+                raise ValueError(
+                    f"The lens has no matrix for block {missing[0]}; it was fitted at blocks "
+                    f"{fitted[0]}–{fitted[-1]}." if len(fitted) > 1 else
+                    f"The lens has no matrix for block {missing[0]}; it was fitted at block {fitted[0]} only."
+                )
+            vocabulary = self.model.get_output_embeddings().weight.shape[0]
+            if not all(0 <= token < vocabulary for group in groups for token in group):
+                raise ValueError("A target token is outside this model's output vocabulary.")
+            limit = score_token_limit(self.model)
+            if len(fed) > limit:
+                raise ValueError(f"That is {len(fed):,} tokens, above the {limit:,} one reading may be. Shorten it.")
+            last = len(layout.blocks) - 1
+            index = torch.tensor(positions, dtype=torch.long)
+            states: dict = {}
+
+            def record(layer: int):
+                def capture(_module, _inputs, output):
+                    check_cancelled()
+                    hidden = output[0] if isinstance(output, tuple) else output
+                    if layer == last:
+                        # The whole sequence, as the model's own head reads it.
+                        states["last"] = hidden[0].detach().float().cpu().clone()
+                    if layer in blocks:
+                        states[layer] = hidden[0, index.to(hidden.device)].detach().float().cpu().clone()
+
+                return capture
+
+            handles = []
+            for layer, block in enumerate(layout.blocks):
+                handles.append(block.register_forward_pre_hook(check_cancelled))
+                if layer in blocks or layer == last:
+                    handles.append(block.register_forward_hook(record(layer)))
+            try:
+                check_cancelled()
+                output = self.model(
+                    input_ids=torch.tensor([fed], dtype=torch.long, device=next(self.model.parameters()).device),
+                    use_cache=False,
+                )
+            finally:
+                for handle in handles:
+                    handle.remove()
+            check_cancelled()
+            if "last" not in states or any(block not in states for block in blocks):
+                raise steering_vectors.SteeringError(
+                    "Some of this model's decoder blocks did not run, so the lens could not read them."
+                )
+            actual = output.logits[0, -1].float().cpu()
+            del output
+            replayed = jacobian_lens._unembed(engine, layout, states.pop("last"))[-1]
+            if not torch.allclose(replayed, actual, rtol=1e-2, atol=1e-2):
+                raise ValueError("The final-layer readout does not reproduce this model's output; the lens readings were withheld.")
+            answer = np.empty((len(blocks), len(positions), len(groups)), dtype=np.float64)
+            for row, layer in enumerate(blocks):
+                check_cancelled()
+                scores = jacobian_lens._unembed(engine, layout, states[layer] @ lens.matrices[layer].float().T)
+                if not torch.isfinite(scores).all():
+                    raise ValueError("The Jacobian readout produced non-finite scores.")
+                normalizer = torch.logsumexp(scores.double(), dim=-1)
+                for column, group in enumerate(groups):
+                    answer[row, :, column] = (scores[:, group].double().mean(dim=-1) - normalizer).numpy()
+            return answer
 
     @_guards_device_memory
     def inspect_jacobian(

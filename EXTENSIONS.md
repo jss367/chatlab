@@ -1,6 +1,6 @@
 # Optional extensions for ChatLab
 
-Extensions add specialized pages while sharing ChatLab's model runtime and token inspection. Bundled extensions include **Maze experiments**, **OS-Harm results**, **Computer-use safety benchmark**, **Hangman** **Circuit tracing** and **Linear probes**. Fresh installations start with all extensions disabled.
+Extensions add specialized pages while sharing ChatLab's model runtime and token inspection. Bundled extensions include **Maze experiments**, **OS-Harm results**, **Computer-use safety benchmark**, **Hangman** **Circuit tracing**, **Linear probes** and **Direction edits**. Fresh installations start with all extensions disabled.
 
 ## Enable or disable an extension
 
@@ -8,7 +8,7 @@ Open **Settings → Extensions**, check or uncheck an extension, and restart Cha
 
 In the macOS app, **Restart ChatLab** appears beside that note while the saved choice differs from the pages on screen. It asks first, because restarting unloads the model and stops anything running; answering **Restart now** closes the window and opens a fresh copy. A ChatLab served to a browser by `python -m chatlab` has no window to reopen, so it shows the note without the button and the server is restarted by hand.
 
-When enabled, **Maze**, **OS-Harm**, **Safety**, **Hangman** **Circuits** or **Probes** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
+When enabled, **Maze**, **OS-Harm**, **Safety**, **Hangman** **Circuits**, **Probes** or **Edits** appears in the sidebar. When disabled, an extension's Python module and stylesheet are not loaded, its page and callbacks are not registered, and existing saved results remain on disk. The rest of ChatLab works without it. Import or API-version failures appear in Settings and do not prevent the core app from starting.
 
 This version provides **bundled, optional modules**. It does not yet install external packages. The explicit catalogue and versioned service boundary give us a place to add external distribution later. Extensions are trusted Python code running in ChatLab's process, not sandboxed programs.
 
@@ -20,6 +20,8 @@ The **Computer-use safety benchmark** extension adds **Safety** to the sidebar. 
 The **Hangman** extension has the loaded model host a game of hangman. You guess, and each reply is shown token by token and checked against the replies before it. Any token can be branched from. A trial file plays many games with nobody guessing and can ask for the word after every response. See [the hangman guide](HANGMAN.md). Its code lives in `chatlab/extensions/hangman/`.
 
 The **Linear probes** extension fits a logistic regression to the residual stream at every layer from two sets of labelled examples, reports each layer's accuracy on held-out examples, and colors any reply or passage token by token with the probe's probability. See [the probes guide](PROBES.md). Its code lives in `chatlab/extensions/probes/`.
+
+The **Direction edits** extension injects a steering vector over chosen passage tokens, erases, clamps or adds along a direction at one block or a range of blocks, and shows whether later blocks rebuild the direction's signal and what the edit does to a target word's probability through the Jacobian lens, under up to six prefixes. See [the direction edits guide](DIRECTION_EDITS.md). Its code lives in `chatlab/extensions/direction_edits/`.
 
 The **Circuit tracing** extension builds attribution graphs over per-layer transcoders for the models that have them published, and tests groups of features by ablating and boosting them in the real model. See [the circuit tracing guide](CIRCUITS.md). Its code lives in `chatlab/extensions/circuits/`.
 
@@ -98,7 +100,20 @@ with context.models.open_session() as session:
 
 To show what a model was given rather than to generate, `context.models.decode(ids)` and `context.models.prompt_text(messages, tools)` read the loaded model without reserving it, so a view of a prompt never queues behind the response it is describing or holds up a load. `prompt_text` renders through the same template path generation uses, tool schemas and generation prompt included. Both return the text with the load identifier that spelled it, or `(None, None)` when no model is loaded or a load landed while they were reading, which is how a caller tells a reading made under the recording load from one made under a later one. `context.models.loaded_model_id()` answers what is in memory as it is asked, and frames no text: use it to say what a reader would unload beside text no load produced, never to explain text a load did produce, because the load that answered an earlier reading may already be gone. It is `None` while a load is under way, as a nameless load is no answer, and `None` for an image pipeline, which is published under its own ID like any load and has no tokenizer to spell anything with.
 
-To measure the model in ways generation does not, such as gradients or forward hooks, use `with session.transformers_model() as model:`. It hands over the pinned Transformers model and holds the model lock for the whole block, as ChatLab's own inspections do. Remove every hook and patch before the block ends. It raises `ValueError` for an MLX load and for 8-bit or 4-bit weights, re-raises out-of-memory failures as ChatLab's own, and returns unused device memory when the block ends. Close any generation stream first.
+To measure the model in ways generation does not, such as gradients or forward hooks, use `with session.transformers_model() as model:`. It hands over the pinned Transformers model and holds the model lock for the whole block, as ChatLab's own inspections do. Remove every hook and patch before the block ends. It raises `ValueError` for an MLX load and for 8-bit or 4-bit weights, re-raises out-of-memory failures as ChatLab's own, and returns unused device memory when the block ends. Close any generation stream first. The model lock is not reentrant, so inside the block `session.project_layers`, `session.lens_log_probs` and `session.check_projection` run under the block's hold, and `generate`, `read_examples` and `jacobian_lens` raise `ValueError` rather than wait on it.
+
+To change what the blocks pass on, install hooks with `session.block_hooks(edits)` inside that block:
+
+```python
+with session.transformers_model():
+    with session.block_hooks({layer: edit}):
+        coordinates = session.project_layers(ids, directions)
+        log_probs = session.lens_log_probs(ids, [target_ids], blocks, positions)
+```
+
+`edits` maps a block index to a function of the block's output, the residual tensor shaped `(batch, positions, width)` that a steering vector at that layer is added to. It returns the replacement, of the same shape, or `None` to leave the output alone, and must not change its argument in place. The readings inside the body see the rewritten outputs; positions count from the first token the reading was given. The hooks run before any others on their blocks, and a later call's run before an earlier call's. Every hook is removed when the body ends, however it ends, and `transformers_model()` removes any still installed before it lets go of the model. Outside `transformers_model()`, `block_hooks` raises `ValueError`. `session.block_count` is how many decoder blocks the pinned model has, the number of directions `project_layers` takes.
+
+`session.lens_log_probs(ids, targets, blocks, positions)` reads the Jacobian lens imported for the pinned load. `targets` holds one entry per target: a token ID, or a list of IDs read as one word through the mean of their unembeddings (the mean of their logits, which is the same for a linear head). It returns a NumPy array shaped `(blocks, positions, targets)` of log probabilities, normalized over the whole vocabulary, from one pass with no cache over `ids` up to the last position asked for. Every block must be one the lens has a matrix for. As in Chat's inspection, the final block's readout is replayed against the model's own output and the readings are withheld with `ValueError` when they disagree. `session.jacobian_lens()` describes the imported lens, as `{"name", "n_prompts", "layers"}`, or returns `None`; when none is imported it first brings back the lens last imported for this model on the Chat page, as Chat does. Call it before `transformers_model()`. Both need a PyTorch load. A stopped reading raises `extension_api.ProjectionCancelled` after its hooks are removed.
 
 To start a response with fixed text, pass `session.generate(..., answer_prefill=text)`, as Chat's assistant prefill does. When the template opens a reasoning block, the runtime closes it before the text, so the text begins the visible answer. It cannot be combined with `forced_ids`.
 

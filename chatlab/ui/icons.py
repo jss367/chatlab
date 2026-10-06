@@ -70,6 +70,10 @@ ICONS: dict[str, str] = {
         '<rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/>'
         '<path d="M12 12V8"/>'
     ),
+    "crosshair": (
+        '<circle cx="12" cy="12" r="10"/><path d="M22 12h-4"/><path d="M6 12H2"/>'
+        '<path d="M12 6V2"/><path d="M12 22v-4"/>'
+    ),
     "spell-check": '<path d="m6 16 6-12 6 12"/><path d="M8 12h8"/><path d="m16 20 2 2 4-4"/>',
     "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
     "paperclip": (

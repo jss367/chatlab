@@ -512,24 +512,9 @@ def render_lens(insight: dict) -> str:
 def recall_lens() -> tuple[str | None, str | None]:
     """Import the lens written down for the loaded model; ``(name, note)``.
 
-    Called under the generation claim with no lens imported for this load.
-    A record whose file has gone, or that the current weights refuse, leaves
-    the manager as it was and the ordinary "import a lens" message follows.
-    A record made for another revision of the same model ID is not tried at
-    all, since the lens was fitted for other weights; the note says so, for
-    the inspection to add to that message.
+    See :meth:`ModelManager.recall_jacobian_lens`.
     """
-    record = jacobian_lens.remembered(runtime.MANAGER.model_id or "")
-    if record is None:
-        return None, None
-    remembered, current = record.get("model_revision"), runtime.MANAGER.model_revision()
-    if isinstance(remembered, str) and isinstance(current, str) and remembered != current:
-        return None, "The remembered lens was imported for another revision of this model; import it again."
-    try:
-        imported = runtime.MANAGER.import_jacobian_lens(record["path"], record.get("fitted_model_id") or "")
-    except Exception:  # noqa: BLE001 - the inspection reports the missing lens itself
-        return None, None
-    return imported["name"], None
+    return runtime.MANAGER.recall_jacobian_lens()
 
 
 def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):

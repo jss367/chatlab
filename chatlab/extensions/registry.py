@@ -43,6 +43,9 @@ CATALOGUE = (
     ExtensionSpec("circuits", "Circuit tracing",
                   "Trace which transcoder features carried the model to a token, then ablate or boost groups of them.",
                   "Circuits", "chatlab.extensions.circuits", icon="network"),
+    ExtensionSpec("direction_edits", "Direction edits",
+                  "Inject a vector, erase or clamp a direction at chosen blocks, and see whether later blocks and the lens rebuild it.",
+                  "Edits", "chatlab.extensions.direction_edits", icon="crosshair"),
 )
 
 
