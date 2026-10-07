@@ -24,7 +24,7 @@ from chatlab import kv_cache
 from chatlab import model_loading
 from chatlab import steering as steering_vectors
 from chatlab.device_memory import reraise_out_of_memory
-from chatlab.text_generation import ModelChanged
+from chatlab.model_errors import ModelChanged
 from chatlab.token_metrics import entropy_bits, normalize_log_probabilities
 from chatlab.tokenization import (
     SCORE_TOKEN_LIMIT,

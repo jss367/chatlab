@@ -44,9 +44,6 @@ from chatlab.model_cache import (
     TEXT_KIND,
     CachedModel,
     CacheStatus,
-    ModelBusy,
-    ModelDownloading,
-    ModelLoaded,
     cache_root,
     cache_status,
     estimate_parameter_bytes,
@@ -66,6 +63,7 @@ from chatlab.model_loading import QUANTIZED_BITS
 from chatlab.model_runtime import LOADING
 from chatlab.progress_bars import DownloadSnapshot, LoadProgress, LoadSnapshot
 from chatlab import adapters
+from chatlab.model_errors import ModelBusy, ModelDownloading, ModelLoaded
 from chatlab.ui import runtime
 from chatlab.ui.model_repository import matching_repository
 from chatlab.ui.common import (

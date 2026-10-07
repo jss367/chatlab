@@ -13,8 +13,8 @@ from chatlab import kv_cache
 from chatlab import model_inspection
 from chatlab.mlx_runtime import MLX_THREAD
 from chatlab.kv_cache import CacheLayer
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from mlx_support import needs_mlx, tiny_llama
 from torch_support import tiny_manager
 from chatlab.ui import inspection, runtime

@@ -34,6 +34,7 @@ from chatlab.model_cache import (
     remove_cached_model,
     sort_cached_models,
 )
+from chatlab import model_errors
 from chatlab.model_runtime import ModelManager
 from chatlab.progress_bars import DownloadProgress
 
@@ -458,7 +459,7 @@ class RemoveCachedModelTests(unittest.TestCase):
             )
             try:
                 self.assertEqual(other.stdout.readline().strip(), "held")
-                with self.assertRaises(model_cache.ModelDownloading) as caught:
+                with self.assertRaises(model_errors.ModelDownloading) as caught:
                     remove_cached_model(OLMO, Path(root))
                 self.assertIn("another process", str(caught.exception))
                 self.assertTrue(folder.is_dir())
@@ -510,21 +511,21 @@ class ManagerRemoveTests(unittest.TestCase):
 
     def test_a_refused_removal_leaves_the_cache_revision_alone(self):
         self.manager.model_id = OLMO
-        with self.assertRaises(model_cache.ModelLoaded):
+        with self.assertRaises(model_errors.ModelLoaded):
             self.manager.remove(OLMO, Path(self.root.name))
 
         self.assertEqual(self.manager.cache_revision, 0)
 
     def test_the_loaded_model_is_refused(self):
         self.manager.model_id = OLMO
-        with self.assertRaises(model_cache.ModelLoaded):
+        with self.assertRaises(model_errors.ModelLoaded):
             self.manager.remove(OLMO, Path(self.root.name))
         self.assertTrue(self.folder.is_dir())
         self.assertFalse(self.manager._lock.locked())
 
     def test_a_model_being_downloaded_is_refused(self):
         self.manager.active_downloads[OLMO] = DownloadProgress()
-        with self.assertRaises(model_cache.ModelDownloading):
+        with self.assertRaises(model_errors.ModelDownloading):
             self.manager.remove(OLMO, Path(self.root.name))
         self.assertTrue(self.folder.is_dir())
         self.assertFalse(self.manager._downloads_lock.locked())
@@ -532,19 +533,19 @@ class ManagerRemoveTests(unittest.TestCase):
     def test_a_busy_manager_is_refused_without_waiting(self):
         self.manager._lock.acquire()
         self.addCleanup(self.manager._lock.release)
-        with self.assertRaises(model_cache.ModelBusy):
+        with self.assertRaises(model_errors.ModelBusy):
             self.manager.remove(OLMO, Path(self.root.name))
         self.assertTrue(self.folder.is_dir())
 
     def test_every_refusal_is_a_model_in_use(self):
-        for error in (model_cache.ModelLoaded, model_cache.ModelDownloading, model_cache.ModelBusy):
-            self.assertTrue(issubclass(error, model_cache.ModelInUse))
+        for error in (model_errors.ModelLoaded, model_errors.ModelDownloading, model_errors.ModelBusy):
+            self.assertTrue(issubclass(error, model_errors.ModelInUse))
 
     def test_a_load_claimed_on_another_thread_is_refused(self):
         # The load's own thread has not reached the model lock yet, so the
         # lock is free and would let the deletion through.
         _model_id, claim = self.manager.reserve_load(OLMO)
-        with self.assertRaises(model_cache.ModelBusy):
+        with self.assertRaises(model_errors.ModelBusy):
             self.manager.remove(OLMO, Path(self.root.name))
         self.assertTrue(self.folder.is_dir())
         self.assertFalse(self.manager._lock.locked())

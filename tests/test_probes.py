@@ -16,8 +16,8 @@ from chatlab.extension_api import ExtensionContext, ModelService, NavigationServ
 from chatlab.extensions.probes import probe as probes
 from chatlab.extensions.probes import page as page_module
 from chatlab.extensions.probes.page import GENERATE, READ, build_page
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from fakes import EOS_ID, PIECES, FakeTokenizer
 from ui_support import handlers_by_name
 

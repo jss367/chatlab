@@ -18,9 +18,9 @@ from uuid import uuid4
 import gradio as gr
 
 from chatlab import faithfulness as check
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import LOADING
 from chatlab.steering import SteeringError
-from chatlab.text_generation import ModelChanged
 from chatlab.ui import runtime
 from chatlab.ui.common import failure_status
 

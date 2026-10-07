@@ -9,8 +9,8 @@ import torch
 
 from chatlab import activation_patching as patching
 from chatlab.device_memory import OutOfMemoryError
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from fakes import FakeTokenizer, PIECES
 from chatlab.ui import activation_patching as controls
 

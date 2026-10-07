@@ -7,9 +7,9 @@ import gradio as gr
 
 from chatlab import charts
 from chatlab import compare
+from chatlab.model_errors import ModelChanged
 import settings_sandbox
 from chatlab.model_loading import LoadedModel
-from chatlab.text_generation import ModelChanged
 from chatlab.ui import compare as controls
 from chatlab.ui import runtime
 from fakes import EOS_ID, loaded_manager

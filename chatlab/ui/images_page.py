@@ -21,7 +21,7 @@ from chatlab import charts
 from chatlab import image_runtime
 from chatlab import settings
 from chatlab.image_runtime import ImageRequest, NeedsMoreThanAPrompt, Unwatchable
-from chatlab.model_cache import ModelBusy
+from chatlab.model_errors import ModelBusy
 from chatlab.token_metrics import PROMPT_ATTENTION_SCALE, UNSCORED_LABEL
 from chatlab.ui import runtime
 from chatlab.ui.common import (

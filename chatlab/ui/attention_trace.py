@@ -29,9 +29,9 @@ import numpy as np
 
 from chatlab.conversation import model_messages
 from chatlab import attachments, vision
+from chatlab.model_errors import ModelChanged
 from chatlab.model_inspection import RECENT_KEYS, _decoded_prompt
 from chatlab.model_runtime import LOADING
-from chatlab.text_generation import ModelChanged
 from chatlab.ui import runtime
 from chatlab.ui.common import QUIET_TICK, failure_status
 from chatlab.ui.panel import current_strip_generation

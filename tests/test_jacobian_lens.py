@@ -23,8 +23,8 @@ from chatlab import jacobian_lens
 from chatlab import model_loading
 from chatlab import steering
 from chatlab.jacobian_lens import FittedLens
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from mlx_support import needs_mlx
 from tiny_tokenizer import build as build_tokenizer
 from torch_support import tiny_manager

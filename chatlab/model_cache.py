@@ -21,6 +21,7 @@ from typing import Any
 
 from chatlab import adapters
 from chatlab import mlx_runtime
+from chatlab.model_errors import ModelDownloading
 
 
 # Bytes per parameter for the dtypes a checkpoint or a load can use.
@@ -1481,28 +1482,6 @@ def sort_cached_models(models: list[CachedModel], order: str | None) -> list[Cac
 
     key = _SORT_KEYS.get(order or "", _SORT_KEYS[DEFAULT_MODEL_SORT])
     return sorted(models, key=key)
-
-
-
-
-class ModelInUse(RuntimeError):
-    """The model cannot be removed, or claimed, right now.
-
-    The subclasses say why, so the interface can tell the reader what to do:
-    unload the model, wait for its download, or wait for the model to go idle.
-    """
-
-
-class ModelLoaded(ModelInUse):
-    """The model is the one in memory."""
-
-
-class ModelDownloading(ModelInUse):
-    """A download of the model is under way, in this process or another."""
-
-
-class ModelBusy(ModelInUse):
-    """The model lock is held: a load, generation, scoring, or inspection is running."""
 
 
 def hub_lock_held(root: Path, folder_name: str) -> bool:
