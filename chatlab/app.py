@@ -1,9 +1,9 @@
 """ChatLab interface for chatting with and inspecting model tokens.
 
 The interface lives in the ``ui`` package, one module per page or panel;
-this module gathers every name under one roof, which is what the desktop
-launcher and the tests import. ``python -m chatlab`` serves it; see
-``__main__.py``.
+this module gathers the names the tests read as ``app.X`` under one roof.
+The desktop launcher and ``python -m chatlab`` take only ``build_app`` and
+``current_manager`` from it; see ``__main__.py``.
 """
 
 from __future__ import annotations

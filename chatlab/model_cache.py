@@ -1486,7 +1486,7 @@ def sort_cached_models(models: list[CachedModel], order: str | None) -> list[Cac
 
 
 class ModelInUse(RuntimeError):
-    """A cached model's files cannot be removed right now.
+    """The model cannot be removed, or claimed, right now.
 
     The subclasses say why, so the interface can tell the reader what to do:
     unload the model, wait for its download, or wait for the model to go idle.
