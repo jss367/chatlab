@@ -6,12 +6,18 @@ diffusers>=0.31
 # The local API's routes. Gradio brings FastAPI in and the API is served from
 # Gradio's own application, but api.py imports it directly, so it is named.
 fastapi>=0.115
+# Tells whether a download holds a model's files before they are removed, by
+# trying the same locks huggingface-hub takes while writing them.
+filelock>=3.10
 # Sidebar arrived in 5.14, so the floor already covers the side pane.
 gradio>=5.20,<6
 # 1.1 is the first release whose snapshot_download reports byte progress
 # through the caller's tqdm_class; the download card shows only file counts
 # on anything older.
 huggingface-hub>=1.1
+# Reads the error a Hub request fails with, to tell a gated repository or a
+# missing file from the network being down.
+httpx>=0.24.1
 # Fetches the Metal kernels the 8-bit and 4-bit weight precisions run on.
 # Transformers 5.18 requires kernels 0.17; retain a compatible bounded pair.
 kernels>=0.17,<0.18
@@ -23,6 +29,8 @@ jinja2>=3.1
 # and its trim are what ChatLab calls, and all three predate it.
 mlx-lm>=0.28; sys_platform == "darwin" and platform_machine == "arm64"
 numpy>=1.26
+# The Models page's tables are handed to gradio as data frames.
+pandas>=1.0
 # Reads LoRA adapters and merges them into the base model they were trained
 # on; see adapters.py. 0.21 is the release this was written and tested
 # against, beside transformers 5.
@@ -44,12 +52,19 @@ pillow>=10.1
 protobuf>=4.25
 sentencepiece>=0.2
 tiktoken>=0.7
+# Reads a LoRA adapter's weights and a transcoder's directly, to check what an
+# adapter targets and to read one feature's decoder row without loading
+# the whole set.
+safetensors>=0.8
 torch>=2.5
 # Turns a pasted picture into a vision model's input. Transformers' image
 # processors run on it (their slow numpy versions are going away), and so do
 # the video processors a Qwen-VL processor loads beside its image one, which
 # refuse to be built without it. 0.20 is the release paired with torch 2.5.
 torchvision>=0.20
+# The download and load progress bars are tqdm classes that report to the
+# interface rather than the terminal.
+tqdm>=4.60
 # Pinned to 5.18 as a pair with kernels 0.17 above: 5.18 accepts only that
 # kernels release, and without it reports no kernels and refuses the 8-bit
 # and 4-bit loads. The Metal quantizer behind those precisions arrived in 5.3.
