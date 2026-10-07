@@ -48,6 +48,7 @@ STEERING_EXAMPLE_TOKEN_LIMIT = 512
 
 # Bound vocabulary-sized lens intermediates independently of passage length.
 LENS_SCORE_ELEMENTS = 1 << 20
+LENS_STATE_ELEMENTS = 1 << 20
 
 # How one example's tokens become one vector: the position the model would
 # have written from, or the average over the whole example. The first is what
@@ -1089,17 +1090,40 @@ class InspectionMixin:
                 raise ValueError(f"That is {len(fed):,} tokens, above the {limit:,} one reading may be. Shorten it.")
             last = len(layout.blocks) - 1
             index = torch.tensor(positions, dtype=torch.long)
-            states: dict = {}
+            answer = np.empty((len(blocks), len(positions), len(groups)), dtype=np.float64)
+            rows_by_block = {block: [row for row, value in enumerate(blocks) if value == block]
+                             for block in set(blocks)}
+            seen = set()
+            final_state = None
 
             def record(layer: int):
                 def capture(_module, _inputs, output):
+                    nonlocal final_state
                     check_cancelled()
                     hidden = output[0] if isinstance(output, tuple) else output
                     if layer == last:
-                        # Only the token compared with the model's own head below.
-                        states["last"] = hidden[0, -1:].detach().float().cpu().clone()
-                    if layer in blocks:
-                        states[layer] = hidden[0, index.to(hidden.device)].detach().float().cpu().clone()
+                        # Only this one residual survives the forward pass for replay.
+                        final_state = hidden[0, -1:].detach().float().cpu().clone()
+                    if layer in rows_by_block:
+                        width = hidden.shape[-1]
+                        chunk_size = max(1, min(LENS_SCORE_ELEMENTS // vocabulary,
+                                                LENS_STATE_ELEMENTS // width))
+                        matrix = lens.matrices[layer].float().T
+                        for start in range(0, len(positions), chunk_size):
+                            check_cancelled()
+                            stop = min(start + chunk_size, len(positions))
+                            # Score while this block is alive: never retain block-by-position states.
+                            selected = hidden[0, index[start:stop].to(hidden.device)].detach().float().cpu()
+                            scores = jacobian_lens._unembed(engine, layout, selected @ matrix)
+                            if not torch.isfinite(scores).all():
+                                raise ValueError("The Jacobian readout produced non-finite scores.")
+                            normalizer = torch.logsumexp(scores.double(), dim=-1)
+                            for column, group in enumerate(groups):
+                                values = (scores[:, group].double().mean(dim=-1) - normalizer).numpy()
+                                for row in rows_by_block[layer]:
+                                    answer[row, start:stop, column] = values
+                            del selected, scores, normalizer, values
+                        seen.add(layer)
 
                 return capture
 
@@ -1122,31 +1146,15 @@ class InspectionMixin:
                 for handle in handles:
                     handle.remove()
             check_cancelled()
-            if "last" not in states or any(block not in states for block in blocks):
+            if final_state is None or any(block not in seen for block in blocks):
                 raise steering_vectors.SteeringError(
                     "Some of this model's decoder blocks did not run, so the lens could not read them."
                 )
             actual = output.logits[0, -1].float().cpu()
             del output
-            replayed = jacobian_lens._unembed(engine, layout, states.pop("last"))[-1]
+            replayed = jacobian_lens._unembed(engine, layout, final_state)[-1]
             if not torch.allclose(replayed, actual, rtol=1e-2, atol=1e-2):
                 raise ValueError("The final-layer readout does not reproduce this model's output; the lens readings were withheld.")
-            answer = np.empty((len(blocks), len(positions), len(groups)), dtype=np.float64)
-            for row, layer in enumerate(blocks):
-                check_cancelled()
-                chunk_size = max(1, LENS_SCORE_ELEMENTS // vocabulary)
-                matrix = lens.matrices[layer].float().T
-                for start in range(0, len(positions), chunk_size):
-                    check_cancelled()
-                    stop = min(start + chunk_size, len(positions))
-                    scores = jacobian_lens._unembed(engine, layout, states[layer][start:stop] @ matrix)
-                    if not torch.isfinite(scores).all():
-                        raise ValueError("The Jacobian readout produced non-finite scores.")
-                    normalizer = torch.logsumexp(scores.double(), dim=-1)
-                    for column, group in enumerate(groups):
-                        answer[row, start:stop, column] = (scores[:, group].double().mean(dim=-1) - normalizer).numpy()
-                    # Do not retain the previous vocabulary slab during the next unembedding.
-                    del scores, normalizer
             return answer
 
     @_guards_device_memory

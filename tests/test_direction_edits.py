@@ -5,6 +5,7 @@ import json
 import tempfile
 import threading
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -320,8 +321,8 @@ class LensAccessorTests(LensFixture):
         with mock.patch.object(jacobian_lens, "_unembed", side_effect=unembed):
             with self.service.open_session() as session:
                 got = session.lens_log_probs(ids, targets, [3, 1, 3], positions)
-        # Replay is one position; each block's readout is 8 + 8 + 1 positions.
-        self.assertEqual(rows, [1] + [8, 8, 1] * 3)
+        # Each unique block is scored during forward; replay is one final position.
+        self.assertEqual(rows, [8, 8, 1] * 2 + [1])
         self.assertTrue(all(n * 128000 <= model_inspection.LENS_SCORE_ELEMENTS for n in rows))
         np.testing.assert_allclose(got, self.expected_log_probs(ids, targets, [3, 1, 3], positions), atol=1e-5)
         self.assertEqual(hooks_left(self.manager), [])
@@ -351,6 +352,81 @@ class LensAccessorTests(LensFixture):
                 self.assertEqual(calls, [1, 1] if failure == "cancel" else [1, 1, 1])
                 self.assertEqual(hooks_left(self.manager), [])
                 self.assertFalse(self.manager._lock.locked())
+
+    def test_requested_states_are_scored_and_released_before_the_next_block(self):
+        self.import_lens()
+        ids = self.manager.tokenizer.encode(PASSAGE)
+        positions = [6, 0, 4] * 7
+        targets = [ids[1], [ids[2], ids[3]]]
+        alive, calls, entered = [], [], []
+        original = jacobian_lens._unembed
+        cpu, clone = torch.Tensor.cpu, torch.Tensor.clone
+        state_shapes = []
+
+        def track_state(tensor):
+            if tensor.ndim == 2 and tensor.shape[-1] == WIDTH and len(tensor) > 1:
+                state_shapes.append(tuple(tensor.shape))
+                self.assertLessEqual(tensor.numel(), 2 * WIDTH)
+                alive.append(weakref.ref(tensor))
+            return tensor
+
+        def cpu_state(tensor, *args, **kwargs):
+            return track_state(cpu(tensor, *args, **kwargs))
+
+        def clone_state(tensor, *args, **kwargs):
+            return track_state(clone(tensor, *args, **kwargs))
+
+        def unembed(engine, layout, vectors):
+            alive.append(weakref.ref(vectors))
+            calls.append((entered[-1], len(vectors)))
+            return original(engine, layout, vectors)
+
+        def entering(_module, _inputs, layer):
+            # A requested preceding block must already be scored, and none of
+            # its transformed chunks may remain alive at the next block.
+            if layer > 1:
+                self.assertIn(layer - 1, [block for block, _ in calls])
+                self.assertFalse(any(reference() is not None for reference in alive))
+            entered.append(layer)
+
+        handles = [block.register_forward_pre_hook(lambda module, args, layer=layer: entering(module, args, layer))
+                   for layer, block in enumerate(steering.decoder_layers(self.manager.model))]
+        try:
+            with mock.patch.object(model_inspection, "LENS_STATE_ELEMENTS", 2 * WIDTH, create=True), \
+                    mock.patch.object(jacobian_lens, "_unembed", new=unembed), \
+                    mock.patch.object(torch.Tensor, "cpu", new=cpu_state), \
+                    mock.patch.object(torch.Tensor, "clone", new=clone_state):
+                with self.service.open_session() as session:
+                    got = session.lens_log_probs(ids, targets, [3, 1, 2, 1], positions)
+        finally:
+            for handle in handles:
+                handle.remove()
+        self.assertEqual([n for _, n in calls], ([2] * 10 + [1]) * 3 + [1])
+        self.assertFalse(any(reference() is not None for reference in alive))
+        self.assertEqual(state_shapes, [(2, WIDTH)] * 30)
+        np.testing.assert_allclose(got, self.expected_log_probs(ids, targets, [3, 1, 2, 1], positions), atol=1e-5)
+        self.assertEqual(hooks_left(self.manager), [])
+
+    def test_final_replay_still_withholds_streamed_readings(self):
+        self.import_lens()
+        ids = self.manager.tokenizer.encode(PASSAGE)
+        original = jacobian_lens._unembed
+        calls = []
+
+        def unembed(engine, layout, vectors):
+            calls.append(len(vectors))
+            scores = original(engine, layout, vectors)
+            if len(calls) == 3:  # Two block readouts succeeded, but the final replay differs.
+                return scores + 1.0
+            return scores
+
+        with mock.patch.object(jacobian_lens, "_unembed", side_effect=unembed):
+            with self.service.open_session() as session:
+                with self.assertRaisesRegex(ValueError, "readings were withheld"):
+                    session.lens_log_probs(ids, [ids[0]], [1, 3], [0, 1])
+        self.assertEqual(calls, [2, 2, 1])
+        self.assertEqual(hooks_left(self.manager), [])
+        self.assertFalse(self.manager._lock.locked())
 
     def test_the_lens_reads_through_the_callers_hooks_inside_the_held_model(self):
         self.import_lens()
@@ -385,8 +461,8 @@ class LensAccessorTests(LensFixture):
         self.addCleanup(head.remove)
         with self.service.open_session() as session:
             got = session.lens_log_probs(ids, [ids[2]], [1, 3], [0, 4, len(ids) - 1])
-        # The model's own pass, then the replay: one row each.
-        self.assertEqual(rows[0], 1)
+        # Readouts happen first; the model's own head and final replay each read one row.
+        self.assertEqual(rows[-2:], [1, 1])
         self.assertTrue(np.isfinite(got).all())
         self.assertEqual(hooks_left(self.manager), [])
 
