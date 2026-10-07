@@ -198,7 +198,12 @@ class Hooks:
         vector = vector.to(device=hidden.device, dtype=hidden.dtype)
         if not torch.isfinite(vector).all().item():
             raise ValueError("The scaled injection vector overflows this model's activation precision.")
-        out[0, rows] = hidden[0, rows] + vector
+        original = hidden[0, rows]
+        injected = original + vector
+        # Even a representable vector can overflow when added to an activation.
+        if not torch.isfinite(injected[torch.isfinite(original)]).all().item():
+            raise ValueError("The injection overflows this model's activation precision; use a smaller strength.")
+        out[0, rows] = injected
         return out
 
     def _move(self, hidden, layer, sizes_for, along, record=None):
@@ -211,14 +216,14 @@ class Hooks:
         x = hidden[0, rows.start:stop].float()
         direction = torch.as_tensor(self.unit[layer], dtype=torch.float32, device=hidden.device)
         size = sizes_for(x @ direction, stop - rows.start).to(device=hidden.device, dtype=torch.float32)
-        if record is not None:
-            # MPS cannot hold float64 tensors; widen only after leaving the device.
-            record.setdefault(layer, size.cpu().double().numpy())
         step = torch.as_tensor(along, dtype=torch.float32, device=hidden.device)
         moved = (x + size[:, None] * step[None]).to(hidden.dtype)
         # A clamp or add value the activations cannot hold would pass on infinities.
         if not torch.isfinite(moved[torch.isfinite(x)]).all().item():
             raise ValueError("The edit overflows this model's activation precision; use a smaller value.")
+        if record is not None:
+            # Record only accepted edits, and widen on CPU because MPS cannot hold float64.
+            record.setdefault(layer, size.cpu().double().numpy())
         out[0, rows.start:stop] = moved
         return out
 

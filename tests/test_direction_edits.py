@@ -93,6 +93,63 @@ def hooks_left(manager):
 
 
 class EditDeviceTests(unittest.TestCase):
+    def test_injection_refuses_post_addition_overflow(self):
+        for sign in (1.0, -1.0):
+            with self.subTest(sign=sign):
+                hidden = torch.full((1, 3, WIDTH), sign * 60000, dtype=torch.float16)
+                original = hidden.clone()
+                injection = {"vector": {"vector": [sign * 10000] * WIDTH}, "strength": 1.0,
+                             "tokens": [2, 2]}
+                hooks = experiment.Hooks(injection, None, None, 0)
+                with self.assertRaisesRegex(ValueError, "injection overflows.*activation precision"):
+                    hooks._inject(hidden)
+                self.assertTrue(torch.equal(hidden, original))
+                hooks.injection["strength"] = -1.0
+                changed = hooks._inject(hidden)
+                self.assertTrue(torch.isfinite(changed).all())
+                self.assertTrue(torch.equal(changed[0, [0, 2]], hidden[0, [0, 2]]))
+                torch.testing.assert_close(changed[0, 1], hidden[0, 1] - sign * 10000)
+        # Preserve the edit path's treatment of pre-existing non-finite activations.
+        hidden[0, 1, 0] = float("inf")
+        changed = hooks._inject(hidden)
+        self.assertTrue(torch.isinf(changed[0, 1, 0]))
+        self.assertTrue(torch.isfinite(changed[0, 1, 1:]).all())
+
+    def test_edit_and_control_arithmetic_reject_before_recording(self):
+        unit = np.zeros((BLOCKS, WIDTH), dtype=np.float32)
+        unit[:, 0] = 1.0
+        edit = inputs()["edit"] | {"tokens": [2, 2]}
+        # Includes final addition/casting and float32 coordinate-subtraction overflow.
+        for dtype, initial, value in ((torch.float16, 60000.0, 10000.0),
+                                      (torch.float32, -3e38, 3e38)):
+            for mode in experiment.MODES:
+                with self.subTest(dtype=dtype, mode=mode):
+                    hidden = torch.zeros(1, 3, WIDTH, dtype=dtype)
+                    hidden[0, 1, 0] = initial
+                    original = hidden.clone()
+                    desired = 70000.0 if dtype == torch.float16 else value
+                    setting = value if mode == experiment.ADD else desired
+                    hooks = experiment.Hooks(None, edit | {"mode": mode, "value": setting}, unit, 0)
+                    recorded = {}
+                    # Float32 Add here is cancellation and should remain representable.
+                    if dtype == torch.float32 and mode == experiment.ADD:
+                        changed = hooks.edited(1, None, recorded)(hidden)
+                        self.assertTrue(torch.isfinite(changed).all())
+                        self.assertEqual(set(recorded), {1})
+                    else:
+                        with self.assertRaisesRegex(ValueError, "edit overflows.*activation precision"):
+                            hooks.edited(1, np.array([desired]), recorded)(hidden)
+                        self.assertEqual(recorded, {})
+                    self.assertTrue(torch.equal(hidden, original))
+        hidden = torch.zeros(1, 3, WIDTH, dtype=torch.float16)
+        hidden[0, 1, 0] = 60000.0
+        hooks = experiment.Hooks(None, edit, unit, 0)
+        with self.assertRaisesRegex(ValueError, "edit overflows.*activation precision"):
+            hooks.control(1, np.array([10000.0]), unit[1])(hidden)
+        changed = hooks.control(1, np.array([-10000.0]), unit[1])(hidden)
+        self.assertTrue(torch.isfinite(changed).all())
+        self.assertTrue(torch.equal(changed[0, [0, 2]], hidden[0, [0, 2]]))
+
     def test_injection_refuses_scaled_and_cast_overflow(self):
         hidden = torch.zeros(1, 3, WIDTH, dtype=torch.float16)
         for entry, strength in ((1e5, 1.0), (1.0, 1e5), (1e308, 1e308)):
