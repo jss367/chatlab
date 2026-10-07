@@ -13,6 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from chatlab.device_memory import reraise_out_of_memory
+from chatlab.model_inspection import ProjectionCancelled
 from chatlab.model_runtime import LOADING
 from chatlab.steering import SteeringError, normalize as normalize_steering, read_vector as read_steering_vector
 from chatlab.trace_export import write_private_text
@@ -20,7 +21,7 @@ from chatlab.ui.icons import icon_classes
 
 API_VERSION = 1
 __all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenMenu", "TokenSelections", "NavigationService", "write_private_text", "icon_classes",
-           "SteeringError", "normalize_steering", "read_steering_vector"]
+           "SteeringError", "normalize_steering", "read_steering_vector", "ProjectionCancelled"]
 
 
 class ModelService:
@@ -149,6 +150,10 @@ class GenerationSession:
         self._model_revision = revision() if callable(revision) else None
         self._closed = False
         self._generating = False
+        # Set while transformers_model() holds the model lock, which is not
+        # reentrant: readings made inside it run under that hold instead.
+        self._held = False
+        self._hooks = []
         self._cancelled = threading.Event()
 
     def _check(self):
@@ -248,6 +253,7 @@ class GenerationSession:
         ``SteeringError``.
         """
         self._check()
+        self._unheld("Read examples")
         return self._manager.read_examples(
             list(texts), use_chat_template=bool(chat_template), pool=pool, load_id=self.load_id,
             cancelled=self._cancelled.is_set,
@@ -256,7 +262,7 @@ class GenerationSession:
     def check_projection(self, directions):
         """Check probe layer count and residual width before generating or reading."""
         self._check()
-        self._manager.check_projection(directions, load_id=self.load_id)
+        self._manager.check_projection(directions, load_id=self.load_id, held=self._held)
 
     def project_layers(self, ids, directions):
         """Read every position of a token sequence along one direction per block.
@@ -266,10 +272,111 @@ class GenerationSession:
         ``(blocks, positions)`` of dot products between each block's output
         at each position and that block's direction, from one forward pass
         that keeps nothing else. Needs a PyTorch load, as :meth:`read_examples`.
+        Inside :meth:`transformers_model` it reads through any hooks
+        :meth:`block_hooks` has installed.
         """
         self._check()
         return self._manager.project_blocks(list(ids), directions, load_id=self.load_id,
-                                            cancelled=self._cancelled.is_set)
+                                            cancelled=self._cancelled.is_set, held=self._held)
+
+    @property
+    def block_count(self):
+        """How many decoder blocks the pinned model has: one direction each for :meth:`project_layers`.
+
+        Raises ``SteeringError`` for a model whose blocks ChatLab cannot find,
+        an MLX load among them.
+        """
+        self._check()
+        from chatlab.steering import decoder_layers
+        if self._manager._engine().backend != "torch":
+            raise SteeringError("This needs a PyTorch model; the loaded model runs on MLX.")
+        return len(decoder_layers(self._manager.model))
+
+    def jacobian_lens(self):
+        """The Jacobian lens imported for the pinned load, or ``None``.
+
+        A dict with its ``name``, the ``n_prompts`` it was fitted on and the
+        ``layers`` it has a matrix for, the only blocks it can read. When none
+        is imported, the lens last imported for this model on the Chat page
+        is brought back first, as Chat does. Call it outside
+        :meth:`transformers_model`.
+        """
+        self._check()
+        self._unheld("Look up the lens")
+        if self._manager.jacobian_lens_summary() is None:
+            self._manager.recall_jacobian_lens()
+        summary = self._manager.jacobian_lens_summary()
+        self._check()
+        return summary
+
+    def lens_log_probs(self, ids, targets, blocks, positions):
+        """Log probabilities the imported Jacobian lens gives each target, read from these tokens.
+
+        ``targets`` holds one entry per target: a token ID, or a list of IDs
+        read as one word through the mean of their unembeddings. ``blocks``
+        must be blocks the lens has a matrix for, and ``positions`` index
+        ``ids``. Returns a NumPy array shaped ``(blocks, positions, targets)``,
+        from one forward pass with no cache over ``ids`` up to the last
+        position asked for. Inside :meth:`transformers_model` the pass runs
+        through any hooks :meth:`block_hooks` has installed, so the lens reads
+        the edited residual stream. Needs a PyTorch load; withheld, as Chat's
+        inspection is, when the final block's readout does not reproduce the
+        model's own output.
+        """
+        self._check()
+        return self._manager.lens_log_probs(list(ids), list(targets), list(blocks), list(positions),
+                                            load_id=self.load_id, cancelled=self._cancelled.is_set,
+                                            held=self._held)
+
+    @contextlib.contextmanager
+    def block_hooks(self, edits):
+        """Rewrite decoder block outputs while the body runs; inside :meth:`transformers_model` only.
+
+        ``edits`` maps a block index to a function of that block's output,
+        the residual tensor shaped ``(batch, positions, width)`` that a
+        steering vector at that layer is added to. The function returns the
+        replacement, of the same shape, or ``None`` to leave it alone; it
+        must not change its argument in place. A reading inside the body,
+        :meth:`project_layers` or :meth:`lens_log_probs`, sees the rewritten
+        outputs, and positions are counted from the first token it was given.
+        The hooks run before any others on their blocks, and the ones a later
+        call installs run before an earlier call's. Every hook is removed when
+        the body ends, however it ends, and :meth:`transformers_model` removes
+        any left behind before it lets go of the model.
+        """
+        self._check()
+        if not self._held:
+            raise ValueError("Install block hooks inside session.transformers_model().")
+        import torch
+        from chatlab.steering import decoder_layers
+        blocks = decoder_layers(self._manager.model)
+        edits = dict(edits)
+        if not all(type(layer) is int and 0 <= layer < len(blocks) and callable(edit) for layer, edit in edits.items()):
+            raise ValueError(f"Hook blocks 0–{len(blocks) - 1} with a function each.")
+
+        def hook_for(edit):
+            def hook(_module, _inputs, output):
+                hidden = output[0] if isinstance(output, tuple) else output
+                changed = edit(hidden)
+                if changed is None:
+                    return None
+                if not isinstance(changed, torch.Tensor) or changed.shape != hidden.shape:
+                    raise ValueError("A block hook must return a tensor shaped like the block's output.")
+                return (changed, *output[1:]) if isinstance(output, tuple) else changed
+            return hook
+
+        handles = []
+        try:
+            for layer, edit in sorted(edits.items()):
+                handle = blocks[layer].register_forward_hook(hook_for(edit), prepend=True)
+                handles.append(handle)
+                self._hooks.append(handle)
+            yield
+        finally:
+            for handle in handles:
+                handle.remove()
+                if handle in self._hooks:
+                    self._hooks.remove(handle)
 
     @property
     def model_revision(self):
@@ -339,12 +446,22 @@ class GenerationSession:
                 raise ValueError("This needs a Transformers model; the loaded model runs on MLX.")
             if getattr(manager, "precision", "full") not in (None, "full"):
                 raise ValueError("This needs full-precision weights. Reload the model at full precision.")
+            self._held = True
             try:
                 yield manager.model
             except (RuntimeError, MemoryError) as error:
                 reraise_out_of_memory(error)
             finally:
+                self._held = False
+                for handle in self._hooks:
+                    handle.remove()
+                self._hooks.clear()
                 manager._release_device_cache()
+
+    def _unheld(self, what):
+        # The model lock is not reentrant, so this would wait on itself.
+        if self._held:
+            raise ValueError(f"{what} outside session.transformers_model(); it takes the model itself.")
 
     def generate(self, messages, *, temperature, top_p, top_k, max_new_tokens, seed,
                  skip_top_below=0.0, tools=None, forced_ids=(),
@@ -353,6 +470,7 @@ class GenerationSession:
         with, as Chat's assistant prefill: after the reasoning block if the
         template opens one, and not together with ``forced_ids``."""
         self._check()
+        self._unheld("Generate")
         if self._generating:
             raise ValueError("This model session is already streaming.")
         if self._cancelled.is_set():
