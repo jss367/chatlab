@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 import logging
 import os
 from collections.abc import Sequence
@@ -1107,11 +1108,15 @@ class InspectionMixin:
                 handles.append(block.register_forward_pre_hook(check_cancelled))
                 if layer in blocks or layer == last:
                     handles.append(block.register_forward_hook(record(layer)))
+            # The replay below reads one row. A half-precision head rounds one
+            # row differently from many, so the model's head is asked for that
+            # one row too wherever it can be.
+            last_only = "logits_to_keep" in inspect.signature(self.model.forward).parameters
             try:
                 check_cancelled()
                 output = self.model(
                     input_ids=torch.tensor([fed], dtype=torch.long, device=next(self.model.parameters()).device),
-                    use_cache=False,
+                    use_cache=False, **({"logits_to_keep": 1} if last_only else {}),
                 )
             finally:
                 for handle in handles:

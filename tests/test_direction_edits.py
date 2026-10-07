@@ -375,6 +375,21 @@ class LensAccessorTests(LensFixture):
         self.assertFalse(np.allclose(edited[:, 1:], plain[:, 1:]))
         self.assertEqual(hooks_left(self.manager), [])
 
+    def test_the_head_reads_the_one_row_the_replay_checks_in_half_precision(self):
+        self.manager.model = self.manager.model.to(torch.bfloat16)
+        self.import_lens()
+        ids = self.manager.tokenizer.encode(PASSAGE)
+        rows = []
+        head = self.manager.model.lm_head.register_forward_hook(
+            lambda _module, _inputs, output: rows.append(output.shape[-2]))
+        self.addCleanup(head.remove)
+        with self.service.open_session() as session:
+            got = session.lens_log_probs(ids, [ids[2]], [1, 3], [0, 4, len(ids) - 1])
+        # The model's own pass, then the replay: one row each.
+        self.assertEqual(rows[0], 1)
+        self.assertTrue(np.isfinite(got).all())
+        self.assertEqual(hooks_left(self.manager), [])
+
     def test_missing_lens_unfitted_blocks_and_bad_targets_are_refused(self):
         ids = self.manager.tokenizer.encode(PASSAGE)
         with self.service.open_session() as session:
