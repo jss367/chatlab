@@ -14,11 +14,11 @@ from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausa
 
 from chatlab import conversation
 from chatlab import library
+from chatlab.model_errors import ModelChanged
 from chatlab import model_inspection
 import settings_sandbox
 from chatlab import steering
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from fakes import FakeTokenizer, PIECES, EOS_ID
 from chatlab.ui import runtime
 from chatlab.ui import steering as controls

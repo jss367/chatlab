@@ -23,8 +23,8 @@ from chatlab import jacobian_lens
 from chatlab import model_loading
 from chatlab import steering
 from chatlab.jacobian_lens import FittedLens
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from mlx_support import needs_mlx
 from tiny_tokenizer import build as build_tokenizer
 from torch_support import tiny_manager
@@ -944,11 +944,11 @@ class MlxJacobianLensTests(unittest.TestCase):
 
     def reference(self):
         """Each block's readout at every position from one uncached pass."""
-        from chatlab.mlx_runtime import _Recorder
+        from chatlab.mlx_runtime import Recorder
 
         mx = self.mx
         engine = self.manager.engine
-        recorder = _Recorder()
+        recorder = Recorder()
         with engine._recording(recorder):
             logits = self.model(mx.array([self.ids]))
         mx.eval(logits, *recorder.hidden)

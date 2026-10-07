@@ -12,9 +12,9 @@ from unittest import mock
 import numpy as np
 import torch
 
+from chatlab.model_errors import ModelChanged
 from chatlab import model_inspection
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from chatlab.ui import attention_trace, runtime
 from chatlab.ui.panel import new_metrics_generation, restore_chat_metrics_generation
 from fakes import FakeTokenizer, SentencePieceTokenizer, lens_manager

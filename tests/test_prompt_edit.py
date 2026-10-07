@@ -7,9 +7,9 @@ from unittest import mock
 
 from chatlab import app
 import gradio as gr
-from chatlab.text_generation import ModelChanged
 from chatlab.ui import runtime, token_menu
 from chatlab.conversation import forget_measurements, to_json, turn_entries
+from chatlab.model_errors import ModelChanged
 from conversation_support import FIXED, SETTINGS, metrics_of, select, strip_of, token_span
 from fakes import SentencePieceTokenizer, loaded_manager
 from prompt_edit_support import (EOS, HELLO, MESSAGE_AT, PIECES, PROMPT_IDS, WORLD, PromptEditFixture,

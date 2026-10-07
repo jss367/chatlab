@@ -46,9 +46,9 @@ from chatlab.device_memory import (
 )
 from chatlab.model_cache import MLX_KIND, TEXT_KIND, list_cached_models
 from chatlab.conversation import split_response_text
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import GENERATING, LOADING, ModelManager
 from chatlab.seeds import resolve_seed
-from chatlab.text_generation import ModelChanged
 from chatlab.token_metrics import summarize
 
 logger = logging.getLogger(__name__)

@@ -40,11 +40,12 @@ from chatlab.model_inspection import TokenInsight
 from chatlab.ui.common import ARCHIVED_VIEW_CLASS
 from chatlab.ui.conversations import show_archive
 from chatlab.model_runtime import GENERATING
-from chatlab.text_generation import GenerationUpdate, ModelChanged
+from chatlab.text_generation import GenerationUpdate
 from chatlab.token_metrics import DEFAULT_COLOR_SCALE
 from chatlab.steering import SteeringError
 
 from chatlab import library
+from chatlab.model_errors import ModelChanged
 from chatlab import settings
 import settings_sandbox
 from fakes import (

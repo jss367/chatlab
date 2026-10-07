@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
-import json
 import logging
 import queue
 import re
@@ -53,6 +52,7 @@ import numpy as np
 
 from chatlab import kv_cache
 from chatlab.engine import LensReading
+from chatlab.files import read_json_object
 from chatlab.kv_cache import CacheLayer, LayerShape, recent_positions
 
 logger = logging.getLogger(__name__)
@@ -120,11 +120,8 @@ def mlx_quantization(config: Mapping[str, Any] | None) -> dict[str, Any] | None:
 def read_mlx_config(snapshot: Path) -> dict[str, Any] | None:
     """The root ``config.json`` of ``snapshot`` when it describes an MLX conversion."""
 
-    try:
-        config = json.loads((snapshot / "config.json").read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(config, dict) or "model_type" not in config:
+    config = read_json_object(snapshot / "config.json")
+    if config is None or "model_type" not in config:
         return None
     return config if mlx_quantization(config) is not None else None
 
@@ -162,16 +159,6 @@ def text_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     return {**config, **text} if isinstance(text, Mapping) else dict(config)
 
 
-def _read_json_object(path: Path) -> dict[str, Any]:
-    """``path`` parsed as a JSON object; ``{}`` when missing, unreadable or not one."""
-
-    try:
-        value = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 def read_stop_ids(snapshot: Path) -> set[int]:
     """Every end-of-sequence token the checkpoint at ``snapshot`` declares.
 
@@ -183,9 +170,9 @@ def read_stop_ids(snapshot: Path) -> set[int]:
     """
 
     snapshot = Path(snapshot)
-    values = _token_ids(_read_json_object(snapshot / "config.json").get("eos_token_id"))
+    values = _token_ids((read_json_object(snapshot / "config.json") or {}).get("eos_token_id"))
     values |= _token_ids(
-        _read_json_object(snapshot / "generation_config.json").get("eos_token_id")
+        (read_json_object(snapshot / "generation_config.json") or {}).get("eos_token_id")
     )
     return values
 
@@ -414,7 +401,7 @@ class MlxLogits:
 class _RecordingLayer:
     """Stand in for one decoder layer and keep what flowed through it."""
 
-    def __init__(self, layer, index: int, recorder: _Recorder) -> None:
+    def __init__(self, layer, index: int, recorder: Recorder) -> None:
         self.layer = layer
         self.index = index
         self.recorder = recorder
@@ -433,7 +420,7 @@ class _RecordingLayer:
 
 
 @dataclass
-class _Recorder:
+class Recorder:
     hidden: list = field(default_factory=list)
     attention: dict[int, Any] = field(default_factory=dict)
     current: int = -1
@@ -470,7 +457,7 @@ class MlxEngine:
         """
 
         local_path = Path(local_path)
-        config = _read_json_object(local_path / "config.json")
+        config = read_json_object(local_path / "config.json") or {}
         return cls(model, config, stop_ids=read_stop_ids(local_path))
 
     # -- what the manager asks about the model -------------------------------
@@ -637,7 +624,7 @@ class MlxEngine:
         return logits
 
     @contextlib.contextmanager
-    def _recording(self, recorder: _Recorder) -> Iterator[None]:
+    def _recording(self, recorder: Recorder) -> Iterator[None]:
         """Wrap the decoder layers and the attention kernel for one step.
 
         The layers are replaced on the inner model with recorders that keep
@@ -692,7 +679,7 @@ class MlxEngine:
             raise RuntimeError(
                 f"The MLX cache holds {offset} tokens, not the {cached} expected."
             )
-        recorder = _Recorder()
+        recorder = Recorder()
         with self._recording(recorder):
             logits = self.model(mx.array([[int(token_id)]]), cache=cache)
         hidden = list(recorder.hidden)
@@ -752,7 +739,7 @@ class MlxEngine:
         total = cached + fed
         layers: list[np.ndarray] | None = None
         for step, token_id in enumerate(token_ids):
-            recorder = _Recorder(heads=True)
+            recorder = Recorder(heads=True)
             with self._recording(recorder):
                 logits = self.model(mx.array([[int(token_id)]]), cache=cache)
             count = len(recorder.hidden) - 1
@@ -871,7 +858,7 @@ def _cache_offset(cache) -> int | None:
     return int(offset) if isinstance(offset, int) else None
 
 
-def _recording_attention(original, recorder: _Recorder):
+def _recording_attention(original, recorder: Recorder):
     """Wrap mlx-lm's attention kernel to also compute the weights it never returns.
 
     ``mx.fast.scaled_dot_product_attention`` is fused and materializes no

@@ -1263,9 +1263,7 @@ release are left as they are and the bundle is rebuilt and installed.
 
 The build needs a Mac with a real GPU. GitHub's hosted macOS runners report a
 Metal device backed by no memory, so the bundle's smoke test fails there while
-allocating a few kilobytes. `Release macOS app` therefore runs only when it is
-dispatched by hand with a tag, and asks for a self-hosted Apple Silicon runner.
-No such runner is registered, so a dispatch queues until one is.
+allocating a few kilobytes; releases are cut locally for that reason.
 
 Installed apps offer the release the next time they start; the updater
 verifies the download against the published checksum and confirms the

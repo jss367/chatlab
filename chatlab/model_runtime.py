@@ -25,12 +25,10 @@ from chatlab.device_memory import first_line, memory_note, reraise_out_of_memory
 from chatlab.engine import Engine
 from chatlab.model_cache import (
     IMAGE_KIND,
-    ModelBusy,
-    ModelDownloading,
-    ModelLoaded,
     format_bytes,
     validate_model_id,
 )
+from chatlab.model_errors import ModelBusy, ModelDownloading, ModelLoaded
 from chatlab.model_inspection import InspectionMixin
 from chatlab.model_loading import LoadedModel, LoadingMixin
 from chatlab.progress_bars import DownloadProgress, LoadProgress, LoadSnapshot

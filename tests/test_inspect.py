@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
+from chatlab.model_errors import ModelChanged
 from chatlab.model_inspection import TokenInsight
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from fakes import FakeCache, lens_manager
 
 

@@ -29,9 +29,9 @@ import numpy as np
 
 from chatlab.conversation import model_messages
 from chatlab import attachments, vision
-from chatlab.model_inspection import RECENT_KEYS, _decoded_prompt
+from chatlab.model_errors import ModelChanged
+from chatlab.model_inspection import RECENT_KEYS, decoded_prompt
 from chatlab.model_runtime import LOADING
-from chatlab.text_generation import ModelChanged
 from chatlab.ui import runtime
 from chatlab.ui.common import QUIET_TICK, failure_status
 from chatlab.ui.panel import current_strip_generation
@@ -295,7 +295,7 @@ def _prompt_edit_regions(trace, turns, messages):
         thinking_mode=turn.get("thinking_mode") or settings.get("thinking_mode") or "default",
         prompt_override_ids=None,
     )
-    text, spans = _decoded_prompt(runtime.MANAGER.tokenizer, source_ids)
+    text, spans = decoded_prompt(runtime.MANAGER.tokenizer, source_ids)
     labels = token_regions(
         [{} for _ in source_ids], len(source_ids), messages, prompt_text=text, prompt_spans=spans,
         message_spans=_message_spans(text, messages, turns),

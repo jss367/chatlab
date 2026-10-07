@@ -846,7 +846,7 @@ def gap_metrics(reading: dict) -> list[dict]:
     ]
 
 
-def _portable_settings(settings: dict) -> dict:
+def portable_settings(settings: dict) -> dict:
     """One run's settings with its steering vector written out in full.
 
     A run holds a reference to a vector stored once beside the conversation
@@ -887,7 +887,7 @@ def export(left: dict | None, right: dict | None, reading: dict) -> dict:
             "precision": run.get("precision"),
             "prompt": run.get("prompt", ""),
             "text": run.get("text", ""),
-            "settings": _portable_settings(run.get("settings") or {}),
+            "settings": portable_settings(run.get("settings") or {}),
             "seconds": run.get("seconds"),
             "summary": summarize(run["metrics"]),
             "tokens": run["metrics"],

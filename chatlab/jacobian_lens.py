@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from chatlab import settings, steering
+from chatlab.files import read_json_object
 
 
 logger = logging.getLogger(__name__)
@@ -285,7 +286,7 @@ class FittedLens:
         # The whole slice is replayed, as the model's own head read it: a
         # half-precision head over one row rounds differently from the same
         # head over many, by more than the tolerance.
-        replayed = _unembed(engine, layout, states[last])[-1]
+        replayed = unembed(engine, layout, states[last])[-1]
         if not torch.allclose(replayed, actual, rtol=1e-2, atol=1e-2):
             raise ValueError("The final-layer readout does not reproduce this model's output; Jacobian results were withheld.")
         if pinned_id is not None and not 0 <= pinned_id < actual.numel():
@@ -295,7 +296,7 @@ class FittedLens:
             # The reference transports in float32, then uses the model's norm
             # and head dtype. The transport stays on the CPU, so the lens
             # matrices never take accelerator memory.
-            scores = _unembed(engine, layout, states[layer] @ matrix.float().T)
+            scores = unembed(engine, layout, states[layer] @ matrix.float().T)
             if not torch.isfinite(scores).all():
                 raise ValueError("The Jacobian readout produced non-finite scores.")
             final = scores[-1]
@@ -331,9 +332,9 @@ def _capture_mlx(engine, wanted, states):
     import mlx.core as mx
     import torch
 
-    from chatlab.mlx_runtime import MLX_THREAD, _Recorder
+    from chatlab.mlx_runtime import MLX_THREAD, Recorder
 
-    recorder = _Recorder()
+    recorder = Recorder()
     with engine._recording(recorder):
         yield
     hidden = recorder.hidden
@@ -350,7 +351,7 @@ def _capture_mlx(engine, wanted, states):
     MLX_THREAD.run(read)
 
 
-def _unembed(engine, layout: Layout, vectors):
+def unembed(engine, layout: Layout, vectors):
     """Norm and head, the model's own, over rows of residual vectors.
 
     ``vectors`` is a float32 CPU tensor ``[n, d_model]``; the answer is a
@@ -369,7 +370,7 @@ def _unembed(engine, layout: Layout, vectors):
 
 
 def _unembed_mlx(engine, layout: Layout, vectors: np.ndarray) -> np.ndarray:
-    """:func:`_unembed` for an MLX model, run on the MLX thread."""
+    """:func:`unembed` for an MLX model, run on the MLX thread."""
     import mlx.core as mx
 
     # In the norm's own dtype, as the Transformers readout casts to it.
@@ -408,11 +409,7 @@ _UPLOAD_LOCK = threading.Lock()
 
 
 def _read_store() -> dict:
-    try:
-        data = json.loads(store_path().read_text("utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return read_json_object(store_path()) or {}
 
 
 def remembered(model_id: str) -> dict | None:

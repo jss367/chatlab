@@ -22,7 +22,6 @@ from chatlab.model_cache import (
     IMAGE_KIND,
     MODEL_WEIGHTS,
     TEXT_KIND,
-    ModelBusy,
     cache_status,
     is_pipeline,
     pipeline_class,
@@ -32,6 +31,7 @@ from chatlab.model_cache import (
     pipeline_weight_bytes,
     weight_bytes_for,
 )
+from chatlab.model_errors import ModelBusy
 from chatlab.model_runtime import ModelManager
 
 

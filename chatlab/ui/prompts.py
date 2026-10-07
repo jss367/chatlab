@@ -17,8 +17,8 @@ import gradio as gr
 from gradio.utils import get_upload_folder
 
 from chatlab.conversation import make_turn, model_messages
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import LOADING
-from chatlab.text_generation import ModelChanged
 from chatlab.prompt_batch import (
     BATCH_CSV_NAME,
     BatchTable,

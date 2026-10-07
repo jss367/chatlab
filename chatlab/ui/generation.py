@@ -32,13 +32,13 @@ from chatlab.conversation import (
 )
 from chatlab.model_runtime import LOADING
 from chatlab.seeds import resolve_seed
-from chatlab.text_generation import ModelChanged
 from chatlab.token_metrics import (
     DEFAULT_COLOR_SCALE,
     summarize,
 )
 from chatlab.trace_export import build_trace
 from chatlab.attachments import MAX_IMAGES_PER_PROMPT, names_in, picture_count, too_many_pictures
+from chatlab.model_errors import ModelChanged
 from chatlab.vision import message_images
 from chatlab.ui import runtime
 from chatlab.ui.common import (

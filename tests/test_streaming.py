@@ -15,8 +15,8 @@ from chatlab import settings
 import settings_sandbox
 import tiny_tokenizer
 from chatlab.conversation import split_reasoning
+from chatlab.model_errors import ModelChanged
 from chatlab.model_runtime import ModelManager
-from chatlab.text_generation import ModelChanged
 from chatlab.tokenization import IncrementalDecoder
 from fakes import (
     ChatTemplateTokenizer, Encoding, EOS_ID, FakeModel, FakeTokenizer, loaded_manager, PIECES,

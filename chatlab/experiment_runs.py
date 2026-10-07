@@ -40,7 +40,7 @@ def save(run: dict, title: str = "") -> dict:
     if not run or not run.get("metrics"):
         raise ValueError("Generate or measure a run before saving it.")
     recorded = copy.deepcopy(run)
-    recorded["settings"] = compare._portable_settings(recorded.get("settings") or {})
+    recorded["settings"] = compare.portable_settings(recorded.get("settings") or {})
     document = {
         "schema_version": 1,
         "id": uuid4().hex,

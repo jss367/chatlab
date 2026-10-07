@@ -16,11 +16,11 @@ from chatlab import model_runtime
 from chatlab import device_memory
 from chatlab import model_cache
 from chatlab import model_loading
-from chatlab import text_generation
 from chatlab import settings
 import settings_sandbox
 from chatlab.conversation import split_reasoning
 from chatlab.model_cache import CachedModel, CacheStatus
+from chatlab import model_errors
 from chatlab.model_inspection import ScoredText
 from chatlab.text_generation import GenerationUpdate
 from chatlab.ui import runtime
@@ -696,7 +696,7 @@ class RequestPlumbingTests(ApiTestCase):
 
     def test_a_load_that_landed_in_between_is_refused(self):
         self.use(
-            Recorder(raises=text_generation.ModelChanged("the model has changed"))
+            Recorder(raises=model_errors.ModelChanged("the model has changed"))
         )
 
         response = self.post(messages=[{"role": "user", "content": "hi"}])
@@ -1504,7 +1504,7 @@ class ScoreTests(ApiTestCase):
 
     def test_a_score_whose_model_changed_underneath_it_is_refused(self):
         def changed(text, **kwargs):
-            raise text_generation.ModelChanged("the model in memory is another")
+            raise model_errors.ModelChanged("the model in memory is another")
 
         self.manager.score_text = changed
 

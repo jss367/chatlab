@@ -21,6 +21,8 @@ from typing import Any
 
 from chatlab import adapters
 from chatlab import mlx_runtime
+from chatlab.files import read_json_object
+from chatlab.model_errors import ModelDownloading
 
 
 # Bytes per parameter for the dtypes a checkpoint or a load can use.
@@ -193,11 +195,8 @@ def is_transformers_config(path: Path) -> bool:
     a diffusers pipeline has no root ``config.json`` at all.
     """
 
-    try:
-        config = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return False
-    return isinstance(config, dict) and (
+    config = read_json_object(path)
+    return config is not None and (
         "model_type" in config or "architectures" in config
     )
 
@@ -471,11 +470,8 @@ def pipeline_components(snapshot: Path) -> tuple[str, ...]:
     written as a pair of nulls rather than dropped.
     """
 
-    try:
-        index = json.loads((snapshot / PIPELINE_INDEX).read_text())
-    except (OSError, ValueError):
-        return ()
-    if not isinstance(index, dict):
+    index = read_json_object(snapshot / PIPELINE_INDEX)
+    if index is None:
         return ()
     return tuple(
         name
@@ -490,11 +486,8 @@ def pipeline_components(snapshot: Path) -> tuple[str, ...]:
 def pipeline_class(snapshot: Path) -> str | None:
     """The pipeline class ``model_index.json`` names, for the model list."""
 
-    try:
-        index = json.loads((snapshot / PIPELINE_INDEX).read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(index, dict):
+    index = read_json_object(snapshot / PIPELINE_INDEX)
+    if index is None:
         return None
     name = index.get("_class_name")
     return name if isinstance(name, str) and name else None
@@ -1286,11 +1279,8 @@ def _read_config(snapshot: Path | None) -> tuple[str | None, str | None]:
     # The config is another repo's file, so nothing about its shape is
     # trusted: a config that is not an object, or an ``architectures`` that is
     # not a list, reads as an unknown architecture rather than an error.
-    try:
-        config = json.loads((snapshot / "config.json").read_text())
-    except (OSError, ValueError):
-        return None, None
-    if not isinstance(config, dict):
+    config = read_json_object(snapshot / "config.json")
+    if config is None:
         return None, None
     architectures = config.get("architectures")
     architecture = (
@@ -1362,11 +1352,8 @@ def _embedding_params(snapshot: Path | None) -> int | None:
             return params
     except Exception:  # noqa: BLE001 - any failure here falls through to the file
         pass
-    try:
-        config = json.loads((snapshot / "config.json").read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(config, dict):
+    config = read_json_object(snapshot / "config.json")
+    if config is None:
         return None
     return _embedding_params_from(config)
 
@@ -1481,28 +1468,6 @@ def sort_cached_models(models: list[CachedModel], order: str | None) -> list[Cac
 
     key = _SORT_KEYS.get(order or "", _SORT_KEYS[DEFAULT_MODEL_SORT])
     return sorted(models, key=key)
-
-
-
-
-class ModelInUse(RuntimeError):
-    """The model cannot be removed, or claimed, right now.
-
-    The subclasses say why, so the interface can tell the reader what to do:
-    unload the model, wait for its download, or wait for the model to go idle.
-    """
-
-
-class ModelLoaded(ModelInUse):
-    """The model is the one in memory."""
-
-
-class ModelDownloading(ModelInUse):
-    """A download of the model is under way, in this process or another."""
-
-
-class ModelBusy(ModelInUse):
-    """The model lock is held: a load, generation, scoring, or inspection is running."""
 
 
 def hub_lock_held(root: Path, folder_name: str) -> bool:

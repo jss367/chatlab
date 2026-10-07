@@ -13,9 +13,9 @@ import gradio as gr
 from chatlab import charts
 from chatlab import jacobian_lens
 from chatlab import kv_cache
+from chatlab.model_errors import ModelChanged
 from chatlab import steering as steering_vectors
 from chatlab.model_runtime import LOADING
-from chatlab.text_generation import ModelChanged
 from chatlab.ui import icons, runtime
 from chatlab.ui.common import (
     NAV_ICONS,

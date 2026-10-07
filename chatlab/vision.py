@@ -30,12 +30,13 @@ Heavy imports (torch, transformers) are made where they are used.
 from __future__ import annotations
 
 import inspect
-import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from chatlab.files import read_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +58,7 @@ class ImagesUnsupported(ValueError):
 
 
 def _read_config(local_path: Path) -> dict:
-    try:
-        value = json.loads((Path(local_path) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    return read_json_object(Path(local_path) / "config.json") or {}
 
 
 def checkpoint_has_vision(local_path: Path) -> bool:

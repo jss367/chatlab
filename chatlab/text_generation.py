@@ -23,6 +23,7 @@ from chatlab import attachments, device_memory, vision
 from chatlab.conversation import THINK_CLOSE, THINK_OPEN
 from chatlab.device_memory import memory_note, reraise_out_of_memory
 from chatlab.engine import Engine
+from chatlab.model_errors import ModelChanged
 from chatlab.thinking import THINKING_MODES, supports_thinking
 from chatlab.token_metrics import (
     UNSCORED_BEYOND_LIMIT,
@@ -159,10 +160,6 @@ class GenerationUpdate:
 
     thinking_mode: str | None = None
     """Requested template mode, or None when the loaded model cannot switch."""
-
-
-class ModelChanged(RuntimeError):
-    """The weights in memory are not the ones the caller's tokens came from."""
 
 
 @dataclass
