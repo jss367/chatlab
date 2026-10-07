@@ -26,7 +26,7 @@ import threading
 from dataclasses import dataclass, field
 
 from .maze import DIRECTIONS, parse_call
-from .runner import context_messages, from_payload, visible_token_ids
+from .runner import assistant_content, context_messages, from_payload, visible_token_ids
 from .team import MESSAGE_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -85,11 +85,6 @@ def load_run(data):
     return from_payload(data)
 
 
-def response_text(turn):
-    """A response as its history carries it, with the reasoning a template opened for it restored."""
-    return ("<think>" if turn.get("reasoning_prefilled") else "") + turn["text"]
-
-
 def split_response(turn, communicate):
     """The response's reasoning, the position its call starts at, and the call's arguments.
 
@@ -98,7 +93,7 @@ def split_response(turn, communicate):
     """
     if turn.get("finish_reason") != "stop":
         return None
-    text = response_text(turn)
+    text = assistant_content(turn)
     visible = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
     if "<think>" in visible:
         visible = visible.split("<think>", 1)[0]
@@ -295,7 +290,7 @@ def truncation_plan(turn, fraction, communicate):
     if split is None:
         return None
     reasoning, start, _ = split
-    text = response_text(turn)
+    text = assistant_content(turn)
     named = re.search(r'"direction"\s*:\s*"', text[start:])
     if named is None:
         return None

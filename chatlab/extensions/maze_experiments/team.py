@@ -37,8 +37,8 @@ TEAM_GOALS = {"any": "Any agent arrives", "all": "Every agent arrives"}
 # enough that a teammate's reply stays a reply about the maze.
 MESSAGE_LIMIT = 280
 MAX_AGENTS = 100
-# An agent stops being asked for responses once it is anything but active.
-AGENT_STATUSES = {"active", "arrived", "abandoned", "cut_off", "out_of_tokens", "out_of_calls", "not_recovered"}
+# An agent stops being asked for responses once it is anything but active:
+# arrived, abandoned, cut_off, out_of_tokens, out_of_calls or not_recovered.
 # The statuses a limit of the run's own gives an agent. A team whose agents
 # all stopped on one, or arrived, ran out of budget rather than gave up.
 LIMITED = {"out_of_tokens", "out_of_calls", "not_recovered"}

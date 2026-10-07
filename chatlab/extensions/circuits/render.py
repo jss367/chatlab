@@ -41,10 +41,6 @@ def _short(text, limit=18):
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _esc(value):
-    return html.escape(str(value), quote=True)
-
-
 def node_label(node, labels):
     """What a node is called: the reader's name for it, or what it writes."""
     kind = node["kind"]
@@ -158,7 +154,7 @@ def graph_view(graph, *, nodes_shown=40, show_errors=False, selected=(), labels=
         bend = max(14, (y1 - y2) * 0.45)
         sign = "pos" if edge["weight"] > 0 else "neg"
         parts.append(
-            f'<path class="cg-edge {sign}" data-s="{_esc(edge["source"])}" data-t="{_esc(edge["target"])}" '
+            f'<path class="cg-edge {sign}" data-s="{html.escape(edge["source"])}" data-t="{html.escape(edge["target"])}" '
             f'd="M{x1},{y1} C{x1},{y1 - bend} {x2},{y2 + bend} {x2},{y2}" '
             f'style="stroke-width:{0.6 + 3.4 * share:.2f};opacity:{0.25 + 0.6 * share:.2f}">'
             f'<title>{edge["weight"]:+.3g}</title></path>')
@@ -175,7 +171,7 @@ def graph_view(graph, *, nodes_shown=40, show_errors=False, selected=(), labels=
         if node["id"] in grouped:
             classes.append("grouped")
         title = _title(node, _short(label, 160) if kind == "target" else label, grouped.get(node["id"]), tokens)
-        attrs = f'class="{" ".join(classes)}" data-node="{_esc(node["id"])}"'
+        attrs = f'class="{" ".join(classes)}" data-node="{html.escape(node["id"])}"'
         if kind == "feature":
             r = 4 + 6 * math.sqrt(max(node["influence"], 0) / top_influence)
             mark = f'<circle class="mark {role(node["effect"], scale)}" cx="{x}" cy="{y}" r="{r:.1f}"/>'
@@ -188,16 +184,16 @@ def graph_view(graph, *, nodes_shown=40, show_errors=False, selected=(), labels=
             label = f'{label} {node.get("probability", 0):.3f}'
         # A prompt token is named on the axis below it.
         text = "" if kind == "embedding" else (
-            f'<text class="cg-label" x="{x + 12}" y="{y + 4}">{_esc(_short(label))}</text>')
-        parts.append(f'<g {attrs}><title>{_esc(title)}</title>{mark}{text}'
+            f'<text class="cg-label" x="{x + 12}" y="{y + 4}">{html.escape(_short(label))}</text>')
+        parts.append(f'<g {attrs}><title>{html.escape(title)}</title>{mark}{text}'
                      f'<circle class="hit" cx="{x}" cy="{y}" r="12"/></g>')
 
     base = height - 10
     for p in positions:
         limit = 16 if width_of[p] > NARROW else 8
         parts.append(f'<text class="cg-token" x="{column_x[p] + 6}" y="{base}">'
-                     f'{_esc(_short(token_text(tokens[p]), limit))}<title>position {p} '
-                     f'{_esc(token_text(tokens[p]))}</title></text>')
+                     f'{html.escape(_short(token_text(tokens[p]), limit))}<title>position {p} '
+                     f'{html.escape(token_text(tokens[p]))}</title></text>')
     parts.append("</svg>")
     stats = graph.get("stats", {})
     hidden = stats.get("kept_features", 0) - sum(1 for n in shown if n["kind"] == "feature")
@@ -220,7 +216,7 @@ def graph_view(graph, *, nodes_shown=40, show_errors=False, selected=(), labels=
         '</div>')
     focus = column_x.get(len(tokens) - 1, max(column_x.values(), default=0))
     return (f'<div class="cg-root viz-root"><div class="cg-scroll" data-focus="{focus}">{"".join(parts)}</div>{legend}'
-            f'<div class="cg-note">{_esc(note)} Click a node to read it; shift-click to select several.</div></div>')
+            f'<div class="cg-note">{html.escape(note)} Click a node to read it; shift-click to select several.</div></div>')
 
 
 def _title(node, label, group, tokens):
@@ -255,7 +251,7 @@ def feature_card(node, record=None, labels=None, ablation=None, record_error=Non
             rows.append(("graph influence", f'{node["influence"]:.4g}'))
         if kind == "target":
             rows.append(("probability", f'{node.get("probability", 0):.4f}'))
-        return (f'<div class="cg-root viz-root cg-card"><h4>{_esc(label)}</h4>{_table(rows)}'
+        return (f'<div class="cg-root viz-root cg-card"><h4>{html.escape(label)}</h4>{_table(rows)}'
                 + ('<p class="cg-muted">Error nodes hold what the transcoder failed to reconstruct at this '
                    'layer and position. A large one means the graph is not explaining this part of the '
                    'computation.</p>' if kind == "error" else "") + '</div>')
@@ -271,8 +267,8 @@ def feature_card(node, record=None, labels=None, ablation=None, record_error=Non
         rows.append(("ablation Δ target", ", ".join(f"{d:+.3g}" for d in ablation["deltas"])))
     if record and record.get("activation_frequency") is not None:
         rows.append(("activation freq.", f'{100 * record["activation_frequency"]:.3f}%'))
-    head = (f'<h4>{_esc(label)} <span class="cg-muted">— layer {node["layer"]} · feature {node["feature"]} · '
-            f'{_esc(token_text((tokens or [""] * (node["position"] + 1))[node["position"]]))}</span></h4>')
+    head = (f'<h4>{html.escape(label)} <span class="cg-muted">— layer {node["layer"]} · feature {node["feature"]} · '
+            f'{html.escape(token_text((tokens or [""] * (node["position"] + 1))[node["position"]]))}</span></h4>')
     promotes = (record or {}).get("top_logits") or node.get("promotes") or []
     suppresses = (record or {}).get("bottom_logits") or node.get("suppresses") or []
     body = [head, _table(rows)]
@@ -284,17 +280,17 @@ def feature_card(node, record=None, labels=None, ablation=None, record_error=Non
         body.append('<h5>top-activating contexts <span class="cg-muted">(highlight = strongest token)</span></h5>')
         body.append(_examples(record))
     elif record_error:
-        body.append(f'<p class="cg-muted">Examples unavailable: {_esc(record_error)}</p>')
+        body.append(f'<p class="cg-muted">Examples unavailable: {html.escape(record_error)}</p>')
     return f'<div class="cg-root viz-root cg-card">{"".join(body)}</div>'
 
 
 def _table(rows):
     return ('<table class="cg-facts">' + "".join(
-        f"<tr><th>{_esc(k)}</th><td>{_esc(v)}</td></tr>" for k, v in rows) + "</table>")
+        f"<tr><th>{html.escape(k)}</th><td>{html.escape(v)}</td></tr>" for k, v in rows) + "</table>")
 
 
 def _chips(tokens):
-    return '<div class="cg-chips">' + "".join(f"<span>{_esc(token_text(t))}</span>" for t in tokens) + "</div>"
+    return '<div class="cg-chips">' + "".join(f"<span>{html.escape(token_text(t))}</span>" for t in tokens) + "</div>"
 
 
 def _examples(record, limit=8, window=24):
@@ -314,7 +310,7 @@ def _examples(record, limit=8, window=24):
                 strength = max(0.0, acts[i] / top)
                 style = f' style="--cg-heat:{strength:.2f}"' if strength > 0.02 else ""
                 cls = "peak" if i == peak else "act" if strength > 0.02 else ""
-                spans.append(f'<span class="{cls}"{style}>{_esc(text)}</span>')
+                spans.append(f'<span class="{cls}"{style}>{html.escape(text)}</span>')
             out.append(f'<div class="cg-example">{"… " if start else ""}{"".join(spans)}</div>')
         break
     return "".join(out) or '<p class="cg-muted">No examples recorded.</p>'
@@ -342,17 +338,17 @@ def feature_list(layer, start, width, rows, selected=None, page_id=""):
     ``rows`` holds ``(feature, record, error)`` for each feature on the page.
     """
     end = start + len(rows) - 1
-    out = [f'<div class="cg-root viz-root cf-list" data-page="{_esc(page_id)}"><p class="cg-muted">Layer {layer} · features '
+    out = [f'<div class="cg-root viz-root cf-list" data-page="{html.escape(page_id)}"><p class="cg-muted">Layer {layer} · features '
            f'{start:,}–{end:,} of {width:,}. Click one to read it and steer by it.</p>',
            '<table><thead><tr><th>feature</th><th>fires on</th><th>promotes</th><th>freq.</th></tr></thead><tbody>']
     for feature, record, error in rows:
         cls = ' class="sel"' if feature == selected else ""
         if record is None:
             out.append(f'<tr data-feature="{feature}"{cls}><td>{feature:,}</td>'
-                       f'<td colspan="3" class="cg-muted">{_esc(error or "no record")}</td></tr>')
+                       f'<td colspan="3" class="cg-muted">{html.escape(error or "no record")}</td></tr>')
             continue
-        fires = "".join(f"<span>{_esc(token_text(t))}<em>×{n}</em></span>" for t, n in top_tokens(record))
-        promotes = "".join(f"<span>{_esc(token_text(t))}</span>" for t in (record.get("top_logits") or [])[:4])
+        fires = "".join(f"<span>{html.escape(token_text(t))}<em>×{n}</em></span>" for t, n in top_tokens(record))
+        promotes = "".join(f"<span>{html.escape(token_text(t))}</span>" for t in (record.get("top_logits") or [])[:4])
         frequency = record.get("activation_frequency")
         frequency = "–" if frequency is None else f"{100 * frequency:.3f}%"
         out.append(f'<tr data-feature="{feature}"{cls}><td>{feature:,}</td>'
@@ -368,7 +364,7 @@ def feature_detail(layer=None, feature=None, record=None, error=None):
         return '<div class="cg-root viz-root cg-card cg-empty">Click a feature in the list to read it here.</div>'
     body = [f'<h4>Layer {layer} · feature {feature:,}</h4>']
     if record is None:
-        body.append(f'<p class="cg-muted">Examples unavailable: {_esc(error or "no record")}</p>')
+        body.append(f'<p class="cg-muted">Examples unavailable: {html.escape(error or "no record")}</p>')
         return f'<div class="cg-root viz-root cg-card">{"".join(body)}</div>'
     rows = []
     if record.get("act_max") is not None:
@@ -380,7 +376,7 @@ def feature_detail(layer=None, feature=None, record=None, error=None):
     if fires:
         body.append('<h5>fires on <span class="cg-muted">(peak token of each top example)</span></h5>'
                     + '<div class="cg-chips">' + "".join(
-                        f"<span>{_esc(token_text(t))}<em>×{n}</em></span>" for t, n in fires) + "</div>")
+                        f"<span>{html.escape(token_text(t))}<em>×{n}</em></span>" for t, n in fires) + "</div>")
     if record.get("top_logits"):
         body.append('<h5>promotes (top output logits)</h5>' + _chips(record["top_logits"][:8]))
     if record.get("bottom_logits"):
@@ -478,13 +474,13 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
         sign = "pos" if weight > 0 else "neg"
         parts.append(f'<path class="cg-edge {sign}" d="M{x1},{y1} C{mid},{y1} {mid},{y2} {x2},{y2}" '
                      f'style="stroke-width:{0.8 + 5 * share:.2f};opacity:{0.3 + 0.55 * share:.2f}">'
-                     f'<title>{_esc(bucket_labels.get(a, a))} → {_esc(bucket_labels.get(b, b))}: {weight:+.3g}</title></path>')
+                     f'<title>{html.escape(bucket_labels.get(a, a))} → {html.escape(bucket_labels.get(b, b))}: {weight:+.3g}</title></path>')
     for name, label in ((prompt_bucket, "prompt tokens"), (error_bucket, "unexplained\n(transcoder error)")):
         x, y = place[name]
         cls = "sq" if name == prompt_bucket else "dia"
         mark = (f'<rect class="mark" x="{x - 9}" y="{y - 9}" width="18" height="18" rx="4"/>' if cls == "sq"
                 else f'<path class="mark" d="M{x},{y - 10} L{x + 10},{y} L{x},{y + 10} L{x - 10},{y} Z"/>')
-        lines = "".join(f'<tspan x="{x}" dy="{14 if i else 0}">{_esc(t)}</tspan>'
+        lines = "".join(f'<tspan x="{x}" dy="{14 if i else 0}">{html.escape(t)}</tspan>'
                         for i, t in enumerate(label.split("\n")))
         parts.append(f'<g class="cg-node {"embedding" if cls == "sq" else "error"}">{mark}'
                      f'<text class="cg-axis" text-anchor="middle" y="{y + 26}">{lines}</text></g>')
@@ -505,11 +501,11 @@ def group_view(graph, groups, effects=None, labels=None, decode=None):
                 tone = "suppresses"
         count = len(groups[name])
         parts.append(
-            f'<g class="cg-group {tone}" data-group="{_esc(name)}">'
+            f'<g class="cg-group {tone}" data-group="{html.escape(name)}">'
             f'<rect x="{x}" y="{y}" width="{box_w}" height="{box_h}" rx="8"/>'
-            f'<text class="cg-group-name" x="{x + box_w / 2}" y="{y + 20}">{_esc(_short(name, 30))}</text>'
+            f'<text class="cg-group-name" x="{x + box_w / 2}" y="{y + 20}">{html.escape(_short(name, 30))}</text>'
             f'<text class="cg-group-sub" x="{x + box_w / 2}" y="{y + 37}">{count} feature{"s" * (count != 1)}</text>'
-            f'<text class="cg-group-sub" x="{x + box_w / 2}" y="{y + 53}">{_esc(line)}</text></g>')
+            f'<text class="cg-group-sub" x="{x + box_w / 2}" y="{y + 53}">{html.escape(line)}</text></g>')
     parts.append(_token_bars(effects, tokens_x, decode))
     parts.append("</svg>")
     legend = ('<div class="cg-legend"><span><i class="dot promotes"></i>boosting raises P(pivot)</span>'
@@ -545,7 +541,7 @@ def _token_bars(effects, x, decode):
         for token in ids[:MAX_DISPLAY_TOKENS]:
             p = float(baseline.get(token, baseline.get(str(token), 0.0)))
             length = 110 * p / biggest
-            parts.append(f'<text class="cg-label" x="{x}" y="{y + 4}">{_esc(_short(token_text(decode(token)), 12))}</text>'
+            parts.append(f'<text class="cg-label" x="{x}" y="{y + 4}">{html.escape(_short(token_text(decode(token)), 12))}</text>'
                          f'<rect class="bar {cls}" x="{x + 96}" y="{y - 6}" width="{max(length, 1.5):.1f}" height="11" rx="2"/>'
                          f'<text class="cg-tick" x="{x + 100 + length:.1f}" y="{y + 4}">{p:.3f}</text>')
             y += 22
@@ -567,9 +563,9 @@ def group_card(name, members, graph, effects=None, labels=None, decode=None):
     decode = decode or str
     nodes = {n["id"]: n for n in graph["nodes"]}
     visible_members = [m for m in members if m in nodes]
-    chips = "".join(f'<span title="{_esc(_short(m, 96))}">{_esc(_short(node_label(nodes[m], labels), MAX_CHIP_LABEL))}</span>'
+    chips = "".join(f'<span title="{html.escape(_short(m, 96))}">{html.escape(_short(node_label(nodes[m], labels), MAX_CHIP_LABEL))}</span>'
                     for m in visible_members[:MAX_GROUP_CHIPS])
-    body = [f'<h4>{_esc(_short(name, 200))}</h4><div class="cg-chips">{chips}</div>']
+    body = [f'<h4>{html.escape(_short(name, 200))}</h4><div class="cg-chips">{chips}</div>']
     if len(visible_members) > MAX_GROUP_CHIPS:
         body.append(f'<p class="cg-muted">Showing {MAX_GROUP_CHIPS} of {len(visible_members):,} features.</p>')
     effect = (effects or {}).get("groups", {}).get(name)
@@ -607,7 +603,7 @@ def _multipliers(effects, after, decode):
             share = 50 * math.log(ratio) / span
             left = 50 + min(share, 0)
             bar = f'<i class="{cls}" style="left:{left:.1f}%;width:{abs(share):.1f}%"></i>'
-        rows.append(f'<div class="cg-mult"><span>{_esc(_short(token_text(decode(token)), 80))}</span>'
+        rows.append(f'<div class="cg-mult"><span>{html.escape(_short(token_text(decode(token)), 80))}</span>'
                     f'<b>{bar}<u></u></b><em>{_times(ratio)}</em></div>')
     total = len(effects["pivot"]) + len(effects["alternatives"])
     if total > len(ids):

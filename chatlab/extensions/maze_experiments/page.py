@@ -18,8 +18,8 @@ from .runner import (RECOVERY_DEFAULTS, TERMINAL, Episode, check_interruption_te
                      context_messages, fork_token_edit, from_payload, insert_outcome, past_load_limit, read_run_file,
                      stream_episode)
 from .team import MAX_AGENTS, TEAM_GOALS, format_agents, parse_agents
-from .team_views import (HEADERS as TEAM_HEADERS, MARKDOWN, insert_mark, mail_text, response_line, team_board,
-                         team_history_rows, team_status, team_timeline)
+from .team_views import (HEADERS as TEAM_HEADERS, MARKDOWN, board_grid, cell_center, cell_points, insert_mark, mail_text,
+                         response_line, team_board, team_history_rows, team_status, team_timeline, waypoint_mark)
 from .trials import prepare_trial, read_trials
 from chatlab.extension_api import TokenInspector, icon_classes, read_steering_vector
 
@@ -147,62 +147,47 @@ def board(ep, index=None, reveal=False, animate=False, map_round=None):
     events = [e for e in ep.events if e.get("turn", -1) <= index] if index is not None else ep.events
     accepted = [e for e in events if e["accepted"]]
     position = tuple(accepted[-1]["after"]) if accepted else maze.start
-    size = maze.size
-    cell, pad = 56, 28
-    total = cell * size + 2 * pad
-    def center(point):
-        return pad + (point[1] + .5) * cell, pad + (point[0] + .5) * cell
-    def points(path):
-        return " ".join(f"{x},{y}" for x, y in map(center, path))
-    parts = [f'<svg viewBox="0 0 {total} {total}" role="img" aria-label="{size} by {size} maze. Character at row {position[0]}, column {position[1]}.">']
-    for r, row in enumerate(maze.grid):
-        for c, value in enumerate(row):
-            fill = "#78350f" if (r, c) in closed else "#27344a" if value == "#" else "#fff"
-            parts.append(f'<rect x="{pad+c*cell+2}" y="{pad+r*cell+2}" width="52" height="52" rx="7" fill="{fill}"/>')
-    for i in range(size):
-        parts.append(f'<text x="{pad+(i+.5)*cell}" y="17" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
-        parts.append(f'<text x="12" y="{pad+(i+.5)*cell+4}" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
+    parts = board_grid(maze, closed, f"Character at row {position[0]}, column {position[1]}")
     if reveal:
         # A changing map is drawn from where the character stands, because a
         # closure behind it can leave the route it began on no longer the one
         # in front of it.
         route = maze.route(position) if isinstance(maze, ChangingMaze) else maze.route()
-        parts.append(f'<polyline points="{points(route)}" fill="none" stroke="#b4bdcc" stroke-width="4" stroke-dasharray="3 8"/>')
+        parts.append(f'<polyline points="{cell_points(route)}" fill="none" stroke="#b4bdcc" stroke-width="4" stroke-dasharray="3 8"/>')
     for e in accepted:
         supplied = e["source"] == "supplied"
         dash = 'stroke-dasharray="5 6"' if supplied else ''
-        parts.append(f'<polyline points="{points([e["before"],e["after"]])}" fill="none" stroke="{"#94a3b8" if supplied else "#6366f1"}" stroke-width="6" stroke-linecap="round" {dash}/>')
-    x, y = center(maze.start)
+        parts.append(f'<polyline points="{cell_points([e["before"],e["after"]])}" fill="none" stroke="{"#94a3b8" if supplied else "#6366f1"}" stroke-width="6" stroke-linecap="round" {dash}/>')
+    x, y = cell_center(maze.start)
     parts.append(f'<text x="{x}" y="{y+5}" text-anchor="middle" fill="#64748b" font-size="14" font-weight="700">S</text>')
-    x, y = center(maze.goal)
+    x, y = cell_center(maze.goal)
     parts.append(f'<circle cx="{x}" cy="{y}" r="17" fill="#d1fae5"/><text x="{x}" y="{y+7}" text-anchor="middle" font-size="23" fill="#047857">★</text>')
     waypoint, steer_cell = ep.config.get("waypoint"), (ep.config.get("steer_when") or {}).get("cell")
     if steer_cell is not None:
-        x, y = center(steer_cell)
+        x, y = cell_center(steer_cell)
         parts.append(f'<rect x="{x-24}" y="{y-24}" width="48" height="48" rx="9" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-dasharray="5 4"/>')
     if waypoint is not None:
-        x, y = center(waypoint)
-        parts.append(f'<text x="{x}" y="{y+8}" text-anchor="middle" font-size="22" fill="#0f766e">⚑</text>')
+        parts.append(waypoint_mark(waypoint))
     if ep.interrupted and (index is None or index >= ep.intervention_turn):
-        x, y = center(ep.turns[ep.intervention_turn]["position_before"])
+        x, y = cell_center(ep.turns[ep.intervention_turn]["position_before"])
         parts.append(f'<circle cx="{x}" cy="{y}" r="23" stroke="#f59e0b" stroke-width="3" fill="none"/>')
     start = ep.steer_turn
     if start is not None and (index is None or index >= start):
-        x, y = center(ep.turns[start]["position_before"])
+        x, y = cell_center(ep.turns[start]["position_before"])
         parts.append(f'<circle cx="{x}" cy="{y}" r="27" stroke="#7c3aed" stroke-width="3" fill="none"/>')
     # Shown from the response that read the message, as the interruption's
     # ring is, at the cell the character stood on when it landed.
     for insert in ep.config.get("context_inserts", ()):
         if index is not None and index < insert["before_turn"]:
             continue
-        parts.append(insert_mark(*center(insert["position"]), insert.get("advised_direction")))
-    x, y = center(position)
+        parts.append(insert_mark(*cell_center(insert["position"]), insert.get("advised_direction")))
+    x, y = cell_center(position)
     motion = ""
     # Only the displayed response's own move animates. A response that was
     # rejected or made no call leaves the character where it was, and replaying
     # an earlier turn's hop would show movement that this response never made.
     if animate and accepted and accepted[-1]["source"] == "model" and accepted[-1].get("turn") == index:
-        px, py = center(accepted[-1]["before"])
+        px, py = cell_center(accepted[-1]["before"])
         motion = f'<animateTransform attributeName="transform" type="translate" from="{px} {py}" to="{x} {y}" dur="0.3s" fill="freeze"/>'
     parts.append(f'<g transform="translate({x} {y})">{motion}<circle r="17" fill="#4f46e5" stroke="white" stroke-width="3"/><circle cx="-5" cy="-2" r="2.5" fill="white"/><circle cx="5" cy="-2" r="2.5" fill="white"/><path d="M -5 6 Q 0 10 5 6" stroke="white" fill="none" stroke-width="2"/></g></svg>')
     legend = ['<span>● Character / model path</span>', '<span>┄ Supplied moves</span>', '<span>★ Destination</span>',
