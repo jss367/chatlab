@@ -9,15 +9,12 @@ from types import SimpleNamespace
 import gradio as gr
 
 from chatlab.extension_api import TokenInspector
-from chatlab.extensions.maze_experiments.maze import Maze
 from chatlab.extensions.maze_experiments.page import build_page, export_run
 from chatlab.extensions.maze_experiments.reasoning_check import read_responses
-from chatlab.extensions.maze_experiments.runner import (Episode, context_messages, fork_token_edit, from_payload,
-                                                        stream_episode)
-from maze_support import Manager, call, scored
+from chatlab.extensions.maze_experiments.runner import context_messages, fork_token_edit, from_payload, stream_episode
+from maze_support import CORRIDOR, Manager, call, saved, scored, team
 from ui_support import listeners_by_name
 
-CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
 ID = CORRIDOR.tool_id()
 
 
@@ -25,14 +22,6 @@ def step(direction):
     # Recorded as its own bytes, so the fork can check the IDs spell the text.
     text = "\n" + call(direction, maze_id=ID)[0]
     return text, list(text.encode()) + [0]
-
-
-def team(**config):
-    return Episode(CORRIDOR, dict(dict(agents=2, communication=False, team_goal="all"), **config))
-
-
-def saved(ep):
-    return json.loads(json.dumps(ep.payload()))
 
 
 def fork(ep, turn, token, text, manager):

@@ -128,20 +128,38 @@ class SteeringManager(Manager):
 
 
 MAZE_ID = MAZE.tool_id()
+CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
+
+
+def say(text):
+    return text, list(text.encode()) + [0]
 
 
 def call(direction, message=None, maze_id=MAZE_ID):
     args = {"maze_id": maze_id, "direction": direction}
     if message is not None:
         args["message"] = message
-    text = "<tool_call>\n" + json.dumps({"name": "move", "arguments": args}) + "\n</tool_call>"
-    return text, list(text.encode()) + [0]
+    return say("<tool_call>\n" + json.dumps({"name": "move", "arguments": args}) + "\n</tool_call>")
+
+
+def reply(maze, direction):
+    """One response that calls move, as the fixture manager hands it back."""
+    return call(direction, maze_id=maze.tool_id())
 
 
 def team_episode(maze, config):
     """A team run of two agents unless ``config`` names another count."""
     from chatlab.extensions.maze_experiments.runner import Episode
     return Episode(maze, {"agents": 2, **config})
+
+
+def team(maze=CORRIDOR, **config):
+    """A team that cannot talk and has to arrive together, unless ``config`` says otherwise."""
+    return team_episode(maze, dict(communication=False, team_goal="all") | config)
+
+
+def saved(ep):
+    return json.loads(json.dumps(ep.payload()))
 
 
 # Every scenario control, as the pane lists them for prepare_episode: the

@@ -15,10 +15,9 @@ from chatlab.extensions.maze_experiments.runner import from_payload, stream_epis
 from chatlab.extensions.maze_experiments.team_views import response_line, team_board, team_status, team_timeline
 from maze_support import Manager, output_index, scenario, scored, team_episode
 from maze_support import SteeringManager, VECTOR
-from maze_support import call
+from maze_support import CORRIDOR, call, saved
 from ui_support import listeners_by_name
 
-CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
 ROOM = Maze(("...", "...", "..."), (0, 0), (0, 2))
 CONFIG = dict(team_goal="all", steering=VECTOR, steer_when={"cell": [0, 1]},
               required_checkpoint=[0, 1], steer_responses=2)
@@ -30,10 +29,6 @@ WALK = ["east", "west", "east", "east", "west", "east", "west", "east",
 
 def replies(walk):
     return [call(direction, maze_id=CORRIDOR.tool_id()) for direction in walk]
-
-
-def saved(ep):
-    return json.loads(json.dumps(ep.payload()))
 
 
 def run(walk=WALK, **changes):

@@ -7,7 +7,7 @@ from chatlab import app
 from chatlab import settings
 import settings_sandbox
 from chatlab import themes
-from ui_support import css_rule, css_rule_list, listeners_named
+from ui_support import contrast, css_rule, css_rule_list, listeners_named, relative_luminance
 
 
 def setUpModule():
@@ -19,24 +19,6 @@ def tearDownModule():
 
 
 HEX = re.compile(r"^#[0-9a-f]{6}$")
-
-
-def _relative_luminance(color: str) -> float:
-    """WCAG's luminance for a ``#rrggbb`` color."""
-
-    channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
-    linear = [
-        value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
-        for value in channels
-    ]
-    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
-
-
-def _contrast(one: str, other: str) -> float:
-    lighter, darker = sorted(
-        (_relative_luminance(one), _relative_luminance(other)), reverse=True
-    )
-    return (lighter + 0.05) / (darker + 0.05)
 
 
 class RampTests(unittest.TestCase):
@@ -65,7 +47,7 @@ class RampTests(unittest.TestCase):
             for ramp in ("primary", "neutral"):
                 with self.subTest(theme=name, ramp=ramp):
                     luminances = [
-                        _relative_luminance(color) for color in getattr(theme, ramp)
+                        relative_luminance(color) for color in getattr(theme, ramp)
                     ]
                     self.assertEqual(luminances, sorted(luminances, reverse=True))
 
@@ -76,17 +58,17 @@ class RampTests(unittest.TestCase):
         for name, theme in themes.THEMES.items():
             with self.subTest(theme=name):
                 self.assertGreaterEqual(
-                    _contrast(theme.ramp("primary")[themes.BUTTON_STEP], "#ffffff"), 4.5
+                    contrast(theme.ramp("primary")[themes.BUTTON_STEP], "#ffffff"), 4.5
                 )
 
     def test_body_text_carries_against_the_paper_it_is_drawn_on(self):
         for name, theme in themes.THEMES.items():
             neutral = theme.ramp("neutral")
             with self.subTest(theme=name, mode="light"):
-                self.assertGreaterEqual(_contrast(neutral[800], theme.paper), 4.5)
+                self.assertGreaterEqual(contrast(neutral[800], theme.paper), 4.5)
             with self.subTest(theme=name, mode="dark"):
                 self.assertGreaterEqual(
-                    _contrast(neutral[100], neutral[themes.DARKEST_STEP]), 4.5
+                    contrast(neutral[100], neutral[themes.DARKEST_STEP]), 4.5
                 )
 
     def test_the_default_theme_is_the_one_drawn_from_the_mark(self):

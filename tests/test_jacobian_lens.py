@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import unittest
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from unittest import mock
 
@@ -25,24 +26,11 @@ from chatlab.jacobian_lens import FittedLens
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
 from mlx_support import needs_mlx
-from tiny_tokenizer import build
 from tiny_tokenizer import build as build_tokenizer
+from torch_support import tiny_manager
 
 
-def small_manager(config_type=LlamaConfig, model_type=LlamaForCausalLM):
-    torch.manual_seed(42)
-    manager = ModelManager()
-    manager.tokenizer = build()
-    config = config_type(
-        vocab_size=len(manager.tokenizer), hidden_size=16, intermediate_size=32,
-        num_hidden_layers=3, num_attention_heads=2, num_key_value_heads=2,
-        head_dim=8, max_position_embeddings=128,
-        bos_token_id=0, eos_token_id=0, pad_token_id=0,
-    )
-    manager.model = model_type(config).eval()
-    manager.model_id = "test/tiny-decoder"
-    manager.precision = "full"
-    return manager
+small_manager = partial(tiny_manager, seed=42, layers=3, heads=2)
 
 
 class JacobianLensTests(unittest.TestCase):

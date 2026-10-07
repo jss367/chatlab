@@ -8,7 +8,8 @@ builds, with no module attribute to compare against.
 
 The stylesheet is read the same way: as rules, selector to declarations,
 rather than as text, so an assertion about what a rule says holds however
-the rule happens to be laid out.
+the rule happens to be laid out, and its colors are measured the way WCAG
+measures them.
 """
 
 import re
@@ -267,3 +268,23 @@ def css_media(css: str) -> set[str]:
         for rule in css_rule_list(css)
         if rule.media is not None and not rule.media.startswith("@")
     }
+
+
+def relative_luminance(color: str) -> float:
+    """WCAG's luminance for a ``#rrggbb`` color."""
+
+    channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+    linear = [
+        value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+        for value in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def contrast(one: str, other: str) -> float:
+    """WCAG's contrast ratio between two ``#rrggbb`` colors."""
+
+    lighter, darker = sorted(
+        (relative_luminance(one), relative_luminance(other)), reverse=True
+    )
+    return (lighter + 0.05) / (darker + 0.05)

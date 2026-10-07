@@ -19,7 +19,7 @@ from chatlab.ui import attention_trace, runtime
 from chatlab.ui.panel import new_metrics_generation, restore_chat_metrics_generation
 from fakes import FakeTokenizer, SentencePieceTokenizer, lens_manager
 from mlx_support import needs_mlx, tiny_llama
-from test_kv_cache import tiny_manager
+from torch_support import tiny_manager
 
 
 def full_attention(manager, ids) -> np.ndarray:
@@ -639,12 +639,13 @@ class TraceHandlerTests(unittest.TestCase):
 
 class PromptEditTraceTests(unittest.TestCase):
     def setUp(self):
-        import test_prompt_edit
+        import prompt_edit_support
+        import settings_sandbox
 
-        self.edits = test_prompt_edit
-        test_prompt_edit.setUpModule()
-        self.addCleanup(test_prompt_edit.tearDownModule)
-        self.fixture = test_prompt_edit.PromptEditTests()
+        self.edits = prompt_edit_support
+        settings_sandbox.start()
+        self.addCleanup(settings_sandbox.stop)
+        self.fixture = prompt_edit_support.PromptEditFixture()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
 

@@ -12,7 +12,6 @@ from unittest import mock
 import gradio as gr
 import numpy as np
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM
 
 from chatlab import jacobian_lens, model_inspection, steering
 from chatlab.extension_api import (ExtensionContext, ModelService, NavigationService, ProjectionCancelled,
@@ -21,29 +20,13 @@ from chatlab.extensions.direction_edits import experiment, files, page as edits_
 from chatlab.extensions.direction_edits.page import Runs, build_page
 from chatlab.extensions.probes import probe as probes
 from chatlab.extensions.registry import load_enabled
-from chatlab.model_runtime import ModelManager
-from tiny_tokenizer import build
+from torch_support import tiny_manager
 from ui_support import handlers_by_name
 
 MODEL = "test/tiny-decoder"
 WIDTH, BLOCKS = 16, 4
 PASSAGE = "the cat sat on the mat and the dog sat on the log"
 LENS_BLOCKS = (1, 2, 3)
-
-
-def tiny_manager():
-    torch.manual_seed(0)
-    manager = ModelManager()
-    manager.tokenizer = build()
-    config = LlamaConfig(
-        vocab_size=len(manager.tokenizer), hidden_size=WIDTH, intermediate_size=32,
-        num_hidden_layers=BLOCKS, num_attention_heads=2, num_key_value_heads=2,
-        head_dim=8, max_position_embeddings=128, bos_token_id=0, eos_token_id=0, pad_token_id=0,
-    )
-    manager.model = LlamaForCausalLM(config).eval()
-    manager.model_id = MODEL
-    manager.precision = "full"
-    return manager
 
 
 def unit_rows(seed=1):
@@ -250,7 +233,7 @@ class LensFixture(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.directory = Path(directory.name)
-        self.manager = tiny_manager()
+        self.manager = tiny_manager(seed=0, layers=BLOCKS, heads=2)
         self.service = ModelService(lambda: self.manager)
         torch.manual_seed(3)
         self.matrices = {layer: torch.randn(WIDTH, WIDTH) for layer in LENS_BLOCKS}

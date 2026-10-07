@@ -23,7 +23,7 @@ from chatlab.token_metrics import (
     UNSCORED_FIRST_TOKEN,
     unscored_metric,
 )
-from ui_support import css_rule_list
+from ui_support import contrast, css_rule_list
 
 
 class TokenMetricTests(unittest.TestCase):
@@ -340,15 +340,6 @@ def _linear(fill: str) -> tuple[float, float, float]:
     )
 
 
-def _contrast(fill: str, other: str) -> float:
-    weights = (0.2126, 0.7152, 0.0722)
-    luminances = sorted(
-        sum(weight * channel for weight, channel in zip(weights, _linear(color)))
-        for color in (fill, other)
-    )
-    return (luminances[1] + 0.05) / (luminances[0] + 0.05)
-
-
 def _oklab(linear: tuple[float, float, float]) -> tuple[float, float, float]:
     red, green, blue = linear
     long = (0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue) ** (1 / 3)
@@ -385,7 +376,7 @@ class PaletteTests(unittest.TestCase):
         for fill in sorted(fills):
             with self.subTest(fill=fill):
                 self.assertGreaterEqual(
-                    _contrast(fill, STRIP_INK), MIN_INK_CONTRAST, fill
+                    contrast(fill, STRIP_INK), MIN_INK_CONTRAST, fill
                 )
 
     def test_rank_fills_stay_apart_in_any_pairing(self):

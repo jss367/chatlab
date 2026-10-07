@@ -6,12 +6,12 @@ from chatlab.extension_api import TokenInspector
 from chatlab.extensions.maze_experiments.dynamic_maze import changing
 from chatlab.extensions.maze_experiments.maze import Maze
 from chatlab.extensions.maze_experiments.page import prompt_reading, views
-from chatlab.extensions.maze_experiments.runner import Episode, context_messages, from_payload, stream_episode
+from chatlab.extensions.maze_experiments.runner import context_messages, from_payload, stream_episode
 from chatlab.extensions.maze_experiments.team_views import team_board
-from maze_support import Manager, call, scored
+import maze_support
+from maze_support import CORRIDOR, Manager, call, saved, scored
 
 ROOM = changing(Maze(("...", "...", "..."), (0, 0), (0, 2)))
-CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
 
 
 def step(direction, maze=ROOM, message=None):
@@ -19,11 +19,7 @@ def step(direction, maze=ROOM, message=None):
 
 
 def team(maze=ROOM, **config):
-    return Episode(maze, dict(dict(agents=2, communication=False, team_goal="all"), **config))
-
-
-def saved(ep):
-    return json.loads(json.dumps(ep.payload()))
+    return maze_support.team(maze, **config)
 
 
 def last_reply(manager, index):
