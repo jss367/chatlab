@@ -109,6 +109,29 @@ class EditDeviceTests(unittest.TestCase):
         torch.testing.assert_close(changed[0, 1], torch.full((WIDTH,), 100.0, dtype=torch.float16))
         self.assertTrue(torch.equal(changed[0, [0, 2]], hidden[0, [0, 2]]))
 
+    def test_edits_refuse_values_that_overflow_the_activations(self):
+        hidden = torch.zeros(1, 3, WIDTH, dtype=torch.float16)
+        unit = unit_rows()
+        for mode in (experiment.CLAMP, experiment.ADD):
+            edit = inputs()["edit"] | {"mode": mode, "tokens": [1, 3]}
+            with self.subTest(mode=mode):
+                hooks = experiment.Hooks(None, edit | {"value": 1e7}, unit, 0)
+                with self.assertRaisesRegex(ValueError, "overflows.*activation precision"):
+                    hooks.edited(1, None, {})(hidden)
+                hooks = experiment.Hooks(None, edit | {"value": 10.0}, unit, 0)
+                changed = hooks.edited(1, None, {})(hidden)
+                self.assertTrue(torch.isfinite(changed).all())
+        # The random control moves by the recorded sizes, so it is held to the same limit.
+        hooks = experiment.Hooks(None, inputs()["edit"] | {"tokens": [1, 3]}, unit, 0)
+        with self.assertRaisesRegex(ValueError, "overflows.*activation precision"):
+            hooks.control(1, np.full(3, 1e7), unit[2])(hidden)
+        # Activations already infinite before the edit are not the edit's doing.
+        broken = hidden.clone()
+        broken[0, 0, 0] = float("inf")
+        changed = experiment.Hooks(None, inputs()["edit"] | {"mode": experiment.ADD, "value": 1.0,
+                                                             "tokens": [1, 3]}, unit, 0).edited(1, None, {})(broken)
+        self.assertTrue(torch.isfinite(changed[0, 1:]).all())
+
     def test_recording_moves_sizes_to_cpu_before_widening(self):
         # Emulate a device that supports the float32 edit but refuses float64,
         # so this regression runs on CPU-only CI as well as Apple hardware.

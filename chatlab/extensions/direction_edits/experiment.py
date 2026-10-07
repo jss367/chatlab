@@ -215,7 +215,11 @@ class Hooks:
             # MPS cannot hold float64 tensors; widen only after leaving the device.
             record.setdefault(layer, size.cpu().double().numpy())
         step = torch.as_tensor(along, dtype=torch.float32, device=hidden.device)
-        out[0, rows.start:stop] = (x + size[:, None] * step[None]).to(hidden.dtype)
+        moved = (x + size[:, None] * step[None]).to(hidden.dtype)
+        # A clamp or add value the activations cannot hold would pass on infinities.
+        if not torch.isfinite(moved[torch.isfinite(x)]).all().item():
+            raise ValueError("The edit overflows this model's activation precision; use a smaller value.")
+        out[0, rows.start:stop] = moved
         return out
 
     def edited(self, layer, reference, record):
