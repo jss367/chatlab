@@ -195,7 +195,10 @@ class Hooks:
         out = hidden.clone()
         rows = self.columns(self.injection["tokens"])
         vector = torch.tensor(self.injection["vector"]["vector"], dtype=torch.float64) * self.injection["strength"]
-        out[0, rows] = hidden[0, rows] + vector.to(device=hidden.device, dtype=hidden.dtype)
+        vector = vector.to(device=hidden.device, dtype=hidden.dtype)
+        if not torch.isfinite(vector).all().item():
+            raise ValueError("The scaled injection vector overflows this model's activation precision.")
+        out[0, rows] = hidden[0, rows] + vector
         return out
 
     def _move(self, hidden, layer, sizes_for, along, record=None):

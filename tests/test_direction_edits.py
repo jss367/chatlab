@@ -1,5 +1,6 @@
 """Direction edits on a small real decoder, with synthetic directions, vector and lens."""
 
+import copy
 import json
 import tempfile
 import unittest
@@ -92,6 +93,22 @@ def hooks_left(manager):
 
 
 class EditDeviceTests(unittest.TestCase):
+    def test_injection_refuses_scaled_and_cast_overflow(self):
+        hidden = torch.zeros(1, 3, WIDTH, dtype=torch.float16)
+        for entry, strength in ((1e5, 1.0), (1.0, 1e5), (1e308, 1e308)):
+            with self.subTest(entry=entry, strength=strength):
+                injection = {"vector": {"vector": [entry] * WIDTH}, "strength": strength, "tokens": [1, 3]}
+                hooks = experiment.Hooks(injection, None, None, 0)
+                with self.assertRaisesRegex(ValueError, "overflows.*activation precision"):
+                    hooks._inject(hidden)
+                self.assertTrue(torch.equal(hidden, torch.zeros_like(hidden)))
+        # A large vector with a small, representable product must remain usable.
+        hooks = experiment.Hooks({"vector": {"vector": [1e5] * WIDTH}, "strength": 1e-3,
+                                  "tokens": [2, 2]}, None, None, 0)
+        changed = hooks._inject(hidden)
+        torch.testing.assert_close(changed[0, 1], torch.full((WIDTH,), 100.0, dtype=torch.float16))
+        self.assertTrue(torch.equal(changed[0, [0, 2]], hidden[0, [0, 2]]))
+
     def test_recording_moves_sizes_to_cpu_before_widening(self):
         # Emulate a device that supports the float32 edit but refuses float64,
         # so this regression runs on CPU-only CI as well as Apple hardware.
@@ -579,6 +596,67 @@ class PageTests(LensFixture):
             list(self.fn["run_experiment"]("owner", *controls, "neutral", "", *[""] * 10))
         self.assertIsNone(self.manager.claim_generation())
         self.manager.release_generation()
+
+    def test_malformed_results_are_rejected_before_rendering(self):
+        self.import_lens()
+        value = inputs(edit=inputs()["edit"] | {"random_control": True},
+                       readout={"word": " sat", "tokens": [1, 8], "blocks": [1, 3]},
+                       differences=experiment.parse_differences("focus = focus - neutral"))
+        with self.service.open_session() as session:
+            result, _ = run(session, value)
+        missing = (
+            ("model",), ("model", "model_id"), ("edited_blocks",), ("target",), ("lens",),
+            ("inputs", "edit"), ("inputs", "edit", "random_control"), ("inputs", "injection"),
+            ("inputs", "readout"), ("target", "tokens"), ("target", "token_ids"),
+            ("lens", "name"), ("lens", "n_prompts"), ("conditions", 0, "lens"),
+            ("conditions", 0, "lens", "edit"), ("conditions", 0, "recovery", "random"),
+            ("conditions", 0, "coordinates", "random"), ("differences", 0, "edit_change"),
+            ("differences", 0, "random_change"), ("differences", 0, "no_edit"),
+        )
+        invalid = (
+            (("created",), 10**400),
+            (("inputs", "conditions"), [None]), (("inputs", "edit", "blocks"), [0, 10**10]),
+            (("edited_blocks",), []), (("edited_blocks",), [True]),
+            (("passage_tokens", 0), None), (("conditions", 0, "coordinates", "reference"), []),
+            (("conditions", 0, "coordinates", "edited", 1), None),
+            (("conditions", 0, "coordinates", "reference", 0, 0), float("nan")),
+            (("conditions", 0, "coordinates", "reference", 0, 0), 1e308),
+            (("conditions", 0, "recovery", "random"), []),
+            (("conditions", 1, "recovery", "edited"), []),
+            (("conditions", 0, "lens", "edit"), float("inf")),
+            (("differences", 0, "edit_change"), "bad"), (("target", "tokens", 0), None),
+            (("target",), None), (("lens",), None),
+        )
+        path = self.directory / "malformed.json"
+        for keys, replacement in [(keys, ...) for keys in missing] + list(invalid):
+            with self.subTest(keys=keys, replacement=replacement):
+                bad = copy.deepcopy(result)
+                parent = bad
+                for key in keys[:-1]:
+                    parent = parent[key]
+                if replacement is ...:
+                    del parent[keys[-1]]
+                else:
+                    parent[keys[-1]] = replacement
+                path.write_text(json.dumps(bad))
+                with self.assertRaisesRegex(gr.Error, "could not be opened"):
+                    self.fn["open_result"](str(path), "owner")
+
+    def test_sparse_results_without_a_lens_reopen(self):
+        directions = direction_set()
+        directions["directions"] = directions["directions"][1:3]
+        for random in (False, True):
+            with self.subTest(random=random):
+                value = inputs(directions=directions, edit=inputs()["edit"] | {"random_control": random})
+                with self.service.open_session() as session:
+                    result, _ = run(session, value)
+                if not random:
+                    result["model"]["precision"] = None  # Also accepted by transformers_model().
+                path = self.directory / "sparse.json"
+                path.write_text(files.dumps(result))
+                reopened = self.fn["open_result"](str(path), "owner")
+                self.assertEqual(reopened[1], json.loads(path.read_text()))
+                self.assertEqual(reopened[6:8], ("", ""))
 
 
 if __name__ == "__main__":

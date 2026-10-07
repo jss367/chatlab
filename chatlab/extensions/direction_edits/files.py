@@ -131,42 +131,133 @@ def dumps(result):
     return json.dumps(result, separators=(",", ":"), allow_nan=False)
 
 
+def _finite(value, *, optional=False):
+    if optional and value is None:
+        return True
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _token_list(ids, tokens, what):
+    if (not isinstance(ids, list) or not ids or not all(type(token) is int and token >= 0 for token in ids)
+            or not isinstance(tokens, list) or len(tokens) != len(ids)
+            or not all(isinstance(token, str) for token in tokens)):
+        raise ValueError(f"The result needs matching {what} token IDs and text.")
+
+
 def normalize_result(value):
-    """Check a saved result before it is shown. It is only ever read back, never rerun."""
+    """Validate every field and shape the saved-result renderer reads before accepting an upload."""
+    from . import experiment
+
     if not isinstance(value, dict) or value.get("format") != RESULT_FORMAT:
         raise ValueError(f"Expected a {RESULT_FORMAT} JSON object.")
     created = value.get("created")
-    if type(created) not in (int, float) or not 0 <= created <= probes.LATEST_CREATED:
+    if not _finite(created) or not 0 <= created <= probes.LATEST_CREATED:
         raise ValueError("The result's creation time is not a date between 1970 and 3000.")
-    inputs, conditions = value.get("inputs"), value.get("conditions")
-    passage = value.get("passage_ids")
-    tokens = value.get("passage_tokens")
-    if (not isinstance(inputs, dict) or not isinstance(conditions, list) or not conditions
-            or not isinstance(passage, list) or not isinstance(tokens, list) or len(passage) != len(tokens)):
-        raise ValueError("The result needs its inputs, conditions and passage tokens.")
-    normalize_directions(inputs.get("directions"))
+    inputs = value.get("inputs")
+    if not isinstance(inputs, dict) or not {"injection", "edit", "readout"} <= inputs.keys():
+        raise ValueError("The result needs its injection, edit and readout settings.")
+    try:
+        checked = experiment.normalize_inputs(inputs)
+    except (AttributeError, KeyError, TypeError, OverflowError) as error:
+        raise ValueError("The result's input settings are malformed.") from error
+    model = value.get("model")
+    if not isinstance(model, dict):
+        raise ValueError("The result needs its model metadata.")
+    _text(model.get("model_id"), "result's model_id", 300)
+    _text(model.get("model_revision"), "result's model revision", optional=True)
+    if "precision" not in model or model["precision"] not in (*PRECISIONS, None):
+        raise ValueError("The result needs its model precision.")
+    passage, tokens = value.get("passage_ids"), value.get("passage_tokens")
+    _token_list(passage, tokens, "passage")
+    if len(passage) > experiment.READ_LIMIT:
+        raise ValueError("The result's passage exceeds the reading limit.")
+    edit, readout = checked["edit"], checked["readout"]
+    if not isinstance(inputs["edit"], dict) or type(inputs["edit"].get("random_control")) is not bool:
+        raise ValueError("The result needs a boolean random-control setting.")
+    if edit["blocks"][1] >= MAX_BLOCKS:
+        raise ValueError("The result's edit blocks exceed the block limit.")
+    random = edit["random_control"]
+    spans = [edit["tokens"]]
+    if checked["injection"] is not None:
+        spans.append(checked["injection"]["tokens"])
+    if readout is not None:
+        spans.append(readout["tokens"])
+    if any(span[1] > len(passage) for span in spans):
+        raise ValueError("The result's token settings extend past its passage.")
+    edited = value.get("edited_blocks")
+    if (not isinstance(edited, list) or not edited or not all(type(block) is int for block in edited)
+            or edited != list(range(edit["blocks"][0], edit["blocks"][1] + 1))):
+        raise ValueError("The result needs its edited blocks matching the edit settings.")
+    target, lens = value.get("target"), value.get("lens")
+    if not {"target", "lens"} <= value.keys():
+        raise ValueError("The result needs its target and lens fields, null when no readout was requested.")
+    if readout is None:
+        if target is not None or lens is not None:
+            raise ValueError("A result without a readout cannot have a target or lens.")
+    else:
+        if not isinstance(target, dict) or target.get("word") != readout["word"]:
+            raise ValueError("The result needs its readout target.")
+        _token_list(target.get("token_ids"), target.get("tokens"), "target")
+        if not isinstance(lens, dict):
+            raise ValueError("The result needs its lens metadata.")
+        _text(lens.get("name"), "lens name", 255)
+        if type(lens.get("n_prompts")) is not int or lens["n_prompts"] <= 0:
+            raise ValueError("The result needs a positive lens prompt count.")
+    conditions = value.get("conditions")
+    if not isinstance(conditions, list) or len(conditions) != len(checked["conditions"]):
+        raise ValueError("The result needs one reading per input condition.")
+    layers = {item["layer"] for item in checked["directions"]["directions"]}
     blocks = None
-    for condition in conditions:
-        if not isinstance(condition, dict) or not isinstance(condition.get("name"), str):
-            raise ValueError("Every condition in the result needs a name.")
+    pass_names = {"reference", "injected", "edited"} | ({"random"} if random else set())
+    for condition, requested in zip(conditions, checked["conditions"]):
+        if not isinstance(condition, dict) or condition.get("name") != requested["name"]:
+            raise ValueError("The result's condition names must match its inputs.")
         passes = condition.get("coordinates")
-        if not isinstance(passes, dict) or not {"reference", "injected", "edited"} <= set(passes):
-            raise ValueError("Every condition needs its reference, injected and edited coordinates.")
+        if not isinstance(passes, dict) or set(passes) != pass_names:
+            raise ValueError("Every condition needs the coordinate passes requested by its settings.")
         for rows in passes.values():
-            if not isinstance(rows, list) or blocks is not None and len(rows) != blocks:
+            if (not isinstance(rows, list) or not 1 <= len(rows) <= MAX_BLOCKS
+                    or blocks is not None and len(rows) != blocks):
                 raise ValueError("Every pass needs one row per block.")
             blocks = len(rows)
-            for row in rows:
-                if row is not None and (not isinstance(row, list) or len(row) != len(passage) or not all(
-                        type(item) in (int, float) for item in row)):
-                    raise ValueError("Every coordinate row must hold one number per passage token.")
-        recovery = condition.get("recovery")
-        if not isinstance(recovery, dict) or not all(
-                isinstance(recovery.get(key, []), list) and len(recovery.get(key, [])) in (0, blocks)
-                for key in ("edited", "random")):
-            raise ValueError("Every condition needs one recovery value per block.")
-    if not isinstance(value.get("differences", []), list):
-        raise ValueError("The result's differences must be a list.")
+            for block, row in enumerate(rows):
+                if block not in layers:
+                    if row is not None:
+                        raise ValueError("Blocks without directions must have null coordinate rows.")
+                elif (not isinstance(row, list) or len(row) != len(passage)
+                      or not all(_finite(item) and abs(item) <= float(np.finfo(np.float32).max) for item in row)):
+                    raise ValueError("Every coordinate row must hold one finite number per passage token.")
+        recovered = condition.get("recovery")
+        if not isinstance(recovered, dict):
+            raise ValueError("Every condition needs its recovery readings.")
+        for key, length in (("edited", blocks), ("random", blocks if random else 0)):
+            row = recovered.get(key)
+            if (not isinstance(row, list) or len(row) != length
+                    or not all(_finite(item, optional=True) for item in row)):
+                raise ValueError("Every recovery reading must match its blocks and random-control setting.")
+        readings = condition.get("lens")
+        if not isinstance(readings, dict) or not set(experiment.SETTINGS) <= readings.keys():
+            raise ValueError("Every condition needs all its lens-value fields.")
+        for key in experiment.SETTINGS:
+            expected = readout is not None and (key != "random" or random)
+            if (expected and not _finite(readings[key])) or (not expected and readings[key] is not None):
+                raise ValueError("The lens values must be finite when read, and null otherwise.")
+    if max(layers) >= blocks or edited[-1] >= blocks or readout is not None and readout["blocks"][1] >= blocks:
+        raise ValueError("The result's directions, edits and readout must fit its coordinate blocks.")
+    differences = value.get("differences")
+    if not isinstance(differences, list) or len(differences) != len(checked["differences"]):
+        raise ValueError("The result needs the differences requested by its inputs.")
+    for item, requested in zip(differences, checked["differences"]):
+        if not isinstance(item, dict) or any(item.get(key) != requested[key] for key in requested):
+            raise ValueError("The result's difference names and conditions must match its inputs.")
+        for key in (*experiment.SETTINGS, "edit_change", "random_change"):
+            if key not in item or not _finite(item[key], optional=True):
+                raise ValueError("Every difference needs finite or null readings and percent changes.")
     return value
 
 
