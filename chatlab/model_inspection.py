@@ -191,7 +191,7 @@ ATTENTION_TRACE_CHUNK_BYTES = 256 << 20
 ATTENTION_TRACE_CHUNK_TOKENS = 128
 
 
-def _decoded_prompt(tokenizer, token_ids: Sequence[int]) -> tuple[str, tuple[tuple[int, int], ...]]:
+def decoded_prompt(tokenizer, token_ids: Sequence[int]) -> tuple[str, tuple[tuple[int, int], ...]]:
     """Decode in context and give every byte of a split character its span."""
 
     from chatlab.tokenization import IncrementalDecoder
@@ -1114,7 +1114,7 @@ class InspectionMixin:
                             stop = min(start + chunk_size, len(positions))
                             # Score while this block is alive: never retain block-by-position states.
                             selected = hidden[0, index[start:stop].to(hidden.device)].detach().float().cpu()
-                            scores = jacobian_lens._unembed(engine, layout, selected @ matrix)
+                            scores = jacobian_lens.unembed(engine, layout, selected @ matrix)
                             if not torch.isfinite(scores).all():
                                 raise ValueError("The Jacobian readout produced non-finite scores.")
                             normalizer = torch.logsumexp(scores.double(), dim=-1)
@@ -1152,7 +1152,7 @@ class InspectionMixin:
                 )
             actual = output.logits[0, -1].float().cpu()
             del output
-            replayed = jacobian_lens._unembed(engine, layout, final_state)[-1]
+            replayed = jacobian_lens.unembed(engine, layout, final_state)[-1]
             if not torch.allclose(replayed, actual, rtol=1e-2, atol=1e-2):
                 raise ValueError("The final-layer readout does not reproduce this model's output; the lens readings were withheld.")
             return answer
@@ -1544,7 +1544,7 @@ class InspectionMixin:
             del cache
             assert reducer is not None
             assert self.tokenizer is not None
-            prompt_text, prompt_spans = _decoded_prompt(self.tokenizer, ids[:context_count])
+            prompt_text, prompt_spans = decoded_prompt(self.tokenizer, ids[:context_count])
             return reducer.finish(context_count, tokens, prompt_text, prompt_spans)
 
     def read_kv_cache(

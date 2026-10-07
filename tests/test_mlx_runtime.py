@@ -281,7 +281,7 @@ class LensTests(unittest.TestCase):
         engine = MlxEngine(model)
         ids = [3, 5, 7, 11]
         expected = reference_logits(model, ids)[-1]
-        recorder = mlx_runtime._Recorder()
+        recorder = mlx_runtime.Recorder()
         with engine._recording(recorder):
             mx.eval(model(mx.array([ids])))
         replayed = engine.read_head(engine.final_norm()(recorder.hidden[-1][:, -1:, :]))[0, -1]

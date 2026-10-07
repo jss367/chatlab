@@ -295,13 +295,13 @@ class LensAccessorTests(LensFixture):
         positions = [6, 0, 4, 6, 1] * 3 + [2, 5]
         targets = [127999, [2, 7, 2], [0]]
         rows = []
-        original = jacobian_lens._unembed
+        original = jacobian_lens.unembed
 
         def unembed(engine, layout, vectors):
             rows.append(len(vectors))
             return original(engine, layout, vectors)
 
-        with mock.patch.object(jacobian_lens, "_unembed", side_effect=unembed):
+        with mock.patch.object(jacobian_lens, "unembed", side_effect=unembed):
             with self.service.open_session() as session:
                 got = session.lens_log_probs(ids, targets, [3, 1, 3], positions)
         # Each unique block is scored during forward; replay is one final position.
@@ -313,7 +313,7 @@ class LensAccessorTests(LensFixture):
     def test_chunk_boundary_cancellation_and_nonfinite_scores(self):
         self.import_lens()
         ids = self.manager.tokenizer.encode(PASSAGE)
-        original = jacobian_lens._unembed
+        original = jacobian_lens.unembed
         for failure in ("cancel", "nonfinite"):
             with self.subTest(failure=failure):
                 calls, stop = [], threading.Event()
@@ -329,7 +329,7 @@ class LensAccessorTests(LensFixture):
 
                 # A budget smaller than one vocabulary still processes one row at a time.
                 with mock.patch.object(model_inspection, "LENS_SCORE_ELEMENTS", 1), \
-                        mock.patch.object(jacobian_lens, "_unembed", side_effect=unembed):
+                        mock.patch.object(jacobian_lens, "unembed", side_effect=unembed):
                     with self.assertRaises(ProjectionCancelled if failure == "cancel" else ValueError):
                         self.manager.lens_log_probs(ids, [ids[0]], [1], [0, 1, 2], cancelled=stop.is_set)
                 self.assertEqual(calls, [1, 1] if failure == "cancel" else [1, 1, 1])
@@ -342,7 +342,7 @@ class LensAccessorTests(LensFixture):
         positions = [6, 0, 4] * 7
         targets = [ids[1], [ids[2], ids[3]]]
         alive, calls, entered = [], [], []
-        original = jacobian_lens._unembed
+        original = jacobian_lens.unembed
         cpu, clone = torch.Tensor.cpu, torch.Tensor.clone
         state_shapes = []
 
@@ -376,7 +376,7 @@ class LensAccessorTests(LensFixture):
                    for layer, block in enumerate(steering.decoder_layers(self.manager.model))]
         try:
             with mock.patch.object(model_inspection, "LENS_STATE_ELEMENTS", 2 * WIDTH, create=True), \
-                    mock.patch.object(jacobian_lens, "_unembed", new=unembed), \
+                    mock.patch.object(jacobian_lens, "unembed", new=unembed), \
                     mock.patch.object(torch.Tensor, "cpu", new=cpu_state), \
                     mock.patch.object(torch.Tensor, "clone", new=clone_state):
                 with self.service.open_session() as session:
@@ -393,7 +393,7 @@ class LensAccessorTests(LensFixture):
     def test_final_replay_still_withholds_streamed_readings(self):
         self.import_lens()
         ids = self.manager.tokenizer.encode(PASSAGE)
-        original = jacobian_lens._unembed
+        original = jacobian_lens.unembed
         calls = []
 
         def unembed(engine, layout, vectors):
@@ -403,7 +403,7 @@ class LensAccessorTests(LensFixture):
                 return scores + 1.0
             return scores
 
-        with mock.patch.object(jacobian_lens, "_unembed", side_effect=unembed):
+        with mock.patch.object(jacobian_lens, "unembed", side_effect=unembed):
             with self.service.open_session() as session:
                 with self.assertRaisesRegex(ValueError, "readings were withheld"):
                     session.lens_log_probs(ids, [ids[0]], [1, 3], [0, 1])

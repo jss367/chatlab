@@ -944,11 +944,11 @@ class MlxJacobianLensTests(unittest.TestCase):
 
     def reference(self):
         """Each block's readout at every position from one uncached pass."""
-        from chatlab.mlx_runtime import _Recorder
+        from chatlab.mlx_runtime import Recorder
 
         mx = self.mx
         engine = self.manager.engine
-        recorder = _Recorder()
+        recorder = Recorder()
         with engine._recording(recorder):
             logits = self.model(mx.array([self.ids]))
         mx.eval(logits, *recorder.hidden)

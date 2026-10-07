@@ -414,7 +414,7 @@ class MlxLogits:
 class _RecordingLayer:
     """Stand in for one decoder layer and keep what flowed through it."""
 
-    def __init__(self, layer, index: int, recorder: _Recorder) -> None:
+    def __init__(self, layer, index: int, recorder: Recorder) -> None:
         self.layer = layer
         self.index = index
         self.recorder = recorder
@@ -433,7 +433,7 @@ class _RecordingLayer:
 
 
 @dataclass
-class _Recorder:
+class Recorder:
     hidden: list = field(default_factory=list)
     attention: dict[int, Any] = field(default_factory=dict)
     current: int = -1
@@ -637,7 +637,7 @@ class MlxEngine:
         return logits
 
     @contextlib.contextmanager
-    def _recording(self, recorder: _Recorder) -> Iterator[None]:
+    def _recording(self, recorder: Recorder) -> Iterator[None]:
         """Wrap the decoder layers and the attention kernel for one step.
 
         The layers are replaced on the inner model with recorders that keep
@@ -692,7 +692,7 @@ class MlxEngine:
             raise RuntimeError(
                 f"The MLX cache holds {offset} tokens, not the {cached} expected."
             )
-        recorder = _Recorder()
+        recorder = Recorder()
         with self._recording(recorder):
             logits = self.model(mx.array([[int(token_id)]]), cache=cache)
         hidden = list(recorder.hidden)
@@ -752,7 +752,7 @@ class MlxEngine:
         total = cached + fed
         layers: list[np.ndarray] | None = None
         for step, token_id in enumerate(token_ids):
-            recorder = _Recorder(heads=True)
+            recorder = Recorder(heads=True)
             with self._recording(recorder):
                 logits = self.model(mx.array([[int(token_id)]]), cache=cache)
             count = len(recorder.hidden) - 1
@@ -871,7 +871,7 @@ def _cache_offset(cache) -> int | None:
     return int(offset) if isinstance(offset, int) else None
 
 
-def _recording_attention(original, recorder: _Recorder):
+def _recording_attention(original, recorder: Recorder):
     """Wrap mlx-lm's attention kernel to also compute the weights it never returns.
 
     ``mx.fast.scaled_dot_product_attention`` is fused and materializes no
