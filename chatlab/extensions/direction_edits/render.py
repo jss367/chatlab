@@ -5,7 +5,7 @@ import html
 
 import numpy as np
 
-from chatlab.extensions.probes.page import mix
+from chatlab.token_metrics import mix_color as mix
 
 # Columns past this are left out of the heatmaps; the download keeps them all.
 HEAT_COLUMNS = 512

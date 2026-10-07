@@ -14,7 +14,8 @@ from pathlib import Path
 
 import numpy as np
 
-from chatlab.extensions.probes import probe as probes
+PROBE_FORMAT = "chatlab-probe-1"
+LATEST_CREATED = 32503680000.0  # The start of year 3000, in Unix seconds.
 
 DIRECTIONS_FORMAT = "chatlab-directions-1"
 RESULT_FORMAT = "chatlab-direction-edits-1"
@@ -64,16 +65,18 @@ def normalize_directions(value):
 
     Accepts ``chatlab-directions-1`` and ``chatlab-probe-1``. Raises ``ValueError``.
     """
-    if isinstance(value, dict) and value.get("format") == probes.FORMAT:
+    if isinstance(value, dict) and value.get("format") == PROBE_FORMAT:
+        from chatlab.extensions.probes import probe as probes
+
         probe = probes.normalize(value)
         return {
             "format": DIRECTIONS_FORMAT, "name": probe["name"], "model_id": probe["model_id"],
-            "model_revision": probe["model_revision"], "precision": probe["precision"], "source": probes.FORMAT,
+            "model_revision": probe["model_revision"], "precision": probe["precision"], "source": PROBE_FORMAT,
             "directions": [{"layer": item["layer"], "vector": _unit(item["weights"], item["layer"])}
                            for item in probe["layers"]],
         }
     if not isinstance(value, dict) or value.get("format") != DIRECTIONS_FORMAT:
-        raise ValueError(f"Expected a {DIRECTIONS_FORMAT} or {probes.FORMAT} JSON object.")
+        raise ValueError(f"Expected a {DIRECTIONS_FORMAT} or {PROBE_FORMAT} JSON object.")
     precision = value.get("precision")
     if precision is not None and precision not in PRECISIONS:
         raise ValueError("The directions' precision must be full, 8-bit, 4-bit or null.")
@@ -156,7 +159,7 @@ def normalize_result(value):
     if not isinstance(value, dict) or value.get("format") != RESULT_FORMAT:
         raise ValueError(f"Expected a {RESULT_FORMAT} JSON object.")
     created = value.get("created")
-    if not _finite(created) or not 0 <= created <= probes.LATEST_CREATED:
+    if not _finite(created) or not 0 <= created <= LATEST_CREATED:
         raise ValueError("The result's creation time is not a date between 1970 and 3000.")
     inputs = value.get("inputs")
     if not isinstance(inputs, dict) or not {"injection", "edit", "readout"} <= inputs.keys():

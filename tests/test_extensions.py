@@ -209,6 +209,42 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual(load_enabled([]), ([], []))
             importer.assert_not_called()
 
+    def test_edits_loads_with_probes_unavailable_and_keeps_the_page_unloaded(self):
+        script = r"""
+import importlib.abc
+import sys
+from chatlab.extensions.registry import load_enabled
+class BlockProbes(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'chatlab.extensions.probes' or fullname.startswith('chatlab.extensions.probes.'):
+            raise ImportError('Probes deliberately unavailable')
+sys.meta_path.insert(0, BlockProbes())
+loaded, errors = load_enabled(['direction_edits'])
+assert len(loaded) == 1 and not errors, errors
+assert not any(name.startswith('chatlab.extensions.probes') for name in sys.modules)
+from chatlab.extensions.direction_edits.render import _fill
+assert _fill(.5, ['#000000', '#ffffff']) == '#808080'
+"""
+        result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_probe_file_schema_does_not_import_the_optional_page(self):
+        script = r"""
+import importlib.abc
+import sys
+from chatlab.extensions.direction_edits import files
+class BlockPage(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'chatlab.extensions.probes.page':
+            raise ImportError('Probes page deliberately unavailable')
+sys.meta_path.insert(0, BlockPage())
+from chatlab.extensions.probes import probe
+assert probe.FORMAT == files.PROBE_FORMAT
+assert 'chatlab.extensions.probes.page' not in sys.modules
+"""
+        result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_import_and_api_failures_are_isolated(self):
         bad = ExtensionSpec('bad', 'Broken example', '', 'Example', 'missing_extension')
         incompatible = ExtensionSpec('new', 'Future example', '', 'Future', 'future_extension', api_version=99)

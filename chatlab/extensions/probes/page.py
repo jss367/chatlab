@@ -14,6 +14,7 @@ import numpy as np
 
 from chatlab.model_inspection import ProjectionCancelled
 from chatlab.extension_api import write_private_text
+from chatlab.token_metrics import mix_color as mix
 from . import probe as probes
 
 logger = logging.getLogger(__name__)
@@ -301,13 +302,6 @@ def saved_choices(directory):
         when = datetime.fromtimestamp(probe["created"]).strftime("%Y-%m-%d %H:%M")
         choices.append((f"{probe['name']} · {probe['model_id']} · {when}", probe["id"]))
     return choices
-
-
-def mix(low, high, share):
-    """The colour ``share`` of the way from hex colour ``low`` to ``high``."""
-    low, high = (np.array([int(c[i:i + 2], 16) for i in (1, 3, 5)]) for c in (low, high))
-    red, green, blue = (low + (high - low) * share).round().astype(int)
-    return f"#{red:02x}{green:02x}{blue:02x}"
 
 
 def heat_color(probability, palette):
