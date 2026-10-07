@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from chatlab import settings, steering
+from chatlab.files import read_json_object
 
 
 logger = logging.getLogger(__name__)
@@ -408,11 +409,7 @@ _UPLOAD_LOCK = threading.Lock()
 
 
 def _read_store() -> dict:
-    try:
-        data = json.loads(store_path().read_text("utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return read_json_object(store_path()) or {}
 
 
 def remembered(model_id: str) -> dict | None:

@@ -18,10 +18,11 @@ base checkpoint on disk and calls in.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
+
+from chatlab.files import read_json_object
 
 ADAPTER_CONFIG = "adapter_config.json"
 # What ``PeftModel.from_pretrained`` reads, in the order it looks for them.
@@ -53,11 +54,7 @@ def read_adapter_config(snapshot: Path | None) -> dict[str, Any] | None:
 
     if snapshot is None:
         return None
-    try:
-        config = json.loads((Path(snapshot) / ADAPTER_CONFIG).read_text())
-    except (OSError, ValueError):
-        return None
-    return config if isinstance(config, dict) else None
+    return read_json_object(Path(snapshot) / ADAPTER_CONFIG)
 
 
 def is_adapter(snapshot: Path | None) -> bool:

@@ -1,4 +1,4 @@
-"""Writing files only their owner can read.
+"""Reading JSON objects, and writing files only their owner can read.
 
 Exports, transcripts, saved runs and batch tables all go through here, so
 every file ChatLab writes is created owner-only before any of its contents
@@ -10,11 +10,27 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
 import time
 from pathlib import Path
 from uuid import uuid4
+
+
+def read_json_object(path: Path) -> dict | None:
+    """``path`` parsed as a JSON object; ``None`` when missing, unreadable or not one.
+
+    Most of what is read this way is a config or index a downloaded
+    repository ships, so nothing about its shape is trusted: a file that will
+    not parse reads the same as one that is not there.
+    """
+
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def write_private_text(path: Path, text: str, *, newline: str | None = None) -> None:

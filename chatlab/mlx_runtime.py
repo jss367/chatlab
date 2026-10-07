@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
-import json
 import logging
 import queue
 import re
@@ -53,6 +52,7 @@ import numpy as np
 
 from chatlab import kv_cache
 from chatlab.engine import LensReading
+from chatlab.files import read_json_object
 from chatlab.kv_cache import CacheLayer, LayerShape, recent_positions
 
 logger = logging.getLogger(__name__)
@@ -120,11 +120,8 @@ def mlx_quantization(config: Mapping[str, Any] | None) -> dict[str, Any] | None:
 def read_mlx_config(snapshot: Path) -> dict[str, Any] | None:
     """The root ``config.json`` of ``snapshot`` when it describes an MLX conversion."""
 
-    try:
-        config = json.loads((snapshot / "config.json").read_text())
-    except (OSError, ValueError):
-        return None
-    if not isinstance(config, dict) or "model_type" not in config:
+    config = read_json_object(snapshot / "config.json")
+    if config is None or "model_type" not in config:
         return None
     return config if mlx_quantization(config) is not None else None
 
@@ -162,16 +159,6 @@ def text_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     return {**config, **text} if isinstance(text, Mapping) else dict(config)
 
 
-def _read_json_object(path: Path) -> dict[str, Any]:
-    """``path`` parsed as a JSON object; ``{}`` when missing, unreadable or not one."""
-
-    try:
-        value = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 def read_stop_ids(snapshot: Path) -> set[int]:
     """Every end-of-sequence token the checkpoint at ``snapshot`` declares.
 
@@ -183,9 +170,9 @@ def read_stop_ids(snapshot: Path) -> set[int]:
     """
 
     snapshot = Path(snapshot)
-    values = _token_ids(_read_json_object(snapshot / "config.json").get("eos_token_id"))
+    values = _token_ids((read_json_object(snapshot / "config.json") or {}).get("eos_token_id"))
     values |= _token_ids(
-        _read_json_object(snapshot / "generation_config.json").get("eos_token_id")
+        (read_json_object(snapshot / "generation_config.json") or {}).get("eos_token_id")
     )
     return values
 
@@ -470,7 +457,7 @@ class MlxEngine:
         """
 
         local_path = Path(local_path)
-        config = _read_json_object(local_path / "config.json")
+        config = read_json_object(local_path / "config.json") or {}
         return cls(model, config, stop_ids=read_stop_ids(local_path))
 
     # -- what the manager asks about the model -------------------------------
