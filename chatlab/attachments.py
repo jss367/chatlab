@@ -229,18 +229,6 @@ def open_for_model(name: str, budget: int = MODEL_PIXEL_BUDGET):
     return image
 
 
-def size_of(name: str) -> tuple[int, int] | None:
-    """A stored picture's width and height, or ``None`` when it cannot be read."""
-
-    from PIL import Image
-
-    try:
-        with Image.open(image_path(name)) as image:
-            return image.size
-    except (OSError, AttachmentError, ValueError):
-        return None
-
-
 # How long an unreferenced picture is kept before a startup sweep removes it.
 # A picture is stored the moment it is pasted, before any conversation names
 # it, and another window can be holding one in its message box; a day leaves

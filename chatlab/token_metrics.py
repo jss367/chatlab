@@ -91,10 +91,6 @@ UNSCORED_IMAGE = "image"
 
 RANK_LABELS = ("Top choice", "Top 5", "Top 20", "Rank 21–100", "Rank 101+")
 
-CATEGORY_COLORS = {
-    label: color for label, color in zip(RANK_LABELS, SEQUENTIAL_FILLS)
-} | {UNSCORED_LABEL: UNSCORED_FILL}
-
 
 @dataclass(frozen=True)
 class ColorScale:

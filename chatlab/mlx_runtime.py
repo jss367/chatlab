@@ -52,8 +52,6 @@ from typing import Any
 import numpy as np
 
 from chatlab import kv_cache
-# Defined with the engine interface both backends share; still importable
-# from here, where it used to live.
 from chatlab.engine import LensReading
 from chatlab.kv_cache import CacheLayer, LayerShape, recent_positions
 
@@ -481,14 +479,6 @@ class MlxEngine:
         """The stop tokens the checkpoint declares; a copy, so callers may add to it."""
 
         return set(self.stop_ids)
-
-    @staticmethod
-    def device_bytes() -> int | None:
-        return active_bytes()
-
-    @staticmethod
-    def release() -> None:
-        clear_cache()
 
     # -- the forward pass ---------------------------------------------------
 

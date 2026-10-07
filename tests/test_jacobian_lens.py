@@ -303,7 +303,7 @@ class JacobianLensTests(unittest.TestCase):
             self.path, self.manager._engine(), self.manager.model_id, self.manager.model_id, None
         )
         with self.assertRaisesRegex(RuntimeError, "failed"):
-            with lens.record(self.manager._engine()):
+            with lens.capture(self.manager._engine()):
                 raise RuntimeError("failed")
         self.assertTrue(all(not block._forward_hooks for block in self.manager.model.model.layers))
 

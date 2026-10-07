@@ -267,9 +267,6 @@ class FittedLens:
             for handle in handles:
                 handle.remove()
 
-    # Kept under its old name for callers that read one position.
-    record = capture
-
     def read(self, engine, states, actual_logits, decode, pinned_id=None):
         """Score every fed position through each fitted block.
 

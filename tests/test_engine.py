@@ -2,8 +2,7 @@
 
 import unittest
 
-from chatlab import mlx_runtime
-from chatlab.engine import Engine, LensReading
+from chatlab.engine import Engine
 from chatlab.mlx_runtime import MlxEngine
 from chatlab.torch_engine import TorchEngine
 
@@ -19,9 +18,6 @@ class EngineInterfaceTests(unittest.TestCase):
 
     def test_the_mlx_engine_answers_the_interface(self):
         self.assertIsInstance(MlxEngine(None, {}), Engine)
-
-    def test_the_lens_reading_is_still_where_it_was(self):
-        self.assertIs(mlx_runtime.LensReading, LensReading)
 
 
 if __name__ == "__main__":
