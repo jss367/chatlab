@@ -1,134 +1,38 @@
 """ChatLab interface for chatting with and inspecting model tokens.
 
 The interface lives in the ``ui`` package, one module per page or panel;
-this module gathers every name under one roof, which is what the desktop
-launcher and the tests import. ``python -m chatlab`` serves it; see
-``__main__.py``.
+this module gathers the names the tests read as ``app.X`` under one roof.
+The desktop launcher and ``python -m chatlab`` take only ``build_app`` and
+``current_manager`` from it; see ``__main__.py``.
 """
 
 from __future__ import annotations
 
-import contextlib
-import html
-import logging
-import random
-import re
-import threading
-import time
-from collections import deque
-from pathlib import Path
-from uuid import uuid4
-
 import gradio as gr
-from gradio.utils import get_upload_folder
 
-from chatlab import charts
-from chatlab import library
-from chatlab import settings
-from chatlab.conversation import (
-    CHAT_PREFIX,
-    FORK_PREFIX,
-    MAIN_BRANCH,
-    THINK_CLOSE,
-    branch_choices,
-    branch_stamp,
-    copy_forks,
-    copy_turns,
-    display_messages,
-    drop_branch,
-    forget_measurements,
-    fork_at,
-    from_json,
-    last_user_index,
-    locate,
-    make_turn,
-    model_messages,
-    new_forks,
-    next_branch_name,
-    next_fork_name,
-    put_branch,
-    split_reasoning,
-    to_json,
-    user_index_at_or_before,
-)
-from chatlab import image_runtime
-from chatlab.hub_search import HubModel, search_hub_models
-from chatlab.model_cache import (
-    DEFAULT_MODEL_SORT,
-    IMAGE_KIND,
-    MODEL_SORT_ORDERS,
-    MODEL_WEIGHTS,
-    TEXT_KIND,
-    CachedModel,
-    CacheStatus,
-    ModelBusy,
-    ModelDownloading,
-    ModelLoaded,
-    cache_root,
-    cache_status,
-    format_bytes,
-    format_count,
-    list_cached_models,
-    sort_cached_models,
-)
-from chatlab.model_runtime import ModelManager
-from chatlab.progress_bars import DownloadSnapshot, LoadProgress, LoadSnapshot
-from chatlab.text_generation import PROMPT_SCORE_LIMIT, ModelChanged
-from chatlab.token_metrics import (
-    COLOR_SCALES,
-    DEFAULT_COLOR_SCALE,
-    PROMPT_ATTENTION_SCALE,
-    UNSCORED_BEYOND_LIMIT,
-    category_for,
-    summarize,
-)
-from chatlab.prompt_batch import (
-    BATCH_CSV_NAME,
-    parse_prompt_file,
-    parse_prompts,
-    prompts_to_text,
-    write_batch_csv,
-    write_batch_trace,
-)
-from chatlab.trace_export import (
-    build_trace,
-    trace_to_csv,
-    traces_to_csv,
-    write_private_text,
-    write_trace_export,
-)
-from chatlab.ui.runtime import MANAGER, current_manager
+from chatlab.conversation import branch_choices
+from chatlab.model_cache import format_bytes
+from chatlab.progress_bars import DownloadSnapshot, LoadSnapshot
+from chatlab.token_metrics import COLOR_SCALES, DEFAULT_COLOR_SCALE
+from chatlab.prompt_batch import parse_prompts, prompts_to_text
+from chatlab.ui.runtime import current_manager
 from chatlab.ui.common import (
-    CHART_EVERY,
-    CHAT_PAGE,
-    CONVERSATION_PANE_WIDTH,
     DEFAULT_MODEL_DOWNLOAD,
-    DOWNLOAD_BAR_WIDTH,
-    DOWNLOAD_POLL_SECONDS,
-    IMAGES_PAGE,
     IncompleteSnapshotError,
-    LOAD_POLL_SECONDS,
     METRIC_GLOSSARY,
     MODELS_PAGE,
     NAV_ICONS,
     NAV_PANE_WIDTH,
     NO_TOKEN_SELECTED,
     PAGES,
-    RATE_WINDOW_SECONDS,
-    TRANSCRIPT_LABEL,
     SEAM_CAVEAT,
     SEED_LIMIT,
-    SETTINGS_PAGE,
     TEMPLATE_CAVEAT,
-    Card,
-    alarm,
     describe_duration,
     failure_card,
     failure_status,
-    finalize_partial,
     hint,
     metric_term,
-    progress_bar,
     send_stop_buttons,
     show_page,
     status_card,
@@ -141,7 +45,6 @@ from chatlab.ui.conversations import (
     fork_refused,
     load_conversation,
     new_conversation,
-    panel_reset,
     refresh_conversation_list,
     remember_branch_sampling,
     remember_forks,
@@ -153,28 +56,6 @@ from chatlab.ui.conversations import (
     selected_turn,
     switch_fork,
 )
-from chatlab.ui.images_page import (
-    DRAW_POLL_SECONDS,
-    EMPTY_PROMPT,
-    IMAGE_OUTPUT_NAMES,
-    NO_ATTENTION,
-    NO_IMAGE_MODEL,
-    NO_TRAJECTORY,
-    NOTHING_TO_STOP,
-    PROMPT_STRIP_LABEL,
-    TEXT_MODEL_LOADED,
-    attention_note,
-    attention_overlay,
-    draw,
-    prompt_strip_value,
-    remember_committed_image_seed,
-    remember_image_settings,
-    remember_token,
-    select_step,
-    select_token,
-    stop_drawing,
-    trajectory_frame,
-)
 from chatlab.ui.outputs import (
     CHAT_OUTPUT_NAMES,
     CLEAR_OUTPUT_NAMES,
@@ -182,11 +63,7 @@ from chatlab.ui.outputs import (
     FORK_OUTPUT_NAMES,
     LOAD_OUTPUT_NAMES,
     NEW_CONVERSATION_OUTPUT_NAMES,
-    POLL_OUTPUT_NAMES,
-    RESTORE_OUTPUT_NAMES,
-    STEERED_LOAD_OUTPUT_NAMES,
     STOP_OUTPUT_NAMES,
-    TOKEN_EDIT_OUTPUT_NAMES,
     UNDO_OUTPUT_NAMES,
     Frame,
     positional,
@@ -196,22 +73,14 @@ from chatlab.ui.generation import (
     LOADING_STATUS,
     NOTHING_TO_CLEAR,
     NO_MODEL_STATUS,
-    answer_edited_prompt,
     ask_clear_chat,
-    automatic_reasoning_close_count,
     branch_from,
     branch_with_text,
-    busy_state,
     chat,
     clear_chat,
     edit_message,
-    generate_reply,
     POSITION_LIMIT_NOTE,
-    generation_progress,
     hide_clear_confirm,
-    idle_state,
-    literal_prefill_count,
-    literal_text_ranges,
     next_token,
     regenerate_from,
     resolve_seed,
@@ -219,7 +88,6 @@ from chatlab.ui.generation import (
     retry_message,
     split_response_text,
     stop_generation,
-    undo_from,
     undo_last,
     undo_message,
 )
@@ -231,7 +99,6 @@ from chatlab.ui.inspection import (
     INSPECT_LOADING,
     INSPECT_MODEL_CHANGED,
     INSPECT_OUTPUT_ONLY,
-    NAV_TILE_CSS,
     inspect_layers,
     remember_inspect_target,
     render_attention,
@@ -243,60 +110,29 @@ from chatlab.ui.layout import (
 )
 from chatlab.ui.models_page import (
     BADGE_REFRESH_SECONDS,
-    MISSING_FILES_PATTERN,
     NO_CACHED_MODEL_SELECTED,
     NO_MODEL_BADGE,
-    NO_MODEL_TO_MANAGE,
     NO_RESULT_SELECTED,
     ALL_KINDS,
-    MODEL_KIND_FILTERS,
     Pace,
     RateMeter,
-    KIND_NAMES,
-    SEARCH_HINT,
-    SEARCH_HINTS,
-    SEARCH_KINDS,
     SWITCH_BUSY,
     SWITCH_FIT_SECONDS,
     SWITCH_LOADING,
-    SwitchStamp,
-    UNSUPPORTED_REASON,
     act_on_my_model,
-    announce_switch_outcome,
-    cached_model_label,
-    cached_models_of_kind,
     chosen_model,
-    clear_my_model_selection,
-    describe_cache,
-    describe_cached_model,
-    describe_fetched,
-    describe_hub_model,
-    search_table,
-    picked_model,
-    describe_missing,
-    describe_on_disk,
     download_and_load_model,
     download_detail,
-    download_model,
-    downloading_refusal,
-    format_timestamp,
-    go_to_image_models,
     go_to_models,
-    incomplete_snapshot_detail,
     load_cached_model,
     load_detail,
     loaded_model_badge,
-    loaded_refusal,
-    model_badge,
-    model_snapshot,
-    my_models_summary,
     redownload_my_model,
     refresh_after_device,
     refresh_image_badge,
     refresh_model_badge,
     refresh_model_switch,
     refresh_my_models,
-    refresh_search_results,
     refresh_stale_model_switch,
     remove_my_model,
     search_models,
@@ -307,9 +143,7 @@ from chatlab.ui.models_page import (
     stream_load,
     switch_choices,
     switch_model,
-    switch_value,
     unload_model,
-    where_to_use,
 )
 from chatlab.ui.panel import (
     BRANCH_HINT,
@@ -326,27 +160,19 @@ from chatlab.ui.panel import (
     PROMPT_EDIT_UNAVAILABLE,
     branch_ready_text,
     branch_target,
-    prompt_edit_target,
     choose_alternative,
-    cleared_panel,
     describe_token,
     empty_metrics,
-    event_index,
     inspect_token,
     new_metrics_generation,
-    prompt_note_text,
     recolor,
     remember_strip_selection,
-    resolve_scale,
     select_transcript_token,
     selected_metric,
     show_token_view,
     stamped,
-    strip_update,
-    strip_value,
     transcript_entries,
     transcript_pick,
-    transcript_update,
     transcript_value,
 )
 from chatlab.ui.prompts import (
@@ -360,17 +186,11 @@ from chatlab.ui.prompts import (
     EXCERPT_LENGTH,
     PARAGRAPH_NOTE,
     PROMPT_COUNT_HINT,
-    batch_directory,
-    batch_files,
-    batch_progress,
-    batch_row,
     count_prompts,
     excerpt,
-    failed_row,
     load_prompt_file,
     resolve_prompts,
     run_prompts,
-    same_lines,
     stop_batch,
 )
 from chatlab.ui.scoring import (
@@ -390,7 +210,6 @@ from chatlab.ui.settings_page import (
     PERSISTED_SETTING_NAMES,
     apply_theme,
     hardware_card,
-    refresh_hardware,
     remember_committed_seed,
     remember_prefill_limit,
     remember_settings,
@@ -410,6 +229,4 @@ from chatlab.ui.styles import (
     message_box_settings,
     set_message_box_keys,
 )
-
-logger = logging.getLogger(__name__)
 

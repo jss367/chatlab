@@ -16,11 +16,11 @@ from chatlab.device_memory import reraise_out_of_memory
 from chatlab.model_inspection import ProjectionCancelled
 from chatlab.model_runtime import LOADING
 from chatlab.steering import SteeringError, normalize as normalize_steering, read_vector as read_steering_vector
-from chatlab.trace_export import write_private_text
+from chatlab.files import batch_directory, csv_text, replace_private_text, write_private_text
 from chatlab.ui.icons import icon_classes
 
 API_VERSION = 1
-__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenMenu", "TokenSelections", "NavigationService", "write_private_text", "icon_classes",
+__all__ = ["API_VERSION", "ExtensionContext", "ModelService", "GenerationSession", "TokenInspector", "TokenMenu", "TokenSelections", "NavigationService", "write_private_text", "replace_private_text", "batch_directory", "csv_text", "icon_classes",
            "SteeringError", "normalize_steering", "read_steering_vector", "ProjectionCancelled"]
 
 

@@ -15,19 +15,15 @@ from chatlab.extensions.maze_experiments.runner import Episode, from_payload, st
 from chatlab.extensions.maze_experiments.team import MAX_AGENTS, MESSAGE_LIMIT, format_agents, parse_agents, team_tools
 from chatlab.extensions.maze_experiments.team_views import (agent_color, mail_text, response_line, team_board,
                                                             team_status, team_timeline)
-from maze_support import CONFIG, call, Manager, MAZE, MAZE_ID, output_index, scenario, scored
+from maze_support import CONFIG, call, Manager, MAZE, MAZE_ID, output_index, say, scenario, scored, team_episode
 from ui_support import listeners_by_name
 
 # No walls, so a team placed on its start shares one cell.
 OPEN = Maze(("...", "...", "..."), (1, 1), (0, 2))
 
 
-def say(text):
-    return text, list(text.encode()) + [0]
-
-
 def team(maze=MAZE, **config):
-    return Episode(maze, dict(dict(agents=2, communication=True, team_goal="any"), **config))
+    return team_episode(maze, dict(communication=True, team_goal="any") | config)
 
 
 class TeamParseTests(unittest.TestCase):

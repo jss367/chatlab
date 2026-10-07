@@ -6,7 +6,7 @@ from unittest import mock
 
 import numpy as np
 import torch
-from transformers import LlamaConfig, LlamaForCausalLM, Qwen3Config, Qwen3ForCausalLM
+from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from chatlab import charts
 from chatlab import kv_cache
@@ -16,7 +16,7 @@ from chatlab.kv_cache import CacheLayer
 from chatlab.model_runtime import ModelManager
 from chatlab.text_generation import ModelChanged
 from mlx_support import needs_mlx, tiny_llama
-from tiny_tokenizer import build
+from torch_support import tiny_manager
 from chatlab.ui import inspection, runtime
 
 try:
@@ -24,22 +24,6 @@ try:
     from mlx_lm.models.cache import RotatingKVCache, make_prompt_cache
 except ImportError:  # pragma: no cover - the MLX tests skip themselves
     mx = None
-
-
-def tiny_manager(config_type=LlamaConfig, model_type=LlamaForCausalLM, **extra):
-    torch.manual_seed(7)
-    manager = ModelManager()
-    manager.tokenizer = build()
-    config = config_type(
-        vocab_size=len(manager.tokenizer), hidden_size=16, intermediate_size=32,
-        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-        head_dim=8, max_position_embeddings=128,
-        bos_token_id=0, eos_token_id=0, pad_token_id=0, **extra,
-    )
-    manager.model = model_type(config).eval()
-    manager.model_id = "test/tiny-decoder"
-    manager.precision = "full"
-    return manager
 
 
 def norms(tensor) -> np.ndarray:

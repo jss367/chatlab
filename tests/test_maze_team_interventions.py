@@ -3,12 +3,10 @@ waypoint, an interruption with its recovery window, and a limit on its calls."""
 import json
 import unittest
 
-from chatlab.extensions.maze_experiments.maze import Maze
-from chatlab.extensions.maze_experiments.runner import Episode, context_messages, from_payload, stream_episode
+from chatlab.extensions.maze_experiments.runner import context_messages, from_payload, stream_episode
 from chatlab.extensions.maze_experiments.team_views import positions_after, team_board, team_status
-from maze_support import Manager, call
+from maze_support import CORRIDOR, Manager, call, saved, team
 
-CORRIDOR = Maze((".....", "#####", "#####", "#####", "#####"), (0, 0), (0, 4))
 ID = CORRIDOR.tool_id()
 
 
@@ -16,18 +14,6 @@ def step(direction, message=None):
     # A leading newline, so the call still opens a line after an interruption
     # prefix, and two sampled tokens, the second the stop token.
     return "\n" + call(direction, message, maze_id=ID)[0], [8, 0]
-
-
-def say(text):
-    return text, list(text.encode()) + [0]
-
-
-def team(**config):
-    return Episode(CORRIDOR, dict(dict(agents=2, communication=False, team_goal="all"), **config))
-
-
-def saved(ep):
-    return json.loads(json.dumps(ep.payload()))
 
 
 def reply_state(manager, call_index):

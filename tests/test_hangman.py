@@ -10,22 +10,12 @@ import gradio as gr
 
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.hangman.game import (
-    GIVE_UP, SYSTEM, answer_of, check, finish_turn, fitting_words, guess_of, load, messages_for, new_game,
-    read_board, read_word, reasoning_of, reopened, rewound, saved,
+    GIVE_UP, SYSTEM, answer_of, check, fitting_words, guess_of, load, messages_for, read_board, read_word,
+    reasoning_of, reopened, rewound, saved,
 )
 from chatlab.extensions.hangman.page import build_page, turn_note
-from chatlab.model_runtime import GENERATING
+from hangman_support import STOP, CharacterModel, game_of
 from ui_support import handlers_by_name
-
-STOP = 0
-
-
-def game_of(*exchanges):
-    """A finished game from (guess, reply) pairs."""
-    game = new_game(SYSTEM)
-    for guess, reply in exchanges:
-        game["turns"].append(finish_turn(dict(guess=guess, text=reply, metrics=[], finish_reason="stop")))
-    return game
 
 
 class BoardTests(unittest.TestCase):
@@ -223,32 +213,13 @@ class RecordTests(unittest.TestCase):
         self.assertIn("finish: stop", note)
 
 
-class Manager:
+class Manager(CharacterModel):
     """Replays a scripted reply per call, one character per token."""
-    loaded = True
-    model_id = "test/model"
-    load_id = "first"
-    tokenizer = SimpleNamespace(decode=lambda ids, **kw: "".join(map(chr, ids)))
 
     def __init__(self, replies):
         self.replies = list(replies)
         self.busy = False
         self.calls = []
-
-    def claim_generation(self):
-        if self.busy:
-            return GENERATING
-        self.busy = True
-        return None
-
-    def release_generation(self):
-        self.busy = False
-
-    def _stop_token_ids(self):
-        return {STOP}
-
-    def hidden_token_ids(self):
-        return {STOP}
 
     def encode_replacement(self, kept_ids, text, **kw):
         return [ord(c) for c in text]

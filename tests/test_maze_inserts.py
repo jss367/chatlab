@@ -19,7 +19,7 @@ from chatlab.extensions.maze_experiments.runner import (Episode, context_message
 from chatlab.extension_api import TokenInspector
 from chatlab.token_metrics import unscored_metric
 
-from maze_support import CONFIG, Manager
+from maze_support import CONFIG, Manager, reply
 from ui_support import listeners_by_name
 
 # Three moves east along the top row, or the long way round: enough room for a
@@ -32,11 +32,6 @@ MAZE = Maze(GRID, (0, 0), (0, 3))
 RUN_CONFIG = CONFIG | {"supplied_moves": 1, "interruption_text": "", "per_turn_tokens": 200, "token_budget": 2000}
 ADVICE = "Heading east from here reaches the goal fastest."
 RING = 'stroke="#db2777" stroke-width="3" stroke-dasharray="4 3"'
-
-
-def reply(maze, direction):
-    text = call_text(maze.tool_id(), direction)
-    return text, list(text.encode()) + [0]
 
 
 def note(channel="tool_note", text=ADVICE, sender=None, advised="east", before_turn=1, position=(0, 2)):

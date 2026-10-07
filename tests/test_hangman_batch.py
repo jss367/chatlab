@@ -12,23 +12,15 @@ import gradio as gr
 from chatlab.extension_api import ExtensionContext, ModelService, NavigationService, TokenInspector
 from chatlab.extensions.hangman import batch
 from chatlab.extensions.hangman.batch import BatchControl, next_guess, read_trials, run_trials
-from chatlab.extensions.hangman.game import GIVE_UP, SYSTEM, finish_turn, load, new_game, read_left, word_problems
+from chatlab.extensions.hangman.game import GIVE_UP, SYSTEM, finish_turn, load, read_left, word_problems
 from chatlab.extensions.hangman.page import build_page, turn_note
-from chatlab.model_runtime import GENERATING
+from hangman_support import STOP, CharacterModel, game_of
 from ui_support import handlers_by_name
 
-STOP = 0
 WORDS = ("crane", "crate", "grape", "slate", "stone")
 
 
-def game_of(*exchanges):
-    game = new_game(SYSTEM)
-    for guess, reply in exchanges:
-        game["turns"].append(finish_turn(dict(guess=guess, text=reply, metrics=[], finish_reason="stop")))
-    return game
-
-
-class Host:
+class Host(CharacterModel):
     """A model that answers hangman, one character per token.
 
     ``word`` is the word it holds, and every board it draws is that word's.
@@ -37,10 +29,6 @@ class Host:
     With ``shows`` it draws the whole word on the board whenever it reveals
     it: asked for it, or out of wrong guesses.
     """
-    loaded = True
-    model_id = "test/model"
-    load_id = "first"
-    tokenizer = SimpleNamespace(decode=lambda ids, **kw: "".join(map(chr, ids)))
 
     def __init__(self, word=None, names=(), boards=(), left=6, shows=False):
         self.word, self.names, self.boards, self.left = word, list(names), list(boards), left
@@ -49,21 +37,6 @@ class Host:
         self.calls = []
         self.during = None
         self.fail_on = None
-
-    def claim_generation(self):
-        if self.busy:
-            return GENERATING
-        self.busy = True
-        return None
-
-    def release_generation(self):
-        self.busy = False
-
-    def _stop_token_ids(self):
-        return {STOP}
-
-    def hidden_token_ids(self):
-        return {STOP}
 
     def reply(self, messages, prefill):
         if prefill:

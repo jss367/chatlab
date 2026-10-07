@@ -12,6 +12,13 @@ import numpy as np
 LN2 = math.log(2.0)
 
 
+def mix_color(low, high, share):
+    """The colour ``share`` of the way from hex colour ``low`` to ``high``."""
+    low, high = (np.array([int(c[i:i + 2], 16) for i in (1, 3, 5)]) for c in (low, high))
+    red, green, blue = (low + (high - low) * share).round().astype(int)
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
 @dataclass(frozen=True)
 class Candidate:
     token_id: int
@@ -90,10 +97,6 @@ UNSCORED_BEYOND_LIMIT = "beyond_limit"
 UNSCORED_IMAGE = "image"
 
 RANK_LABELS = ("Top choice", "Top 5", "Top 20", "Rank 21–100", "Rank 101+")
-
-CATEGORY_COLORS = {
-    label: color for label, color in zip(RANK_LABELS, SEQUENTIAL_FILLS)
-} | {UNSCORED_LABEL: UNSCORED_FILL}
 
 
 @dataclass(frozen=True)

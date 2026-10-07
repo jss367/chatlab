@@ -50,9 +50,7 @@ torch>=2.5
 # the video processors a Qwen-VL processor loads beside its image one, which
 # refuse to be built without it. 0.20 is the release paired with torch 2.5.
 torchvision>=0.20
-# 5.3 is the first release with the Metal quantizer behind the 8-bit and
-# 4-bit weight precisions; everything else runs on 4.57, so that stays the
-# floor and an older install is told which version it needs. 5.18 is the
-# ceiling because it accepts only kernels 0.17, which the pin above
-# excludes, and so refuses the 8-bit and 4-bit loads.
+# Pinned to 5.18 as a pair with kernels 0.17 above: 5.18 accepts only that
+# kernels release, and without it reports no kernels and refuses the 8-bit
+# and 4-bit loads. The Metal quantizer behind those precisions arrived in 5.3.
 transformers>=5.18,<5.19

@@ -9,13 +9,13 @@ from unittest import mock
 import gradio as gr
 
 from chatlab.extensions.maze_experiments.dynamic_maze import changing
-from chatlab.extensions.maze_experiments.maze import Maze, call_text, generate
+from chatlab.extensions.maze_experiments.maze import Maze, generate
 from chatlab.extensions.maze_experiments.page import (board, build_page, cell_text, checkpoint_values, parse_cell, status,
                                               timeline)
 from chatlab.extensions.maze_experiments.runner import Episode, fork_token_edit, from_payload, stream_episode
 from chatlab.extensions.maze_experiments.trials import FORMAT as TRIALS_FORMAT, prepare_trial, read_trials
 from chatlab.extension_api import ModelService, TokenInspector, normalize_steering
-from maze_support import CONFIG, NO_CHECKPOINT, SteeringManager, VECTOR
+from maze_support import CONFIG, NO_CHECKPOINT, SteeringManager, VECTOR, reply
 from ui_support import listeners_by_name
 
 
@@ -32,11 +32,6 @@ CORNER = Maze(("....", ".##.", "....", "...."), (2, 2), (0, 1))
 BASE = CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 4000, "attempt_budget": 20}
 # Down, across, the waypoint at (1, 1), then across and up to the destination.
 WALK = ["south", "east", "east", "north", "east"]
-
-
-def reply(maze, direction):
-    text = call_text(maze.tool_id(), direction)
-    return text, list(text.encode()) + [0]
 
 
 def checkpoint(**changes):

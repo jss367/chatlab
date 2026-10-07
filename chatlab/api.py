@@ -319,15 +319,6 @@ def _flag(body: dict, name: str, default: bool = False) -> bool:
     return value
 
 
-def _positive_int(body: dict, name: str) -> int | None:
-    value = body.get(name)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ApiError(400, f"{name} must be a whole number of 1 or more.")
-    return value
-
-
 # What a request may ask for, and the setting each one overrides. The
 # response length answers to OpenAI's name for it as well as its own.
 SAMPLING_FIELDS = {

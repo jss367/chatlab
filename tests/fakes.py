@@ -166,7 +166,6 @@ def loaded_manager(script, pieces=PIECES, eos_id=EOS_ID):
 
 SP_PIECES = ["\u2581Hello", "\u2581world", "world", "\u2581", "!", "<unk>", "<eos>"]
 SP_HELLO, SP_SPACE_WORLD, SP_WORLD, SP_SPACE = 0, 1, 2, 3
-SP_EOS = SP_PIECES.index("<eos>")
 
 
 def sentencepiece_manager(pieces=SP_PIECES):

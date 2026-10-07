@@ -249,7 +249,7 @@ class UpdateFlow:
             if self.cancel.is_set() or (cancel is not None and cancel.is_set()):
                 return False
             self.swapping.set()
-        self._window_call("set_title", f"{WINDOW_TITLE} — installing update…")
+        _window_call(self.window, "set_title", f"{WINDOW_TITLE} — installing update…")
         return True
 
     def _end_swap(self, *, relaunching: bool) -> None:
@@ -286,8 +286,8 @@ class UpdateFlow:
                 self._worker = current
                 current.start()
         if busy and interactive:
-            self._window_call(
-                "create_confirmation_dialog", "ChatLab", "An update check or download is already running."
+            _window_call(
+                self.window, "create_confirmation_dialog", "ChatLab", "An update check or download is already running."
             )
         return current
 
@@ -314,15 +314,6 @@ class UpdateFlow:
             if worker.is_alive():
                 logging.info("Abandoning a stalled update worker; staging is swept on next launch")
 
-    def _window_call(self, method: str, *args):
-        """Call a window method, tolerating a window the user already closed."""
-
-        try:
-            return getattr(self.window, method)(*args)
-        except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
-            logging.info("Window call %s skipped: %s", method, error)
-            return None
-
     def check(self, *, interactive: bool) -> None:
         """Look for a newer release; ``interactive`` reports "up to date" too."""
 
@@ -335,8 +326,8 @@ class UpdateFlow:
             release = updater.check_for_update()
         except updater.UpdateError as error:
             logging.warning("%s", error)
-            if interactive and self._window_call(
-                "create_confirmation_dialog", "ChatLab", f"{error}\n\nOpen the releases page?"
+            if interactive and _window_call(
+                self.window, "create_confirmation_dialog", "ChatLab", f"{error}\n\nOpen the releases page?"
             ):
                 webbrowser.open(updater.RELEASES_PAGE_URL)
             return
@@ -344,8 +335,8 @@ class UpdateFlow:
             if release is None:
                 logging.info("ChatLab %s is up to date", __version__)
                 if interactive:
-                    self._window_call(
-                        "create_confirmation_dialog",
+                    _window_call(
+                        self.window, "create_confirmation_dialog",
                         "ChatLab",
                         f"ChatLab {__version__} is the latest version.",
                     )
@@ -355,8 +346,8 @@ class UpdateFlow:
             self._lock.release()
 
     def _offer(self, release: updater.ReleaseInfo) -> None:
-        accepted = self._window_call(
-            "create_confirmation_dialog",
+        accepted = _window_call(
+            self.window, "create_confirmation_dialog",
             "Update available",
             f"ChatLab {release.version} is available (you have {__version__}).\n\n"
             "Download and install it now? ChatLab will restart when it finishes.",
@@ -382,8 +373,8 @@ class UpdateFlow:
             return
         except updater.UpdateError as error:
             logging.error("Update failed: %s", error)
-            self._window_call("set_title", WINDOW_TITLE)
-            self._window_call("create_confirmation_dialog", "Update failed", str(error))
+            _window_call(self.window, "set_title", WINDOW_TITLE)
+            _window_call(self.window, "create_confirmation_dialog", "Update failed", str(error))
             return
         else:
             relaunching = True
@@ -399,21 +390,21 @@ class UpdateFlow:
             # back for the reader to try again.
             logging.error("Could not reopen ChatLab after the update: %s", error)
             self.release_restart()
-            self._window_call("set_title", WINDOW_TITLE)
-            self._window_call(
-                "create_confirmation_dialog",
+            _window_call(self.window, "set_title", WINDOW_TITLE)
+            _window_call(
+                self.window, "create_confirmation_dialog",
                 "Update installed",
                 f"ChatLab {release.version} is installed, but it could not be reopened "
                 f"({error}).\n\nQuit and open ChatLab again to run it.",
             )
             return
-        self._window_call("destroy")
+        _window_call(self.window, "destroy")
 
     def _report_progress(self, received: int, total: int | None) -> None:
         if total:
-            self._window_call("set_title", f"{WINDOW_TITLE} — downloading update {received * 100 // total}%")
+            _window_call(self.window, "set_title", f"{WINDOW_TITLE} — downloading update {received * 100 // total}%")
         else:
-            self._window_call("set_title", f"{WINDOW_TITLE} — downloading update ({received >> 20} MB)")
+            _window_call(self.window, "set_title", f"{WINDOW_TITLE} — downloading update ({received >> 20} MB)")
 
 
 class RemoteConnection:
@@ -468,8 +459,8 @@ class RemoteConnection:
             self._say(f"ChatLab is already connected to {current.target.host}. Disconnect first.")
             return
         last = remote.load_target(self.saved)
-        answer = self._window_call(
-            "evaluate_js", f"prompt({json.dumps(self.PROMPT)}, {json.dumps(str(last) if last else '')})"
+        answer = _window_call(
+            self.window, "evaluate_js", f"prompt({json.dumps(self.PROMPT)}, {json.dumps(str(last) if last else '')})"
         )
         if not isinstance(answer, str) or not answer.strip():
             return
@@ -484,7 +475,7 @@ class RemoteConnection:
                 return
             self._generation += 1
             self.session = session
-            self._window_call("set_title", f"{WINDOW_TITLE} — connecting to {target.host}…")
+            _window_call(self.window, "set_title", f"{WINDOW_TITLE} — connecting to {target.host}…")
         try:
             url = session.start()
         except remote.RemoteError as error:
@@ -496,7 +487,7 @@ class RemoteConnection:
                 if not cancelled:
                     self.session = None
                     self._generation += 1
-                    self._window_call("set_title", WINDOW_TITLE)
+                    _window_call(self.window, "set_title", WINDOW_TITLE)
             if not cancelled:
                 self._say(f"Could not start ChatLab on {target.host}.\n\n{error}")
             return
@@ -505,8 +496,8 @@ class RemoteConnection:
         with self._lock:
             if not self._closing and self.session is session:
                 remote.save_target(self.saved, target)
-                self._window_call("load_url", url)
-                self._window_call("set_title", f"{WINDOW_TITLE} — {target.host}")
+                _window_call(self.window, "load_url", url)
+                _window_call(self.window, "set_title", f"{WINDOW_TITLE} — {target.host}")
 
     def disconnect(self) -> None:
         """End the session and show this Mac's server again."""
@@ -551,19 +542,22 @@ class RemoteConnection:
         with self._lock:
             if self._closing or self._generation != generation:
                 return False
-            self._window_call("load_url", self.local_url)
-            self._window_call("set_title", WINDOW_TITLE)
+            _window_call(self.window, "load_url", self.local_url)
+            _window_call(self.window, "set_title", WINDOW_TITLE)
             return True
 
     def _say(self, message: str) -> None:
-        self._window_call("create_confirmation_dialog", "ChatLab", message)
+        _window_call(self.window, "create_confirmation_dialog", "ChatLab", message)
 
-    def _window_call(self, method: str, *args):
-        try:
-            return getattr(self.window, method)(*args)
-        except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
-            logging.info("Window call %s skipped: %s", method, error)
-            return None
+
+def _window_call(window, method: str, *args):
+    """Call a window method, tolerating a window the user already closed."""
+
+    try:
+        return getattr(window, method)(*args)
+    except Exception as error:  # noqa: BLE001 - window is gone; log and carry on
+        logging.info("Window call %s skipped: %s", method, error)
+        return None
 
 
 def run_desktop() -> int:

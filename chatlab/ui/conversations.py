@@ -39,7 +39,7 @@ from chatlab.conversation import (
 from chatlab.token_metrics import (
     DEFAULT_COLOR_SCALE,
 )
-from chatlab.trace_export import write_private_text
+from chatlab.files import write_private_text
 from chatlab.ui.common import (
     ARCHIVED_VIEW_CLASS,
     NO_TOKEN_SELECTED,

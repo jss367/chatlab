@@ -50,6 +50,41 @@ def positions_after(ep, index):
     return positions
 
 
+# A cell's side on the board, and the margin the row and column numbers sit in.
+CELL, PAD = 56, 28
+
+
+def cell_center(point):
+    """The centre of the cell at ``point``, a (row, column) pair, on the board."""
+    return PAD + (point[1] + .5) * CELL, PAD + (point[0] + .5) * CELL
+
+
+def cell_points(path):
+    """A path of cells as an SVG ``points`` list through their centres."""
+    return " ".join(f"{x},{y}" for x, y in map(cell_center, path))
+
+
+def board_grid(maze, closed, label):
+    """The board's opening: the SVG tag, every cell with those in ``closed`` closed, and the row and column numbers."""
+    size = maze.size
+    total = CELL * size + 2 * PAD
+    parts = [f'<svg viewBox="0 0 {total} {total}" role="img" aria-label="{size} by {size} maze. {label}.">']
+    for r, row in enumerate(maze.grid):
+        for c, value in enumerate(row):
+            fill = "#78350f" if (r, c) in closed else "#27344a" if value == "#" else "#fff"
+            parts.append(f'<rect x="{PAD+c*CELL+2}" y="{PAD+r*CELL+2}" width="52" height="52" rx="7" fill="{fill}"/>')
+    for i in range(size):
+        parts.append(f'<text x="{PAD+(i+.5)*CELL}" y="17" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
+        parts.append(f'<text x="12" y="{PAD+(i+.5)*CELL+4}" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
+    return parts
+
+
+def waypoint_mark(point):
+    """The flag on the waypoint's cell."""
+    x, y = cell_center(point)
+    return f'<text x="{x}" y="{y+8}" text-anchor="middle" font-size="22" fill="#0f766e">⚑</text>'
+
+
 def insert_mark(x, y, advised):
     """The ring where a message went in, centred on ``x``, ``y``, and an arrow for the direction it advised."""
     parts = [f'<circle cx="{x}" cy="{y}" r="21" stroke="#db2777" stroke-width="3" stroke-dasharray="4 3" fill="none"/>']
@@ -84,40 +119,23 @@ def team_board(ep, index=None, reveal=False, map_round=None):
     maze = maze_at_turn(ep.maze, updates, None, "before_round")
     closed = {tuple(u["closed_cell"]) for u in updates}
     positions = positions_after(ep, index)
-    size, cell, pad = maze.size, 56, 28
-    total = cell * size + 2 * pad
-
-    def center(point):
-        return pad + (point[1] + .5) * cell, pad + (point[0] + .5) * cell
-
-    def points(path):
-        return " ".join(f"{x},{y}" for x, y in map(center, path))
-
     where = "; ".join(f"{a['name']} at row {p[0]}, column {p[1]}" for a, p in zip(ep.agents, positions))
-    parts = [f'<svg viewBox="0 0 {total} {total}" role="img" aria-label="{size} by {size} maze. {where}.">']
-    for r, row in enumerate(maze.grid):
-        for c, value in enumerate(row):
-            fill = "#78350f" if (r, c) in closed else "#27344a" if value == "#" else "#fff"
-            parts.append(f'<rect x="{pad+c*cell+2}" y="{pad+r*cell+2}" width="52" height="52" rx="7" fill="{fill}"/>')
-    for i in range(size):
-        parts.append(f'<text x="{pad+(i+.5)*cell}" y="17" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
-        parts.append(f'<text x="12" y="{pad+(i+.5)*cell+4}" text-anchor="middle" fill="#7b8598" font-size="12">{i}</text>')
+    parts = board_grid(maze, closed, where)
     if reveal:
-        parts.append(f'<polyline points="{points(maze.route())}" fill="none" stroke="#b4bdcc" stroke-width="4" stroke-dasharray="3 8"/>')
+        parts.append(f'<polyline points="{cell_points(maze.route())}" fill="none" stroke="#b4bdcc" stroke-width="4" stroke-dasharray="3 8"/>')
     checkpoint = ep.config.get("required_checkpoint")
     steer_cell = (ep.config.get("steer_when") or {}).get("cell")
     for point, color, label in ((checkpoint, "#0891b2", "Required checkpoint"),
                                 (steer_cell, "#9333ea", "Steering cell")):
         if point is not None:
-            x, y = center(point)
+            x, y = cell_center(point)
             inset = 22 if label == "Required checkpoint" else 18
             parts.append(f'<rect x="{x-inset}" y="{y-inset}" width="{inset*2}" height="{inset*2}" '
                          f'fill="none" stroke="{color}" stroke-width="3" stroke-dasharray="5 3">'
                          f'<title>{label}</title></rect>')
     waypoint = ep.config.get("waypoint")
     if waypoint is not None:
-        x, y = center(waypoint)
-        parts.append(f'<text x="{x}" y="{y+8}" text-anchor="middle" font-size="22" fill="#0f766e">⚑</text>')
+        parts.append(waypoint_mark(waypoint))
     # Each agent's path is drawn a little off the cell centre, so two agents
     # walking the same corridor stay two lines. The offsets repeat every eight
     # agents so that no path leaves its own cells.
@@ -125,7 +143,7 @@ def team_board(ep, index=None, reveal=False, map_round=None):
     for event in ep.events:
         if event["accepted"] and event_round(event) <= index:
             k = event["agent"]
-            (x1, y1), (x2, y2) = center(event["before"]), center(event["after"])
+            (x1, y1), (x2, y2) = cell_center(event["before"]), cell_center(event["after"])
             d = offsets[k]
             dash = ' stroke-dasharray="5 6"' if event["source"] == "supplied" else ""
             parts.append(f'<line x1="{x1+d}" y1="{y1+d}" x2="{x2+d}" y2="{y2+d}" stroke="{agent_color(k)}" '
@@ -134,16 +152,16 @@ def team_board(ep, index=None, reveal=False, map_round=None):
     for agent in ep.agents:
         turn = agent.get("intervention_turn")
         if agent.get("interrupted") and turn is not None and ep.turns[turn]["round"] <= map_round:
-            x, y = center(ep.turns[turn]["position_before"])
+            x, y = cell_center(ep.turns[turn]["position_before"])
             parts.append(f'<circle cx="{x}" cy="{y}" r="23" stroke="#f59e0b" stroke-width="3" fill="none">'
                          f'<title>{html.escape(agent["name"])} interrupted</title></circle>')
     # Where each message went in, from the round that read it, as a run of one agent draws its own.
     for insert in ep.config.get("context_inserts", ()):
         if insert["before_round"] <= map_round:
-            parts.append(insert_mark(*center(insert["position"]), insert.get("advised_direction")))
-    x, y = center(maze.start)
+            parts.append(insert_mark(*cell_center(insert["position"]), insert.get("advised_direction")))
+    x, y = cell_center(maze.start)
     parts.append(f'<text x="{x}" y="{y+5}" text-anchor="middle" fill="#64748b" font-size="14" font-weight="700">S</text>')
-    x, y = center(maze.goal)
+    x, y = cell_center(maze.goal)
     parts.append(f'<circle cx="{x}" cy="{y}" r="17" fill="#d1fae5"/><text x="{x}" y="{y+7}" text-anchor="middle" font-size="23" fill="#047857">★</text>')
     # Up to four agents sharing a cell are fanned out around it rather than
     # stacked. More than that would not fit, so the cell shows how many there
@@ -152,7 +170,7 @@ def team_board(ep, index=None, reveal=False, map_round=None):
     for k, position in enumerate(positions):
         by_cell.setdefault(tuple(position), []).append(k)
     for position, sharing in by_cell.items():
-        x, y = center(position)
+        x, y = cell_center(position)
         if len(sharing) > FANNED:
             names = html.escape(", ".join(ep.agents[k]["name"] for k in sharing))
             parts.append(f'<g><title>{names}</title><circle cx="{x}" cy="{y}" r="19" fill="#334155" stroke="white" '

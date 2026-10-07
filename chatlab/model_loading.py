@@ -388,10 +388,9 @@ def _read_text_model(
         try:
             from transformers import MetalConfig
         except ImportError as error:
-            # requirements.txt admits 4.57, which predates the quantizer; the
-            # rest of the app runs there, so the floor stays and the choice
-            # is refused with the version it needs rather than a bare
-            # ImportError.
+            # An install older than requirements.txt asks for may predate the
+            # quantizer, so the choice is refused with the version it needs
+            # rather than a bare ImportError.
             import transformers
 
             raise RuntimeError(

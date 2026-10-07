@@ -14,6 +14,7 @@ import numpy as np
 
 from chatlab.model_inspection import ProjectionCancelled
 from chatlab.extension_api import write_private_text
+from chatlab.token_metrics import mix_color as mix
 from . import probe as probes
 
 logger = logging.getLogger(__name__)
@@ -303,17 +304,11 @@ def saved_choices(directory):
     return choices
 
 
-def _mix(low, high, share):
-    low, high = (np.array([int(c[i:i + 2], 16) for i in (1, 3, 5)]) for c in (low, high))
-    red, green, blue = (low + (high - low) * share).round().astype(int)
-    return f"#{red:02x}{green:02x}{blue:02x}"
-
-
 def heat_color(probability, palette):
     cool, neutral, warm = palette["diverging"][4], palette["diverging"][2], palette["diverging"][0]
     if probability < 0.5:
-        return _mix(cool, neutral, probability * 2)
-    return _mix(neutral, warm, (probability - 0.5) * 2)
+        return mix(cool, neutral, probability * 2)
+    return mix(neutral, warm, (probability - 0.5) * 2)
 
 
 def heatmap(probe, reading, layer, palette):

@@ -24,8 +24,6 @@ from chatlab.token_metrics import (
 )
 
 
-SLOTS = ("A", "B")
-
 # The two ways a slot is filled. A reply is what the model writes, so two
 # replies share a prompt and part company somewhere inside the answer. A
 # measurement is a passage the reader supplies, which both runs are made to

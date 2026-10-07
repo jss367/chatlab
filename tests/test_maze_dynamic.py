@@ -11,13 +11,13 @@ import gradio as gr
 
 from chatlab.extensions.maze_experiments.dynamic_maze import (FORMAT, ChangingMaze, changing, check_closure,
                                                       close_cell, environment_id, load_maze)
-from chatlab.extensions.maze_experiments.maze import GOAL_MODES, Maze, call_text
+from chatlab.extensions.maze_experiments.maze import GOAL_MODES, Maze
 from chatlab.extensions.maze_experiments.page import board, build_page, scenario_values, status
 from chatlab.extensions.maze_experiments import runner
 from chatlab.extensions.maze_experiments.runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_episode
 from chatlab.extension_api import TokenInspector
 
-from maze_support import CONFIG, Manager
+from maze_support import CONFIG, Manager, reply
 from ui_support import listeners_by_name
 
 # A short corridor and one long way round, so a single closure can send the
@@ -32,12 +32,6 @@ OPEN = Maze(GRID, (0, 0), (0, 3))
 POCKET = Maze(("....", "###.", "....", "...."), (2, 0), (3, 3))
 CHANGING_CONFIG = CONFIG | {"interruption_text": "", "per_turn_tokens": 200, "token_budget": 2000,
                             "openness": .7}
-
-
-def reply(maze, direction):
-    """One response that calls move, as the fixture manager hands it back."""
-    text = call_text(maze.tool_id(), direction)
-    return text, list(text.encode()) + [0]
 
 
 class ChangingMapTests(unittest.TestCase):

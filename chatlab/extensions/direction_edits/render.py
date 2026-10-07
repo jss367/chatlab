@@ -5,6 +5,8 @@ import html
 
 import numpy as np
 
+from chatlab.token_metrics import mix_color as mix
+
 # Columns past this are left out of the heatmaps; the download keeps them all.
 HEAT_COLUMNS = 512
 PASSES = (("reference", "Reference, no injection"), ("injected", "Injected"),
@@ -12,21 +14,11 @@ PASSES = (("reference", "Reference, no injection"), ("injected", "Injected"),
 SETTING_NAMES = (("no_edit", "No edit"), ("edit", "Edit"), ("random", "Random control"))
 
 
-def _escape(value):
-    return html.escape(str(value), quote=True)
-
-
-def _mix(low, high, share):
-    low, high = (np.array([int(c[i:i + 2], 16) for i in (1, 3, 5)]) for c in (low, high))
-    red, green, blue = (low + (high - low) * share).round().astype(int)
-    return f"#{red:02x}{green:02x}{blue:02x}"
-
-
 def _fill(share, stops):
     """A colour along the sequential stops, ``share`` from 0 (coolest) to 1 (warmest)."""
     share = min(max(share, 0.0), 1.0) * (len(stops) - 1)
     index = min(int(share), len(stops) - 2)
-    return _mix(stops[index], stops[index + 1], share - index)
+    return mix(stops[index], stops[index + 1], share - index)
 
 
 def _percent(value, digits=0):
@@ -99,14 +91,14 @@ def heatmaps(result, index, palette, display):
                 spread = high - low
                 cells = "".join(
                     f'<td style="background:{_fill((value - low) / spread if spread else 0.5, stops)}" '
-                    f'title="{_escape(display(text))} · token {token} · block {block} · {value:.3f}"></td>'
+                    f'title="{html.escape(display(text))} · token {token} · block {block} · {value:.3f}"></td>'
                     for token, (text, value) in enumerate(zip(tokens, row[:length]), start=1))
             rows.append(f"<tr{marked}><th>block {block}</th>{cells}</tr>")
-        grids.append(f'<h4>{_escape(label)}</h4><div class="de-heat"><table>{_marks(result, length)}'
+        grids.append(f'<h4>{html.escape(label)}</h4><div class="de-heat"><table>{_marks(result, length)}'
                      f'{"".join(rows)}</table></div>')
     total = len(result["passage_tokens"])
     note = f"<p>Showing the first {HEAT_COLUMNS} of {total} passage tokens.</p>" if total > HEAT_COLUMNS else ""
-    return (f'<p>The coordinate along each block\'s direction for <b>{_escape(condition["name"])}</b>. Each '
+    return (f'<p>The coordinate along each block\'s direction for <b>{html.escape(condition["name"])}</b>. Each '
             "block's row runs from its 5th percentile (cool) to its 95th (warm) on one scale for every pass. "
             "Outlined rows are edited. Hover a cell for its token and value.</p>" + note + "".join(grids))
 
@@ -118,7 +110,7 @@ def recovery_table(result):
     conditions = result["conditions"]
     random = bool(conditions[0]["recovery"]["random"])
     edited = set(result["edited_blocks"])
-    head = "".join(f"<th>{_escape(c['name'])}</th>" + ("<th>random</th>" if random else "") for c in conditions)
+    head = "".join(f"<th>{html.escape(c['name'])}</th>" + ("<th>random</th>" if random else "") for c in conditions)
     rows = []
     for block in range(len(conditions[0]["recovery"]["edited"])):
         cells = "".join(
@@ -162,7 +154,7 @@ def lens_table(result):
                 if key != "random" or result["inputs"]["edit"]["random_control"]]
     head = "".join(f"<th>{label}</th>" for _key, label in settings)
     rows = "".join(
-        f"<tr><th>{_escape(c['name'])}</th>" + "".join(f"<td>{_number(c['lens'][key])}</td>" for key, _ in settings)
+        f"<tr><th>{html.escape(c['name'])}</th>" + "".join(f"<td>{_number(c['lens'][key])}</td>" for key, _ in settings)
         + "</tr>" for c in result["conditions"])
     return (f'<div class="de-table"><table><thead><tr><th>Condition</th>{head}</tr></thead>'
             f"<tbody>{rows}</tbody></table></div>")
@@ -193,7 +185,7 @@ def differences_table(result):
                  f"<td>{_signed(item['edit_change'])}</td>")
         if random:
             cells += f"<td>{_number(item['random'])}</td><td>{_signed(item['random_change'])}</td>"
-        rows.append(f"<tr><th>{_escape(item['name'])}: {_escape(item['minuend'])} − "
-                    f"{_escape(item['subtrahend'])}</th>{cells}</tr>")
+        rows.append(f"<tr><th>{html.escape(item['name'])}: {html.escape(item['minuend'])} − "
+                    f"{html.escape(item['subtrahend'])}</th>{cells}</tr>")
     return (f'<div class="de-table"><table><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>')
