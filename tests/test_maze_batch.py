@@ -249,7 +249,7 @@ class BatchTests(unittest.TestCase):
             path.write_text(text[:3])
             raise OSError("No space left on device")
 
-        with mock.patch.object(batch_module, "write_private_text", cut_off):
+        with mock.patch("chatlab.files.write_private_text", cut_off):
             with self.assertRaises(OSError):
                 batch_module.write_summary(directory, dict(status="finished"), [])
         self.assertEqual({name: (directory / name).read_text() for name in before}, before)

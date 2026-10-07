@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import json
 import math
-import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -14,7 +13,7 @@ from uuid import uuid4
 
 from chatlab import compare
 from chatlab import library
-from chatlab.trace_export import write_private_text
+from chatlab.files import replace_private_text
 from chatlab.version import __version__
 
 _LOCK = threading.RLock()
@@ -34,12 +33,7 @@ def _path(identifier: str) -> Path:
 def _write(document: dict) -> None:
     path = _path(document["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    staged = path.with_suffix(f".{uuid4().hex}.tmp")
-    try:
-        write_private_text(staged, json.dumps(document, ensure_ascii=False, allow_nan=False) + "\n")
-        os.replace(staged, path)
-    finally:
-        staged.unlink(missing_ok=True)
+    replace_private_text(path, json.dumps(document, ensure_ascii=False, allow_nan=False) + "\n")
 
 
 def save(run: dict, title: str = "") -> dict:

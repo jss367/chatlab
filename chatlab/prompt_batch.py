@@ -13,13 +13,8 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from chatlab.trace_export import (
-    append_private_text,
-    candidate_width,
-    trace_to_json,
-    traces_to_csv,
-    write_private_text,
-)
+from chatlab.files import append_private_text, write_private_text
+from chatlab.trace_export import candidate_width, trace_to_json, traces_to_csv
 
 
 # The keys a JSON prompt may carry, in the order they are looked for. A file

@@ -10,10 +10,10 @@ from contextlib import contextmanager
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import re
-from uuid import uuid4
+
+from chatlab.files import replace_private_text
 
 FORMAT = "chatlab-steering-1"
 REFERENCE_FORMAT = "chatlab-steering-reference-1"
@@ -91,8 +91,6 @@ def compact(value):
     value = normalize(value)
     if value is None or value["format"] == REFERENCE_FORMAT:
         return value
-    from chatlab.trace_export import write_private_text
-
     text = _asset_text(value)
     vector_id = hashlib.sha256(text.encode()).hexdigest()
     directory = asset_directory()
@@ -101,12 +99,7 @@ def compact(value):
     # path above and never read or rewrite assets while a response streams.
     if not path.exists() or path.read_text(encoding="utf-8") != text:
         directory.mkdir(parents=True, exist_ok=True)
-        staging = directory / f".{vector_id}.{uuid4().hex}.tmp"
-        try:
-            write_private_text(staging, text)
-            os.replace(staging, path)
-        finally:
-            staging.unlink(missing_ok=True)
+        replace_private_text(path, text)
     return {key: item for key, item in value.items() if key not in ("format", "vector")} | {
         "format": REFERENCE_FORMAT, "vector_id": vector_id, "width": len(value["vector"]),
     }

@@ -29,7 +29,7 @@ from chatlab.conversation import make_turn, model_messages
 from chatlab.model_runtime import LOADING
 from chatlab.text_generation import ModelChanged
 from chatlab.steering import SteeringError, compact as compact_steering, from_controls
-from chatlab.trace_export import write_private_text
+from chatlab.files import write_private_text
 from chatlab.ui import runtime
 from chatlab.ui.common import failure_status
 from chatlab.ui.generation import resolve_seed

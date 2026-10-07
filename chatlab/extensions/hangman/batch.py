@@ -18,21 +18,16 @@ The model is held from the first game to the last, so every row describes the
 same weights.
 """
 from collections import Counter
-import csv
 import hashlib
-import io
 import json
 import logging
 import math
-import os
 from pathlib import Path
-import re
 import shutil
 import tempfile
 import time
-from uuid import uuid4
 
-from chatlab.extension_api import write_private_text
+from chatlab.extension_api import batch_directory, csv_text, replace_private_text, write_private_text
 from .game import (
     GIVE_UP, HIDDEN, MAX_FILE_BYTES, OPENING, PROBE_PREFILL, SYSTEM, check, dictionary, finish_turn,
     fitting_words, guess_of, messages_for, new_game, probe_word, read_left, saved, word_problems,
@@ -453,44 +448,19 @@ def cut_short(rows, total):
     return len(rows) < total or any(row["outcome"] == "stopped" for row in rows)
 
 
-def batch_directory(root, title):
-    """A new directory for one batch, named for when it started and its title."""
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "trials"
-    directory = Path(root) / "batches" / f"{time.strftime('%Y%m%d-%H%M%S')}-{slug}"
-    suffix, candidate = 1, directory
-    while candidate.exists():
-        suffix += 1
-        candidate = directory.with_name(f"{directory.name}-{suffix}")
-    candidate.mkdir(parents=True)
-    return candidate
 
 
-def table(columns, rows):
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator="\n")
-    writer.writeheader()
-    writer.writerows(rows)
-    return buffer.getvalue()
 
 
 def write_summary(directory, manifest, rows, probes):
     """Rewrite the tables and the manifest whole after every game, so a stopped
     batch leaves a complete record of what it played."""
-    replace_text(directory / SUMMARY_NAME, table(COLUMNS, rows), newline="")
-    replace_text(directory / PROBES_NAME, table(PROBE_COLUMNS, probes), newline="")
-    replace_text(directory / MANIFEST_NAME,
+    replace_private_text(directory / SUMMARY_NAME, csv_text(COLUMNS, rows), newline="")
+    replace_private_text(directory / PROBES_NAME, csv_text(PROBE_COLUMNS, probes), newline="")
+    replace_private_text(directory / MANIFEST_NAME,
                  json.dumps(dict(manifest, results=rows), ensure_ascii=False, indent=1) + "\n")
 
 
-def replace_text(path, text, *, newline=None):
-    """Write ``text`` beside ``path`` and move it into place once it is whole,
-    so a write failing on a full disk leaves the last good copy."""
-    staged = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        write_private_text(staged, text, newline=newline)
-        os.replace(staged, path)
-    finally:
-        staged.unlink(missing_ok=True)
 
 
 def downloads(directory):

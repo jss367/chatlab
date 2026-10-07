@@ -53,7 +53,6 @@ import logging
 import os
 import threading
 import time
-from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
@@ -67,7 +66,7 @@ from chatlab.conversation import (
     turns_from_entries,
 )
 from chatlab.steering import compact as compact_steering
-from chatlab.trace_export import write_private_text
+from chatlab.files import replace_private_text
 
 logger = logging.getLogger(__name__)
 
@@ -545,17 +544,11 @@ def _replace(target: Path, text: str) -> bool:
     away, each other's copy. Called with ``_WRITE_LOCK`` held.
     """
 
-    staging = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        write_private_text(staging, text)
-        os.replace(staging, target)
+        replace_private_text(target, text)
     except OSError as error:
         logger.warning("Could not save the conversations to %s: %s", target, error)
-        # Whatever of the staged copy got as far as disk is not left beside
-        # the file; the failure may have been before any of it did.
-        with suppress(OSError):
-            staging.unlink()
         return False
     return True
 

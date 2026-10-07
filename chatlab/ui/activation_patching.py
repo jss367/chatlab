@@ -14,7 +14,7 @@ from uuid import uuid4
 import gradio as gr
 
 from chatlab.model_runtime import LOADING
-from chatlab.trace_export import write_private_text
+from chatlab.files import write_private_text
 from chatlab.ui import runtime
 from chatlab.ui.common import failure_status
 from chatlab.ui.panel import code_span

@@ -40,7 +40,7 @@ class SavedRunsTests(unittest.TestCase):
 
     def test_failed_replace_leaves_previous_document(self):
         item = runs.save(self.run)
-        with mock.patch.object(runs.os, "replace", side_effect=OSError("disk full")):
+        with mock.patch("chatlab.files.os.replace", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 runs.bookmark(item["id"], 0, "new")
         self.assertEqual(runs.read(item["id"])["bookmarks"], {})

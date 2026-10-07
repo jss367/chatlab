@@ -9,12 +9,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from chatlab import trace_export
+from chatlab import files
+from chatlab.files import write_private_text
 from chatlab.trace_export import (
     build_trace,
     trace_to_csv,
     trace_to_json,
-    write_private_text,
     write_trace_export,
 )
 
@@ -107,7 +107,7 @@ class WritePrivateTextTests(unittest.TestCase):
             modes.append(stat.S_IMODE(path.stat().st_mode))
             return opened(descriptor, *args, **kwargs)
 
-        with mock.patch.object(trace_export.os, "fdopen", record):
+        with mock.patch.object(files.os, "fdopen", record):
             write_private_text(path, "a private conversation")
 
         # The mode is already settled when the handle the text goes through is

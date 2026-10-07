@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from copy import deepcopy
+import json
+from pathlib import Path
+import tempfile
 import threading
 import time
 from uuid import uuid4
 
 import gradio as gr
 
+from chatlab.files import write_private_text
 from chatlab.conversation import MAIN_BRANCH, branch_sampling, copy_forks, put_branch_sampling
 from chatlab.steering import compact, from_controls, normalize, read_vector
 from chatlab.ui.conversations import load_conversation
@@ -389,13 +393,6 @@ def use_extracted(forks, extraction, layer):
 
 def download_extracted(extraction, layer):
     """Write the chosen layer's direction where the browser can fetch it."""
-
-    import json
-    import tempfile
-    from pathlib import Path
-    from uuid import uuid4
-
-    from chatlab.trace_export import write_private_text
 
     if not extraction:
         return None
