@@ -209,7 +209,8 @@ class Hooks:
         direction = torch.as_tensor(self.unit[layer], dtype=torch.float32, device=hidden.device)
         size = sizes_for(x @ direction, stop - rows.start).to(device=hidden.device, dtype=torch.float32)
         if record is not None:
-            record.setdefault(layer, size.double().cpu().numpy())
+            # MPS cannot hold float64 tensors; widen only after leaving the device.
+            record.setdefault(layer, size.cpu().double().numpy())
         step = torch.as_tensor(along, dtype=torch.float32, device=hidden.device)
         out[0, rows.start:stop] = (x + size[:, None] * step[None]).to(hidden.dtype)
         return out

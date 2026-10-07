@@ -91,6 +91,61 @@ def hooks_left(manager):
             if block._forward_hooks or block._forward_pre_hooks]
 
 
+class EditDeviceTests(unittest.TestCase):
+    def test_recording_moves_sizes_to_cpu_before_widening(self):
+        # Emulate a device that supports the float32 edit but refuses float64,
+        # so this regression runs on CPU-only CI as well as Apple hardware.
+        class Float32DeviceSizes:
+            def __init__(self, values):
+                self.values = values
+
+            def to(self, *, device, dtype):
+                self.assert_dtype(dtype)
+                return self
+
+            def assert_dtype(self, dtype):
+                if dtype != torch.float32:
+                    raise TypeError("Device does not support float64")
+
+            def double(self):
+                raise TypeError("Device does not support float64")
+
+            def cpu(self):
+                return self.values.cpu()
+
+            def __getitem__(self, index):
+                return self.values[index]
+
+        hidden = torch.zeros(1, 3, WIDTH)
+        unit = unit_rows().astype(np.float32)
+        edit = inputs()["edit"] | {"tokens": [1, 3]}
+        hooks = experiment.Hooks(None, edit, unit, 0)
+        sizes = torch.tensor([1.0, -2.0, 3.0])
+        recorded = {}
+        changed = hooks._move(hidden, 1, lambda _coordinate, _count: Float32DeviceSizes(sizes),
+                              unit[1], recorded)
+        np.testing.assert_array_equal(recorded[1], sizes.numpy())
+        self.assertEqual(recorded[1].dtype, np.float64)
+        torch.testing.assert_close(changed[0], sizes[:, None] * torch.tensor(unit[1]))
+
+    @unittest.skipUnless(torch.backends.mps.is_available(), "MPS is unavailable")
+    def test_every_edit_records_sizes_on_mps(self):
+        unit = unit_rows().astype(np.float32)
+        hidden = torch.zeros(1, 3, WIDTH, device="mps")
+        for mode in experiment.MODES:
+            with self.subTest(mode=mode):
+                edit = inputs()["edit"] | {"mode": mode, "value": 2.0, "tokens": [1, 3]}
+                hooks = experiment.Hooks(None, edit, unit, 0)
+                recorded = {}
+                changed = hooks.edited(1, np.ones(3), recorded)(hidden)
+                self.assertEqual(changed.device.type, "mps")
+                self.assertEqual(recorded[1].dtype, np.float64)
+                expected = 1.0 if mode == experiment.ERASE else 2.0
+                np.testing.assert_allclose(recorded[1], expected)
+                control = hooks.control(1, recorded[1], experiment.random_direction(7, 1, unit[1]))(hidden)
+                torch.testing.assert_close(control.cpu().norm(dim=-1), changed.cpu().norm(dim=-1))
+
+
 class LensFixture(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
