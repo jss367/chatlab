@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 # for a summary. Short examples are also what the difference in means is for.
 STEERING_EXAMPLE_TOKEN_LIMIT = 512
 
+# Bound vocabulary-sized lens intermediates independently of passage length.
+LENS_SCORE_ELEMENTS = 1 << 20
+
 # How one example's tokens become one vector: the position the model would
 # have written from, or the average over the whole example. The first is what
 # a chat behaviour lives at; the second describes the passage as a whole.
@@ -1092,8 +1095,8 @@ class InspectionMixin:
                     check_cancelled()
                     hidden = output[0] if isinstance(output, tuple) else output
                     if layer == last:
-                        # The whole sequence, as the model's own head reads it.
-                        states["last"] = hidden[0].detach().float().cpu().clone()
+                        # Only the token compared with the model's own head below.
+                        states["last"] = hidden[0, -1:].detach().float().cpu().clone()
                     if layer in blocks:
                         states[layer] = hidden[0, index.to(hidden.device)].detach().float().cpu().clone()
 
@@ -1126,12 +1129,19 @@ class InspectionMixin:
             answer = np.empty((len(blocks), len(positions), len(groups)), dtype=np.float64)
             for row, layer in enumerate(blocks):
                 check_cancelled()
-                scores = jacobian_lens._unembed(engine, layout, states[layer] @ lens.matrices[layer].float().T)
-                if not torch.isfinite(scores).all():
-                    raise ValueError("The Jacobian readout produced non-finite scores.")
-                normalizer = torch.logsumexp(scores.double(), dim=-1)
-                for column, group in enumerate(groups):
-                    answer[row, :, column] = (scores[:, group].double().mean(dim=-1) - normalizer).numpy()
+                chunk_size = max(1, LENS_SCORE_ELEMENTS // vocabulary)
+                matrix = lens.matrices[layer].float().T
+                for start in range(0, len(positions), chunk_size):
+                    check_cancelled()
+                    stop = min(start + chunk_size, len(positions))
+                    scores = jacobian_lens._unembed(engine, layout, states[layer][start:stop] @ matrix)
+                    if not torch.isfinite(scores).all():
+                        raise ValueError("The Jacobian readout produced non-finite scores.")
+                    normalizer = torch.logsumexp(scores.double(), dim=-1)
+                    for column, group in enumerate(groups):
+                        answer[row, start:stop, column] = (scores[:, group].double().mean(dim=-1) - normalizer).numpy()
+                    # Do not retain the previous vocabulary slab during the next unembedding.
+                    del scores, normalizer
             return answer
 
     @_guards_device_memory

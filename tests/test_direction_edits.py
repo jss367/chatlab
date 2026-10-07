@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from chatlab import steering
+from chatlab import jacobian_lens, model_inspection, steering
 from chatlab.extension_api import (ExtensionContext, ModelService, NavigationService, ProjectionCancelled,
                                    TokenInspector)
 from chatlab.extensions.direction_edits import experiment, files, page as edits_page, render as edits_render
@@ -303,6 +303,55 @@ class LensAccessorTests(LensFixture):
         np.testing.assert_allclose(got, self.expected_log_probs(ids, targets, [1, 3], [0, 4, 6]), atol=1e-5)
         self.assertEqual(hooks_left(self.manager), [])
 
+    def test_large_vocabulary_readout_is_chunked_and_equivalent(self):
+        # Synthetic weights only: exercise the 128k-vocabulary allocation bound offline.
+        self.manager.model.lm_head = torch.nn.Linear(WIDTH, 128000, bias=False)
+        self.import_lens()
+        ids = self.manager.tokenizer.encode(PASSAGE)
+        positions = [6, 0, 4, 6, 1] * 3 + [2, 5]
+        targets = [127999, [2, 7, 2], [0]]
+        rows = []
+        original = jacobian_lens._unembed
+
+        def unembed(engine, layout, vectors):
+            rows.append(len(vectors))
+            return original(engine, layout, vectors)
+
+        with mock.patch.object(jacobian_lens, "_unembed", side_effect=unembed):
+            with self.service.open_session() as session:
+                got = session.lens_log_probs(ids, targets, [3, 1, 3], positions)
+        # Replay is one position; each block's readout is 8 + 8 + 1 positions.
+        self.assertEqual(rows, [1] + [8, 8, 1] * 3)
+        self.assertTrue(all(n * 128000 <= model_inspection.LENS_SCORE_ELEMENTS for n in rows))
+        np.testing.assert_allclose(got, self.expected_log_probs(ids, targets, [3, 1, 3], positions), atol=1e-5)
+        self.assertEqual(hooks_left(self.manager), [])
+
+    def test_chunk_boundary_cancellation_and_nonfinite_scores(self):
+        self.import_lens()
+        ids = self.manager.tokenizer.encode(PASSAGE)
+        original = jacobian_lens._unembed
+        for failure in ("cancel", "nonfinite"):
+            with self.subTest(failure=failure):
+                calls, stop = [], threading.Event()
+
+                def unembed(engine, layout, vectors):
+                    calls.append(len(vectors))
+                    scores = original(engine, layout, vectors)
+                    if len(calls) == 2 and failure == "cancel":
+                        stop.set()
+                    if len(calls) == 3 and failure == "nonfinite":
+                        scores[0, 0] = float("nan")
+                    return scores
+
+                # A budget smaller than one vocabulary still processes one row at a time.
+                with mock.patch.object(model_inspection, "LENS_SCORE_ELEMENTS", 1), \
+                        mock.patch.object(jacobian_lens, "_unembed", side_effect=unembed):
+                    with self.assertRaises(ProjectionCancelled if failure == "cancel" else ValueError):
+                        self.manager.lens_log_probs(ids, [ids[0]], [1], [0, 1, 2], cancelled=stop.is_set)
+                self.assertEqual(calls, [1, 1] if failure == "cancel" else [1, 1, 1])
+                self.assertEqual(hooks_left(self.manager), [])
+                self.assertFalse(self.manager._lock.locked())
+
     def test_the_lens_reads_through_the_callers_hooks_inside_the_held_model(self):
         self.import_lens()
         ids = self.manager.tokenizer.encode(PASSAGE)
@@ -563,6 +612,34 @@ class RefusalTests(LensFixture):
                     run(session, inputs(directions=direction_set(model_revision="b" * 40)))
                 # A file that does not record its revision is taken at its word.
                 run(session, inputs(directions=direction_set(model_revision=None)))
+        self.assertEqual(hooks_left(self.manager), [])
+
+    def test_zero_strength_injection_is_validated_before_any_pass(self):
+        invalid = [vector(model_id="other/model"), vector(layer=BLOCKS),
+                   vector() | {"vector": [1.0] * (WIDTH - 1)}]
+        with mock.patch.object(self.manager.model, "forward", wraps=self.manager.model.forward) as forward:
+            for specification in invalid:
+                with self.subTest(vector=specification):
+                    with self.service.open_session() as session:
+                        with self.assertRaises(ValueError):
+                            run(session, inputs(injection={"vector": specification, "strength": 0.0, "tokens": [2, 6]}))
+                    forward.assert_not_called()
+        self.assertEqual(hooks_left(self.manager), [])
+        self.assertFalse(self.manager._lock.locked())
+
+    def test_valid_zero_strength_injection_preserves_passes_and_measurements(self):
+        self.import_lens()
+        value = inputs(readout={"word": " sat", "tokens": [1, 8], "blocks": [1, 3]})
+        value["injection"]["strength"] = 0.0
+        with self.service.open_session() as session:
+            got, progress = run(session, value)
+            plain, _ = run(session, value | {"injection": None})
+        self.assertEqual(sum("injected pass" in line for line in progress), 2)
+        self.assertEqual(got["inputs"]["injection"]["strength"], 0.0)
+        for injected, baseline in zip(got["conditions"], plain["conditions"]):
+            self.assertEqual(injected["coordinates"]["reference"], injected["coordinates"]["injected"])
+            self.assertEqual(injected["coordinates"], baseline["coordinates"])
+            self.assertEqual(injected["lens"], baseline["lens"])
         self.assertEqual(hooks_left(self.manager), [])
 
     def test_a_probe_file_reads_as_one_unit_direction_per_block(self):

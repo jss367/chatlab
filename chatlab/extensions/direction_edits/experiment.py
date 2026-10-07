@@ -282,7 +282,9 @@ def check(session, inputs):
     if lacking:
         raise ValueError(f"The directions have none at block {lacking[0]}, which the edit would change.")
     if injection is not None:
-        session.check_steering(dict(injection["vector"], strength=injection["strength"]))
+        # This extension installs even a zero-strength injection hook, so
+        # validate its compatibility using an active preflight specification.
+        session.check_steering(dict(injection["vector"], strength=1.0, enabled=True))
     passage = session.encode(inputs["passage"])
     spans = [("edited", edit["tokens"])]
     if injection is not None:
