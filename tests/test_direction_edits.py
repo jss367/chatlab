@@ -3,6 +3,7 @@
 import copy
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,8 +16,8 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from chatlab import steering
 from chatlab.extension_api import (ExtensionContext, ModelService, NavigationService, ProjectionCancelled,
                                    TokenInspector)
-from chatlab.extensions.direction_edits import experiment, files
-from chatlab.extensions.direction_edits.page import build_page
+from chatlab.extensions.direction_edits import experiment, files, page as edits_page, render as edits_render
+from chatlab.extensions.direction_edits.page import Runs, build_page
 from chatlab.extensions.probes import probe as probes
 from chatlab.extensions.registry import load_enabled
 from chatlab.model_runtime import ModelManager
@@ -624,6 +625,42 @@ class RefusalTests(LensFixture):
                 run(session, inputs())
 
 
+class PublicationTests(unittest.TestCase):
+    def test_stale_turn_cannot_replace_a_newer_download(self):
+        runs = Runs()
+        self.addCleanup(runs.forget, "owner")
+        old = runs.start("owner")
+        self.assertTrue(runs.live("owner", old))
+        new = runs.start("owner")
+        current = {"inputs": {"directions": {"name": "current"}}}
+        path = runs.publish("owner", new, current, lambda path: path)
+        render = mock.Mock()
+        with mock.patch.object(runs, "_stage") as stage:
+            self.assertIsNone(runs.publish("owner", old, {}, render))
+            stage.assert_not_called()
+            render.assert_not_called()
+        self.assertEqual(json.loads(Path(path).read_text()), current)
+
+    def test_stop_cleanup_and_old_finish_cannot_revive_or_remove_new_work(self):
+        runs = Runs()
+        old = runs.start("owner")
+        session = mock.Mock()
+        runs.attach("owner", old, session)
+        runs.cancel("owner")
+        session.cancel.assert_called_once()
+        self.assertFalse(runs.live("owner", old))
+        new = runs.start("owner")
+        newer_session = mock.Mock()
+        runs.attach("owner", new, newer_session)
+        runs.finish("owner", old)
+        runs.forget("owner")
+        newer_session.cancel.assert_called_once()
+        reused = runs.start("owner")
+        self.assertNotIn(reused, (old, new))
+        self.assertIsNone(runs.publish("owner", new, {}, mock.Mock()))
+        runs.forget("owner")
+
+
 class PageTests(LensFixture):
     def setUp(self):
         super().setUp()
@@ -632,7 +669,118 @@ class PageTests(LensFixture):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
+        self.demo = demo
         self.fn = handlers_by_name(demo)
+
+    def saved_result(self, name="directions"):
+        with self.service.open_session() as session:
+            result, _ = run(session, inputs(directions=direction_set(name=name)))
+        path = self.directory / f"{name}.json"
+        path.write_text(files.dumps(result))
+        return result, path
+
+    def run_frames(self, owner, name="directions"):
+        controls = [PASSAGE, direction_set(name=name), vector(), 4.0, 2, 6, experiment.ERASE, 0.0,
+                    1, 1, 3, 5, False, 7, "", 1, 8, 1, 3, ""]
+        rows = ["neutral", "", "focus", "the dog\n"] + ["", ""] * 4
+        return list(self.fn["run_experiment"](owner, *controls, *rows))
+
+    def test_upload_and_run_share_the_publishing_queue(self):
+        functions = {fn.fn.__name__: fn for fn in self.demo.fns.values() if fn.fn is not None}
+        self.assertEqual(functions["open_result"].concurrency_id,
+                         functions["run_experiment"].concurrency_id)
+        self.assertEqual(functions["pick"].concurrency_id,
+                         functions["run_experiment"].concurrency_id)
+        publishing = {index for index, fn in self.demo.fns.items()
+                      if fn.fn is not None and fn.fn.__name__ in ("run_experiment", "open_result", "pick")}
+        canceled = {index for dependency in self.demo.config["dependencies"]
+                    for index in dependency.get("cancels", [])}
+        self.assertTrue(publishing <= canceled)
+
+    def test_rendering_cannot_be_interleaved_with_a_new_upload(self):
+        _, first_path = self.saved_result("first")
+        second, second_path = self.saved_result("second")
+        original = edits_render.headline
+        for operation in ("upload", "run"):
+            with self.subTest(operation=operation):
+                owner = operation
+                rendering, attempted, completed = threading.Event(), threading.Event(), threading.Event()
+                observations, newer, errors = [], [], []
+
+                def next_upload():
+                    try:
+                        if not rendering.wait(2):
+                            raise AssertionError("First publication did not reach rendering")
+                        attempted.set()
+                        newer.append(self.fn["open_result"](str(second_path), owner))
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        completed.set()
+
+                def headline(result):
+                    if result["inputs"]["directions"]["name"] == "first":
+                        rendering.set()
+                        self.assertTrue(attempted.wait(2))
+                        observations.append(completed.wait(0.2))
+                    return original(result)
+
+                thread = threading.Thread(target=next_upload)
+                with mock.patch.object(edits_render, "headline", side_effect=headline):
+                    thread.start()
+                    try:
+                        if operation == "upload":
+                            self.fn["open_result"](str(first_path), owner)
+                        else:
+                            self.run_frames(owner, "first")
+                    finally:
+                        thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(observations, [False])
+                self.assertEqual(newer[0][1], second)
+                self.assertEqual(json.loads(Path(newer[0][-1]).read_text()), second)
+
+    def test_staging_failures_do_not_prevent_uploads_or_runs_from_rendering(self):
+        expected, path = self.saved_result("opened")
+        _, replacement = self.saved_result("replacement")
+        for failure in ("directory", "write", "delete"):
+            with self.subTest(failure=failure):
+                owner = failure
+                upload = path
+                if failure == "delete":
+                    self.fn["open_result"](str(path), owner)
+                    upload = replacement
+                    target = "pathlib.Path.unlink"
+                elif failure == "directory":
+                    target = "chatlab.extensions.direction_edits.page.tempfile.TemporaryDirectory"
+                else:
+                    target = "chatlab.extensions.direction_edits.page.write_private_text"
+                with mock.patch(target, side_effect=OSError("download storage unavailable")):
+                    opened = self.fn["open_result"](str(upload), owner)
+                self.assertIn("Opened a result", opened[0])
+                self.assertIn("could not be written for download", opened[0])
+                self.assertEqual(opened[1], json.loads(upload.read_text()))
+                self.assertIsNone(opened[-1])
+        with mock.patch.object(edits_page, "write_private_text", side_effect=OSError("full")):
+            done = self.run_frames("run-failure", "opened")[-1]
+        self.assertIn("Done.", done[0])
+        self.assertIn("could not be written for download", done[0])
+        self.assertEqual(done[1]["inputs"], expected["inputs"])
+        self.assertIsNone(done[-1])
+
+    def test_stop_after_model_release_suppresses_completed_run_publication(self):
+        original_finish = Runs.finish
+
+        def finish(runs, owner, turn):
+            original_finish(runs, owner, turn)
+            self.fn["stop_run"](owner)
+
+        with mock.patch.object(Runs, "finish", autospec=True, side_effect=finish):
+            frames = self.run_frames("stopped")
+        self.assertTrue(all(value == gr.skip() for value in frames[-1]))
+        self.assertFalse(self.manager._lock.locked())
+        self.assertEqual(hooks_left(self.manager), [])
 
     def test_the_extension_is_catalogued_and_loads(self):
         loaded, errors = load_enabled({"direction_edits"})

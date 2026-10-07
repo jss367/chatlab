@@ -46,6 +46,7 @@ class Runs:
 
     def __init__(self):
         self._lock = threading.Lock()
+        self._next_turn = 0
         self._turns = {}
         self._sessions = {}
         self._downloads = {}
@@ -56,7 +57,8 @@ class Runs:
 
     def start(self, owner):
         with self._lock:
-            self._turns[owner] = self._turns.get(owner, 0) + 1
+            self._next_turn += 1
+            self._turns[owner] = self._next_turn
             active = self._sessions.pop(owner, None)
             if active is not None:
                 active[1].cancel()
@@ -76,7 +78,9 @@ class Runs:
 
     def cancel(self, owner):
         with self._lock:
-            active = self._sessions.get(owner)
+            self._next_turn += 1
+            self._turns[owner] = self._next_turn
+            active = self._sessions.pop(owner, None)
             if active is not None:
                 active[1].cancel()
 
@@ -84,26 +88,43 @@ class Runs:
         with self._lock:
             return self._turns.get(owner) == turn
 
-    def stage(self, owner, result):
-        """Write the result into the view's own download directory, replacing the last one."""
-        name = re.sub(r"[^A-Za-z0-9_-]+", "-", result["inputs"]["directions"]["name"]).strip("-")[:60] or "result"
+    def publish(self, owner, turn, result, render):
+        """Stage and construct a response only while this turn is current.
+
+        Rendering stays inside the same critical section as the turn check
+        and file replacement. The publishing Gradio events also share a
+        queue, so their responses cannot overtake each other after return.
+        """
         with self._lock:
-            directory = self._downloads.get(owner)
-            if directory is None:
-                directory = self._downloads[owner] = tempfile.TemporaryDirectory(prefix="chatlab-direction-edits-")
-            root = Path(directory.name)
-            path = root / f"direction-edits-{name}.json"
-            write_private_text(path, files.dumps(result))
-            for old in root.iterdir():
-                if old != path:
-                    old.unlink()
-            return str(path)
+            if self._turns.get(owner) != turn:
+                return None
+            try:
+                path = self._stage(owner, result)
+            except OSError as exc:
+                logger.warning("Could not write the direction edits result: %s", exc)
+                path = None
+            return render(path)
+
+    def _stage(self, owner, result):
+        """Replace the view's download; called only under publish's lock."""
+        name = re.sub(r"[^A-Za-z0-9_-]+", "-", result["inputs"]["directions"]["name"]).strip("-")[:60] or "result"
+        directory = self._downloads.get(owner)
+        if directory is None:
+            directory = self._downloads[owner] = tempfile.TemporaryDirectory(prefix="chatlab-direction-edits-")
+        root = Path(directory.name)
+        path = root / f"direction-edits-{name}.json"
+        write_private_text(path, files.dumps(result))
+        for old in root.iterdir():
+            if old != path:
+                old.unlink()
+        return str(path)
 
     def forget(self, owner):
-        self.cancel(owner)
         with self._lock:
+            active = self._sessions.pop(owner, None)
+            if active is not None:
+                active[1].cancel()
             self._turns.pop(owner, None)
-            self._sessions.pop(owner, None)
             directory = self._downloads.pop(owner, None)
         if directory is not None:
             directory.cleanup()
@@ -251,6 +272,16 @@ def build_page(context):
                 render.heatmaps(result, 0, palette, display), render.recovery_table(result),
                 render.target_note(result), render.lens_table(result), render.differences_table(result), path)
 
+    def publish_result(view, turn, result, *, opened=False):
+        def frame(path):
+            status = f"Opened a result for `{result['model']['model_id']}`." if opened else "Done."
+            if path is None:
+                status += " The result could not be written for download."
+            return (status, *show(result, path))
+
+        published = runs.publish(view, turn, result, frame)
+        return (gr.skip(),) * (len(shown) + 1) if published is None else published
+
     def open_directions(path):
         if not path:
             return None, directions_summary(None)
@@ -317,16 +348,7 @@ def build_page(context):
             raise gr.Error(str(exc)) from exc
         finally:
             runs.finish(view, turn)
-        if not runs.live(view, turn):
-            yield skip
-            return
-        try:
-            path = runs.stage(view, result)
-        except OSError as exc:
-            logger.warning("Could not write the direction edits result: %s", exc)
-            path = None
-        yield ("Done." if path else "Done, but the result could not be written for download.",
-               *show(result, path))
+        yield publish_result(view, turn, result)
 
     flat_rows = [box for row in rows for box in row]
     event = run.click(run_experiment, [owner, *controls, *flat_rows], [status, *shown],
@@ -336,14 +358,13 @@ def build_page(context):
         runs.cancel(view)
         return "Stopped."
 
-    stop.click(stop_run, owner, status, queue=False, cancels=[event])
-
     def pick(result, index):
         if result is None or index is None or not 0 <= int(index) < len(result["conditions"]):
             return gr.skip()
         return render.heatmaps(result, int(index), palette, display)
 
-    picker.input(pick, [result_state, picker], heat, show_progress="hidden")
+    pick_event = picker.input(pick, [result_state, picker], heat, show_progress="hidden",
+                              concurrency_id="direction-edits-model")
 
     def open_result(path, view):
         if not path:
@@ -353,8 +374,8 @@ def build_page(context):
             result = files.read_result(path)
         except (OSError, ValueError) as exc:
             raise gr.Error(f"That result could not be opened: {exc}") from exc
-        if not runs.live(view, turn):
-            return (gr.skip(),) * (len(shown) + 1)
-        return (f"Opened a result for `{result['model']['model_id']}`.", *show(result, runs.stage(view, result)))
+        return publish_result(view, turn, result, opened=True)
 
-    upload.upload(open_result, [upload, owner], [status, *shown], show_progress="hidden")
+    upload_event = upload.upload(open_result, [upload, owner], [status, *shown], show_progress="hidden",
+                                 concurrency_id="direction-edits-model")
+    stop.click(stop_run, owner, status, queue=False, cancels=[event, upload_event, pick_event])
