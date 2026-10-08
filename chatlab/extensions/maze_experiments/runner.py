@@ -260,6 +260,9 @@ class Episode:
     run_id: str = field(default_factory=lambda: uuid4().hex)
     phase: str = "ready"
     detail: str = ""
+    # New runs choose a form using their pinned template before generating.
+    # Uploaded runs and forks already name their recorded form.
+    select_history: bool = field(default=False, init=False, repr=False)
     # One entry per agent: its name, position, status and its own conversation.
     agents: list = field(default_factory=list)
     # Every attempted call, in the order the rounds applied them, and every
@@ -362,6 +365,7 @@ class Episode:
         # A run started here keeps an earlier response's reasoning in the field
         # templates read it from. A saved run naming no form is given the form
         # it was written in by its reader, before it gets here.
+        self.select_history = HISTORY_FIELD not in self.config
         self.config.setdefault(HISTORY_FIELD, REASONING_CONTENT)
         history_form(self.config)
         # Runs predating editable wording carry no prompt, so they keep the
@@ -1742,6 +1746,24 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
         if episode.phase in TERMINAL or episode.replay_only:
             raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Use Play or Next to inspect its recorded responses.")
         manager = session or models.open_session()
+        try:
+            if episode.select_history:
+                marker = "chatlab_reasoning_history_probe"
+                probe = episode.agents[0]["messages"] + [{"role": "assistant", "content": "An earlier response.",
+                                             "reasoning_content": marker},
+                                            {"role": "user", "content": "Continue."}]
+                rendered = manager.prompt_text(probe, episode.tools)
+                # ModelService readers return (text, load); a pinned session
+                # returns text directly. No generation is needed for this check.
+                if isinstance(rendered, tuple):
+                    rendered = rendered[0]
+                episode.config[HISTORY_FIELD] = (REASONING_CONTENT if rendered and marker in rendered
+                                                 else CONTENT_HISTORY)
+                episode.select_history = False
+        except BaseException:
+            if session is None:
+                manager.close()
+            raise
         # Steering can start several responses in, so a vector this load
         # cannot take is refused before the run starts rather than there.
         if steering_active(episode.config):

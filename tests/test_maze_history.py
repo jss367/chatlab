@@ -52,6 +52,12 @@ class Qwen38Manager(ReasoningManager):
         return list(QWEN38.render(messages=messages).encode()), True
 
 
+class ContentOnlyManager(ReasoningManager):
+    """OLMo-style template: only content contributes to the prompt."""
+    def _prompt_token_ids(self, messages, tools=None):
+        return list("".join(m["content"] for m in messages).encode()), True
+
+
 def written_before_the_field(payload):
     """A run as a ChatLab predating the history form saved it."""
     payload = copy.deepcopy(payload)
@@ -136,6 +142,50 @@ class SplittingTests(unittest.TestCase):
 
 
 class TemplateTests(unittest.TestCase):
+    def test_fresh_trials_select_content_under_the_shared_batch_session(self):
+        manager = ContentOnlyManager([reasoned()] * 4)
+        session = manager.open_session()
+        try:
+            for _ in range(2):
+                ep = Episode(MAZE, RUN)
+                list(stream_episode(ep, manager, session=session))
+                self.assertEqual(ep.phase, "arrived")
+                self.assertEqual(ep.config["reasoning_history"], "content")
+                self.assertIn("<think>" + THOUGHT, bytes(ep.turns[1]["prompt_ids"]).decode())
+                self.assertTrue(manager.busy)
+        finally:
+            session.close()
+        self.assertFalse(manager.busy)
+
+    def test_content_only_template_retains_reasoning_on_later_solo_and_team_turns(self):
+        for team in (False, True):
+            with self.subTest(team=team):
+                ep = (team_episode(MAZE, RUN | {"communication": False, "team_goal": "any",
+                                               "per_turn_tokens": 1000, "token_budget": 4000})
+                      if team else Episode(MAZE, RUN))
+                manager = ContentOnlyManager([reasoned()] * 4)
+                list(stream_episode(ep, manager))
+                self.assertEqual(ep.phase, "arrived")
+                self.assertEqual(ep.config["reasoning_history"], "content")
+                later = ep.turns[2 if team else 1]
+                self.assertIn("<think>" + THOUGHT, bytes(later["prompt_ids"]).decode())
+                replay = from_payload(saved(ep))
+                self.assertEqual(replay.config["reasoning_history"], "content")
+
+    def test_template_selection_is_kept_after_pause(self):
+        ep = Episode(MAZE, RUN)
+        manager = ContentOnlyManager([reasoned(), reasoned()])
+        list(stream_episode(ep, manager, single_step=True))
+        self.assertEqual(ep.config["reasoning_history"], "content")
+        self.assertFalse(ep.select_history)
+        list(stream_episode(ep, manager))
+        self.assertIn("<think>" + THOUGHT, bytes(ep.turns[1]["prompt_ids"]).decode())
+
+    def test_an_explicit_recorded_form_is_not_reselected(self):
+        ep = Episode(MAZE, RUN | {"reasoning_history": "reasoning_content"})
+        list(stream_episode(ep, ContentOnlyManager([reasoned(), reasoned()])))
+        self.assertEqual(ep.config["reasoning_history"], "reasoning_content")
+
     def test_qwen38_reads_one_reasoning_block_per_earlier_turn(self):
         ep = Episode(MAZE, RUN)
         manager = Qwen38Manager([reasoned(), reasoned()])
