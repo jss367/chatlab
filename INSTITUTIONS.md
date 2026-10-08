@@ -12,7 +12,7 @@ agent was given. From a turn you can open it in Chat, download it as a Chat conv
 on the loaded model with token measurements and branch the re-run at any token. It reads files only. It
 never imports the pilot, never continues a game, and needs no model until you re-run a turn.
 
-Enable it under **Settings → Extensions** and restart ChatLab. **Institutions** appears in the sidebar.
+Enable it under **Extensions** and restart ChatLab. **Institutions** appears in the sidebar.
 
 ## Export the games first
 

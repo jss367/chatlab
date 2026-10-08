@@ -301,7 +301,7 @@ assert 'chatlab.extensions.probes.page' not in sys.modules
                 updates = dict(zip(listener.outputs, listener.fn(), strict=True))
                 nav = next(b for b in updates if getattr(b, 'elem_id', None) == 'nav')
                 self.assertEqual(updates.pop(nav), 'Models')
-                self.assertEqual(len(updates), 7)  # Five core panes and both extensions.
+                self.assertEqual(len(updates), 8)  # Six core panes and both extensions.
                 for page, update in updates.items():
                     self.assertEqual(update['visible'], getattr(page, 'elem_id', None) == 'models-page')
         finally:
@@ -739,7 +739,7 @@ assert 'chatlab.extensions.probes.page' not in sys.modules
             nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
             self.assertEqual(
                 [value for _, value in nav.choices],
-                ['Chat', 'Images', 'Models', 'One', 'Two', 'Settings'],
+                ['Chat', 'Images', 'Models', 'One', 'Two', 'Extensions', 'Settings'],
             )
         finally:
             demo.close()
@@ -799,7 +799,7 @@ class ExtensionSettingsTests(unittest.TestCase):
             nav = next(b for b in demo.blocks.values() if getattr(b, 'elem_id', None) == 'nav')
             self.assertEqual(
             [value for _, value in nav.choices],
-            ['Chat', 'Images', 'Models', 'Maze', 'Settings'],
+            ['Chat', 'Images', 'Models', 'Maze', 'Extensions', 'Settings'],
         )
             self.assertTrue(any(getattr(b, 'elem_id', None) == 'maze-run' for b in demo.blocks.values()))
         finally:

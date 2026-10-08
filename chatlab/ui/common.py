@@ -46,7 +46,7 @@ DOWNLOAD_BAR_WIDTH = 24
 # it shows with Chat only, and is wide enough for a model ID and a token
 # count while leaving the conversation most of the screen.
 #
-# Wide enough for the longest page name at the tile's small type. With four
+# Wide enough for the longest page name at the tile's small type. With five built-in
 # pages there is nothing to be won by hiding those names: the pane would save
 # a handful of pixels and cost a reader the only signpost on the screen.
 NAV_PANE_WIDTH = 72
@@ -59,10 +59,11 @@ CONVERSATION_PANE_WIDTH = 248
 ARCHIVED_VIEW_CLASS = "archived-view"
 
 
-CHAT_PAGE, IMAGES_PAGE, MODELS_PAGE, SETTINGS_PAGE = PAGES = (
+CHAT_PAGE, IMAGES_PAGE, MODELS_PAGE, EXTENSIONS_PAGE, SETTINGS_PAGE = PAGES = (
     "Chat",
     "Images",
     "Models",
+    "Extensions",
     "Settings",
 )
 
@@ -78,6 +79,7 @@ NAV_ICONS = {
     CHAT_PAGE: "message-square",
     IMAGES_PAGE: "image",
     MODELS_PAGE: "box",
+    EXTENSIONS_PAGE: "puzzle",
     SETTINGS_PAGE: "settings",
 }
 

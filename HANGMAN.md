@@ -2,7 +2,7 @@
 
 The **Hangman** extension has the loaded model host a game of hangman. The model thinks of a word, you guess, and every reply is shown token by token. Nothing in ChatLab knows the word. If a word exists anywhere, it is in the model, so the page only checks each reply against the replies before it.
 
-Enable it under **Settings → Extensions** and restart ChatLab. **Hangman** appears in the sidebar.
+Enable it under **Extensions** and restart ChatLab. **Hangman** appears in the sidebar.
 
 ## Playing
 
