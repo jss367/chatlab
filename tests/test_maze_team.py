@@ -27,6 +27,32 @@ def team(maze=MAZE, **config):
 
 
 class TeamParseTests(unittest.TestCase):
+    def test_calls_written_as_function_elements_are_read(self):
+        # Qwen3.5 and later templates ask for this form rather than a JSON object.
+        def xml(*parameters, name="move"):
+            inner = "".join(f"<parameter={key}>\n{value}\n</parameter>\n" for key, value in parameters)
+            return f"<tool_call>\n<function={name}>\n{inner}</function>\n</tool_call>"
+
+        east = xml(("maze_id", MAZE_ID), ("direction", "east"))
+        self.assertEqual(parse_call("I will go east.\n\n" + east), ({"maze_id": MAZE_ID, "direction": "east"}, None))
+        talk = xml(("maze_id", MAZE_ID), ("direction", "east"), ("message", "Go east,\nthen south."))
+        self.assertEqual(parse_call(talk, message_limit=MESSAGE_LIMIT)[0]["message"], "Go east,\nthen south.")
+        self.assertEqual(parse_call(talk), (None, "invalid_arguments"))
+        refused = {
+            xml(("maze_id", MAZE_ID), ("direction", "up")): "invalid_arguments",
+            xml(("maze_id", MAZE_ID)): "invalid_arguments",
+            xml(("maze_id", MAZE_ID), ("direction", "east"), ("direction", "west")): "invalid_arguments",
+            xml(("maze_id", MAZE_ID), ("direction", "east"), name="jump"): "invalid_tool_schema",
+            east.replace("</parameter>\n</function>", "</parameter>\nstray\n</function>"): "invalid_arguments",
+            east.replace("</function>", ""): "invalid_tool_schema",
+            xml(("maze_id", MAZE_ID), ("direction", "east"), ("message", "x" * (MESSAGE_LIMIT + 1))): "message_too_long",
+        }
+        for text, error in refused.items():
+            with self.subTest(text):
+                self.assertEqual(parse_call(text, message_limit=MESSAGE_LIMIT), (None, error))
+        # Quoted or fenced, it is an example, not a call.
+        self.assertEqual(parse_call("```\n" + east + "\n```"), (None, None))
+
     def test_a_message_is_admitted_only_where_the_run_allows_one(self):
         text = call("east", "hi")[0]
         self.assertEqual(parse_call(text), (None, "invalid_arguments"))

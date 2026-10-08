@@ -168,14 +168,15 @@ def read_responses(ep):
 
     A response that begins with text the model did not write, an
     interruption or an edited token, is left out, on a team as on a run of one
-    agent: its reasoning is partly the reader's.
+    agent: its reasoning is partly the reader's. So is a response given in
+    place of a move, the taste or one after arriving, which has no call to read.
     """
     team = ep.team
     communicate = team and ep.config["communication"]
     label, condition = run_label(ep), condition_of(ep)
     rows = []
     for index, turn in enumerate(ep.turns):
-        if turn.get("forced_prefix_tokens") or turn.get("token_edit"):
+        if turn.get("forced_prefix_tokens") or turn.get("token_edit") or turn.get("kind", "move") != "move":
             continue
         split = split_response(turn, communicate)
         if split is None:
