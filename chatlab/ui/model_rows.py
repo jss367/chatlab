@@ -17,7 +17,7 @@ MODEL_LIST_ID = "my-models-list"
 
 # Removing a model deletes its files, so Remove asks for a second press
 # within this long before it goes through, as Delete does on a conversation.
-REMOVE_CONFIRM_MS = 3000
+REMOVE_CONFIRM_MS = 8000
 
 _SCRIPT = r"""
 () => {
@@ -72,7 +72,9 @@ _SCRIPT = r"""
     input.dispatchEvent(new Event('input', {bubbles: true}));
   };
   const disarm = button => {
+    clearTimeout(button.confirmTimer);
     button.classList.remove('armed');
+    button.textContent = '';
     button.title = ACTIONS.remove.title;
     button.setAttribute('aria-label', `${ACTIONS.remove.title}: ${button.dataset.name}`);
   };
@@ -86,9 +88,10 @@ _SCRIPT = r"""
     const kind = button.dataset.action;
     if (kind === 'remove' && !button.classList.contains('armed')) {
       button.classList.add('armed');
+      button.textContent = CONFIRM;
       button.title = CONFIRM;
       button.setAttribute('aria-label', `${CONFIRM}: ${button.dataset.name}`);
-      setTimeout(() => disarm(button), __CONFIRM_MS__);
+      button.confirmTimer = setTimeout(() => disarm(button), __CONFIRM_MS__);
       return;
     }
     if (kind === 'remove') disarm(button);

@@ -191,23 +191,36 @@ def unavoidable_cells(maze):
     return result
 
 
-def generate(size=5, seed=20260911, distance=10, openness=.70, *, require_checkpoint=False):
-    size, seed, distance = int(size), int(seed), int(distance)
-    if not 3 <= size <= 15 or not 1 <= distance < size * size or not .35 <= openness <= .95:
-        raise ValueError("Choose size 3–15, a feasible positive route length, and 35–95% open cells.")
-    if require_checkpoint and distance < 2:
-        raise ValueError("An unavoidable checkpoint needs a route of at least two moves.")
-    rng = random.Random(seed)
+def route_cells(maze, cell):
+    """The cells every shortest route from the start to ``cell`` crosses, keyed by their distance from the start."""
+    cell = tuple(cell)
+    there, back = maze.distances(maze.start), maze.distances(cell)
+    levels = {}
+    for point, steps in there.items():
+        if point in back and steps + back[point] == there[cell]:
+            levels.setdefault(steps, []).append(point)
+    return {steps: points[0] for steps, points in levels.items() if len(points) == 1}
+
+
+def parting_cell(maze, first, second):
+    """Where the shortest routes to two exits part: the farthest cell every one of them crosses, and its distance."""
+    one, other = route_cells(maze, first), route_cells(maze, second)
+    steps = max(steps for steps, point in one.items() if other.get(steps) == point)
+    return one[steps], steps
+
+
+def layouts(rng, size, distance, openness):
+    """Random connected sets of open cells with room for a route of ``distance``, each with its distance function."""
     deadline = time.monotonic() + 8
     for _ in range(15000):
         if time.monotonic() > deadline:
-            break
+            return
         cells = {(r, c) for r in range(size) for c in range(size) if rng.random() < openness}
         if len(cells) <= distance:
             continue
         neighbors = {p: [(p[0] + dr, p[1] + dc) for dr, dc in DIRECTIONS.values()
                          if (p[0] + dr, p[1] + dc) in cells] for p in cells}
-        def distances(origin):
+        def distances(origin, neighbors=neighbors):
             found, todo = {origin: 0}, deque([origin])
             while todo:
                 p = todo.popleft()
@@ -219,19 +232,59 @@ def generate(size=5, seed=20260911, distance=10, openness=.70, *, require_checkp
         first = min(cells)
         if len(distances(first)) != len(cells):
             continue
+        yield cells, distances
+
+
+def checked_generation(size, seed, distance, openness):
+    size, seed, distance = int(size), int(seed), int(distance)
+    if not 3 <= size <= 15 or not 1 <= distance < size * size or not .35 <= openness <= .95:
+        raise ValueError("Choose size 3–15, a feasible positive route length, and 35–95% open cells.")
+    return size, seed, distance
+
+
+def grid(cells, size):
+    return tuple("".join("." if (r, c) in cells else "#" for c in range(size)) for r in range(size))
+
+
+def generate(size=5, seed=20260911, distance=10, openness=.70, *, require_checkpoint=False):
+    size, seed, distance = checked_generation(size, seed, distance, openness)
+    if require_checkpoint and distance < 2:
+        raise ValueError("An unavoidable checkpoint needs a route of at least two moves.")
+    rng = random.Random(seed)
+    for cells, distances in layouts(rng, size, distance, openness):
         pairs = [(p, q) for p in sorted(cells) for q, d in distances(p).items() if d == distance]
         if pairs:
             start, goal = rng.choice(pairs)
-            maze = Maze(tuple("".join("." if (r, c) in cells else "#" for c in range(size))
-                              for r in range(size)), start, goal, seed)
+            maze = Maze(grid(cells, size), start, goal, seed)
             if not require_checkpoint or unavoidable_cells(maze):
                 return maze
-        if time.monotonic() > deadline:
-            break
     if require_checkpoint:
         raise ValueError("No maze with that route length and an unavoidable checkpoint was found. "
                          "Try a different seed, a shorter route, or fewer open cells.")
     raise ValueError("No maze with that route length was found. Try a shorter route, a different seed, or more open cells.")
+
+
+def generate_paired(size=5, seed=20260911, distance=10, openness=.70):
+    """A maze whose destination, exit A, and a second exit B are both ``distance`` moves from the start.
+
+    Equal route lengths keep the length of the walk from deciding which exit
+    an agent takes. Neither exit lies on a shortest route to the other, since
+    every cell of such a route is nearer the start than both. Which of the two
+    is A is drawn with the rest, so a run that wants one side rewarded more
+    often than chance balances it across seeds rather than here.
+    """
+    size, seed, distance = checked_generation(size, seed, distance, openness)
+    rng = random.Random(seed)
+    for cells, distances in layouts(rng, size, distance, openness):
+        triples = []
+        for start in sorted(cells):
+            far = sorted(q for q, d in distances(start).items() if d == distance)
+            triples += [(start, a, b) for a in far for b in far if a != b]
+        if triples:
+            start, a, b = rng.choice(triples)
+            return Maze(grid(cells, size), start, a, seed), b
+    raise ValueError("No maze with two cells at that route length was found. Try a shorter route, a different seed, "
+                     "or more open cells.")
 
 
 def call_text(maze_id, direction):

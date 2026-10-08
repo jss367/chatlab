@@ -23,6 +23,7 @@ import weakref
 import gradio as gr
 
 from chatlab import library
+from chatlab import library_writer
 from chatlab import settings
 from chatlab.model_runtime import GENERATING
 from chatlab.conversation import (
@@ -77,6 +78,8 @@ class ConversationJob:
         self.rendered = None
         self.fork_created = False
         self.new_branch = None
+        self.save_receipt = None
+        self.save_names = set()
         with _JOBS_LOCK:
             _JOBS.add(self)
 
@@ -107,6 +110,7 @@ class ConversationJob:
                 })
                 self.fork_created = True
                 self.new_branch = parent
+                self.save_names.add(parent)
             if origin and self.fork_created and origin.get("replacement") is None:
                 at = origin.get("token", 0) - 1
                 metrics = turns[-1].get("tokens") or []
@@ -124,7 +128,16 @@ class ConversationJob:
                 put_branch(self.saved, self.owner, turns)
                 # Persist even if the browser is hidden or disconnected. This
                 # run owns its transcript, not the reader's active selection.
-                library.write(self.saved, preserve_active=True)
+                # Snapshot the owned branch (and a token fork's source for
+                # inherited sampling) while holding the job lock. Unrelated
+                # history stays off this path.
+                names = [name for name in self.saved["branches"]
+                         if name in self.save_names or name == self.owner]
+                owned = {"active": self.owner, "branches": {name: self.saved["branches"][name] for name in names}}
+                for field in ("updated", "origins", "sampling", "sampling_updated",
+                              "archived", "archived_updated"):
+                    owned[field] = {name: self.saved[field][name] for name in names if name in self.saved[field]}
+                self.save_receipt = library_writer.submit(self, owned)
 
     def start(self, iterator, forks):
         """Advance the opening frame on the pane queue to reserve the model."""
@@ -133,6 +146,7 @@ class ConversationJob:
             return None
         with self.lock:
             self.owner = forks["active"]
+            self.save_names = {self.owner}
             self.saved = copy_forks(forks)
             self.frame = {}
             self.pending = {}
@@ -188,8 +202,13 @@ class ConversationJob:
                 frame["chatbot"] = display_messages(turns)[0]
             if error or self.cancel.is_set():
                 frame["status"] = error or "Stopped. Any partial response was kept."
-            self.running = False
             self._publish(frame)
+            receipt = self.save_receipt
+        # Disk latency must not hold the job lock or block UI polling/Stop.
+        if receipt is not None and not library_writer.flush(receipt):
+            logger.warning("Final conversation save failed for %s", self.owner)
+        with self.lock:
+            self.running = False
 
     def stop(self):
         with self.lock:

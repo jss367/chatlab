@@ -122,6 +122,8 @@ class RestartOfferTests(unittest.TestCase):
 
     def setUp(self):
         self.addCleanup(desktop.offer_restart, None)
+        # A fake window must not shut down persistence for the test process.
+        self.shutdown = self.enterContext(mock.patch("chatlab.library_writer.shutdown"))
 
     def a_release(self):
         """A release newer than this one, for the tests that install it."""
@@ -177,6 +179,7 @@ class RestartOfferTests(unittest.TestCase):
                 mock.patch.object(updater, "relaunch") as relaunch:
             relaunch.side_effect = relaunch_effect
             self.assertEqual(desktop_launcher.run_desktop(), 0)
+            self.shutdown.assert_called_once_with()
         return seen, window, relaunch
 
     def test_the_app_reopens_itself_and_closes_the_window_behind_it(self):

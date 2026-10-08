@@ -61,6 +61,7 @@ drove.
 - An **Images** page that draws with a diffusion model and reads the drawing back: one frame per denoising step, the guidance pull and the latent movement per step, and a cross-attention map per prompt token
 - An optional **Linear probes** extension that fits a logistic probe at every layer from labelled examples, reports each layer's held-out accuracy, and colors any reply token by token with the probe; see [the probes guide](PROBES.md)
 - An optional **Direction edits** extension that injects a vector over chosen tokens, erases or clamps a direction at chosen blocks, and shows whether later blocks rebuild it and what that does to a word's Jacobian-lens probability; see [the direction edits guide](DIRECTION_EDITS.md)
+- An optional **Institutions pilot** extension that steps through recorded multi-agent institution games round by round, opens any agent's turn with its exact prompts, and re-runs it on the loaded model; see [the institutions guide](INSTITUTIONS.md)
 - An optional **OS-Harm results** extension for comparing computer-use safety evaluations and replaying recorded screenshots, responses, actions, and judge reasoning; see [the results viewer guide](OS_HARM_RESULTS.md)
 
 The default model is [`allenai/Olmo-3-7B-Think`](https://huggingface.co/allenai/Olmo-3-7B-Think). Its full weights require a download of roughly 15 GB. Other Hugging Face causal language models with built-in Transformers support can also work, and so can diffusers text-to-image pipelines; see [Images](#images).
@@ -584,7 +585,7 @@ average beside a moved frame would be quietly wrong.
 
 ## Working with a conversation
 
-- Switching conversations, starting a new chat, or forking a conversation keeps the original response generating in the background. Its entry shows **Generating…**, and its response is saved as it progresses. Return to that conversation to see its latest text and token measurements.
+- Switching conversations, starting a new chat, or forking a conversation keeps the original response generating in the background. Its entry shows **Generating…**, and its response is saved on a dedicated writer at most every 500 ms while streaming, with final saves flushed on completion, cancellation, and orderly shutdown. An abrupt process crash may lose the latest 500 ms plus write and scheduling time of streamed output under healthy storage; storage stalls or failures can extend that window. Saves replace the file atomically, but do not promise durability through power loss. Return to that conversation to see its latest text and token measurements. See [conversation save scheduling and measurements](CONVERSATION_SAVES.md) for the benchmark and durability details.
 - **Stop Chat** works even while you are viewing another chat; the status line names the conversation it would stop. It stops at the next generation update and keeps whatever was produced so far.
 - One response generates at a time. You can browse and draft messages elsewhere while it runs; wait for it to finish or press **Stop** before sending another message. Stop a running response before editing, undoing, loading into, or deleting its conversation, or clearing all conversations.
 - **Retry** regenerates the last reply. Because **New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
@@ -1280,8 +1281,34 @@ authenticate the publisher.
 ## Tests
 
 ```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m mypy
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+Type checking currently covers reply requests, transcript state, rendering,
+stream orchestration, and typed calls in the existing control adapters. Other
+runtime and UI modules remain outside that incremental check.
+
+A separate real-browser suite exercises sending and stopping replies, switching
+conversations during generation, replacing a response token through its context
+menu, forking, and restoring saved history in a fresh browser session. It runs
+the actual Gradio app with a slow deterministic CPU model; it downloads no model
+weights and uses temporary settings and history files.
+
+```bash
+.venv/bin/python -m pip install -r requirements-browser.txt
+.venv/bin/python -m playwright install chromium webkit
+.venv/bin/python -m unittest discover -s tests/browser -v
+```
+
+Both engines run by default. Set `CHATLAB_TEST_BROWSERS=chromium` or `webkit` to
+run one. CI runs Chromium on Linux and WebKit on macOS. Playwright WebKit covers
+the macOS rendering engine, but is not the packaged app's native WKWebView or
+Safari binary ([Playwright browser documentation](https://playwright.dev/python/docs/browsers)).
+Screenshots, traces and server logs are saved under `.context/browser-tests/`
+(or `CHATLAB_BROWSER_ARTIFACTS`). Open a trace with
+`.venv/bin/python -m playwright show-trace <trace.zip>`.
 
 The application deliberately leaves `trust_remote_code` disabled. Models that require executing custom repository code will not load unless their architecture is supported directly by Transformers or, for an image model, by diffusers.
 
@@ -1292,4 +1319,4 @@ against the class it will meet rather than a mock of it.
 
 ## Optional extensions
 
-Specialized tools can be enabled under **Settings → Extensions** and take effect after restarting ChatLab; the app offers **Restart ChatLab** beside the note, and asks before it quits. **Maze experiments** adds an interactive navigation workbench with interruptions, token inspection, saved-run replay and team runs, in which several agents share one maze with or without messaging each other. **OS-Harm results** adds a viewer for recorded safety judgments and desktop screenshots. **Computer-use safety benchmark** adds a Safety page for OSGuard case imports, local text-only action evaluation, token inspection, external prediction scoring and desktop execution-result review. **Hangman** has the model host a game and checks each reply against the ones before. **Linear probes** fits a probe at every layer from labelled examples and reads any reply with it, token by token. **Circuit tracing** adds a Circuits page that builds attribution graphs over published transcoders, for Gemma 3, Gemma 2 and Qwen 3 models, ablates or boosts groups of features to test them, and lists every feature with a button that steers Chat by it. **Direction edits** injects a vector, erases or clamps a direction at chosen blocks, and measures how much of it later blocks rebuild and what that does to a word's Jacobian-lens probability. All are bundled and disabled by default. See [the extension guide](EXTENSIONS.md), [the circuit tracing guide](CIRCUITS.md), [the probes guide](PROBES.md), [the direction edits guide](DIRECTION_EDITS.md), [the Maze workbench guide](MAZE_WORKBENCH.md), [the Hangman guide](HANGMAN.md), [the OS-Harm results guide](OS_HARM_RESULTS.md) and [the computer-use safety guide](COMPUTER_USE_SAFETY.md).
+Specialized tools can be enabled under **Settings → Extensions** and take effect after restarting ChatLab; the app offers **Restart ChatLab** beside the note, and asks before it quits. **Maze experiments** adds an interactive navigation workbench with interruptions, token inspection, saved-run replay and team runs, in which several agents share one maze with or without messaging each other. **OS-Harm results** adds a viewer for recorded safety judgments and desktop screenshots. **Computer-use safety benchmark** adds a Safety page for OSGuard case imports, local text-only action evaluation, token inspection, external prediction scoring and desktop execution-result review. **Hangman** has the model host a game and checks each reply against the ones before. **Linear probes** fits a probe at every layer from labelled examples and reads any reply with it, token by token. **Circuit tracing** adds a Circuits page that builds attribution graphs over published transcoders, for Gemma 3, Gemma 2 and Qwen 3 models, ablates or boosts groups of features to test them, and lists every feature with a button that steers Chat by it. **Direction edits** injects a vector, erases or clamps a direction at chosen blocks, and measures how much of it later blocks rebuild and what that does to a word's Jacobian-lens probability. **Institutions pilot** steps through the institutions pilot's recorded games and opens any agent's turn with its exact prompts, in Chat or re-run on the loaded model. All are bundled and disabled by default. See [the extension guide](EXTENSIONS.md), [the circuit tracing guide](CIRCUITS.md), [the probes guide](PROBES.md), [the direction edits guide](DIRECTION_EDITS.md), [the institutions guide](INSTITUTIONS.md), [the Maze workbench guide](MAZE_WORKBENCH.md), [the Hangman guide](HANGMAN.md), [the OS-Harm results guide](OS_HARM_RESULTS.md) and [the computer-use safety guide](COMPUTER_USE_SAFETY.md).

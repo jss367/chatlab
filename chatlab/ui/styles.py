@@ -812,9 +812,21 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
   color: var(--body-text-color); background: var(--border-color-primary);
 }}
 .model-list .model-row-action.armed {{
+  width: auto; padding: 0 8px; gap: 6px; font-size: 0.8rem; white-space: nowrap;
   color: var(--color-red-500); background: var(--color-red-50);
 }}
+.model-list .model-row-action::before {{ flex-shrink: 0; }}
+#models-page .model-list label:has(.model-row-action.armed) {{ padding-right: 270px; }}
+.model-list .model-row-actions:has(.armed) {{ opacity: 1; pointer-events: auto; }}
 .dark .model-list .model-row-action.armed {{ background: var(--neutral-700); }}
+@media (max-width: 600px) {{
+  #models-page .model-list label:has(.model-row-action.armed) {{
+    padding-right: 72px; padding-bottom: 40px;
+  }}
+  .model-list .model-row-actions:has(.armed) {{
+    top: auto; bottom: 6px; transform: none;
+  }}
+}}
 /* Restarting to apply an extension change costs the loaded model and any
    running experiment, so it asks first, in an amber panel. */
 .restart-confirm {{

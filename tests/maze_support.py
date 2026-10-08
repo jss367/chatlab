@@ -178,7 +178,7 @@ SCENARIO = dict(size=5, seed=7, distance=8, openness=.7, supplied=0, interrupt_a
                 interrupt_agents="all", steer_agents="all", required=False, exits="", reward_exit="none",
                 arrival_responses=0, taste=False, taste_strength=None, laps=1,
                 taste_prompt=REWARD_DEFAULTS["taste_prompt"], arrival_prompt=REWARD_DEFAULTS["arrival_prompt"],
-                lap_prompt="")
+                lap_prompt="", paired_exits=False, team_reward=0)
 
 
 def scenario(**changes):

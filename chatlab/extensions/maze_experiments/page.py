@@ -12,7 +12,8 @@ import gradio as gr
 
 from .dynamic_maze import ChangingMaze, changing, maze_at_turn
 from .inserts import CHANNELS
-from .maze import DIRECTIONS, GOAL_MODES, PASSAGES, SYSTEM, default_instruction, generate, unavoidable_cells
+from .maze import (DIRECTIONS, GOAL_MODES, PASSAGES, SYSTEM, default_instruction, generate, generate_paired,
+                   unavoidable_cells)
 from .batch import BatchControl, cut_short, downloads, run_trials
 from .runner import (RECOVERY_DEFAULTS, TERMINAL, Episode, check_interruption_text, check_supplied_steering,
                      context_messages, fork_token_edit, from_payload, insert_outcome, past_load_limit, read_run_file,
@@ -254,22 +255,32 @@ def team_values(ep):
     return (len(ep.agents), config.get("communication", True), config.get("team_goal", "any"),
             config.get("round_limit", 24), format_agents(config.get("interrupt_agents"), len(ep.agents)),
             format_agents(config.get("steer_agents"), len(ep.agents)), config.get("required_checkpoint") is not None,
-            "; ".join(cell_text(cell) for cell in rewards["exits"]), rewards["reward_exit"] or "none",
-            rewards["arrival_responses"], rewards["taste"], rewards["taste_strength"], rewards["laps"],
-            rewards["taste_prompt"], rewards["arrival_prompt"], rewards["lap_prompt"],
-            gr.update(visible=ep.team))
+            # A drawn exit B is drawn again with the maze, so it is not typed in.
+            "" if rewards["paired_exits"] else "; ".join(cell_text(cell) for cell in rewards["exits"]),
+            rewards["reward_exit"] or "none", rewards["arrival_responses"], rewards["taste"], rewards["taste_strength"],
+            rewards["laps"], rewards["taste_prompt"], rewards["arrival_prompt"], rewards["lap_prompt"],
+            rewards["paired_exits"], rewards["team_reward"], gr.update(visible=ep.team))
 
 
 def reward_config(exits, reward_exit, arrival_responses, taste, taste_strength, laps, taste_prompt, arrival_prompt,
-                  lap_prompt):
-    """A team's exits and rewards from their controls, or nothing when every one is left as a plain run has it."""
+                  lap_prompt, paired_exits=False, team_reward=0, drawn_exit=None):
+    """A team's exits and rewards from their controls, or nothing when every one is left as a plain run has it.
+
+    ``drawn_exit`` is the exit B drawn with the maze when ``paired_exits`` asks
+    for one, which takes the place of any typed in.
+    """
     cells = [parse_cell(part, "exit") for part in (exits or "").split(";") if part.strip()]
+    if paired_exits:
+        if cells:
+            raise ValueError("Exit B is drawn with the maze at its route length. Leave Extra exits blank.")
+        cells = [list(drawn_exit)]
     config = dict(exits=cells, reward_exit=None if reward_exit in (None, "none") else reward_exit,
                   arrival_responses=int(arrival_responses or 0), taste=bool(taste),
                   taste_strength=None if taste_strength in (None, "") else float(taste_strength),
-                  laps=int(laps or 1), taste_prompt=taste_prompt, arrival_prompt=arrival_prompt, lap_prompt=lap_prompt)
+                  laps=int(laps or 1), taste_prompt=taste_prompt, arrival_prompt=arrival_prompt, lap_prompt=lap_prompt,
+                  paired_exits=bool(paired_exits), team_reward=int(team_reward or 0))
     plain = (not cells and config["reward_exit"] is None and not config["arrival_responses"] and not config["taste"]
-             and config["laps"] == 1)
+             and config["laps"] == 1 and not config["team_reward"])
     return {} if plain else config
 
 
@@ -1101,6 +1112,16 @@ def _build_page(context):
                                                 info="Sent after \"You reached exit B.\" or \"You reached the destination.\"")
                     lap_prompt = gr.Textbox(value=REWARD_DEFAULTS["lap_prompt"], label="Lap prompt", lines=2,
                                             elem_id="maze-lap-prompt", info="Added to the message that starts each lap after the first.")
+                    with gr.Row():
+                        paired_exits = gr.Checkbox(value=False, label="Draw exit B at the route length",
+                                                   elem_id="maze-paired-exits",
+                                                   info="Draws the maze with a second exit as far from the start as "
+                                                        "the destination, in place of Extra exits.")
+                        team_reward = gr.Number(value=0, precision=0, minimum=0, maximum=8,
+                                                label="Teammates' responses steered per reward arrival",
+                                                elem_id="maze-team-reward",
+                                                info="Each arrival at the reward exit also steers this many responses "
+                                                     "of every teammate still moving that lap.")
             with gr.Accordion("Setup prompt", open=False):
                 system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2, elem_id="maze-system-prompt")
                 instruction = gr.Textbox(value=default_instruction("coordinates"), label="Task instruction", lines=6,
@@ -1269,7 +1290,7 @@ def _build_page(context):
     # Last, so a caller naming none of them prepares a run of one agent.
     team_controls = [agents, communication, team_goal, round_limit, interrupt_agents, steer_agents, required,
                      exit_cells, reward_exit, arrival_responses, taste, taste_strength, laps, taste_prompt,
-                     arrival_prompt, lap_prompt]
+                     arrival_prompt, lap_prompt, paired_exits, team_reward]
     # What changes with the run on screen rather than with each frame of it.
     run_panes = [mail_pane, target]
 
@@ -1282,12 +1303,19 @@ def _build_page(context):
         steer, team_settings = rest[:7], rest[7:] or (1, True, "any", 24, "all", "all", False)
         agent_count, talk, goal, rounds, interrupted, steered, required_cell = team_settings[:7]
         reward_settings = team_settings[7:] or ("", "none", 0, False, None, 1, REWARD_DEFAULTS["taste_prompt"],
-                                                REWARD_DEFAULTS["arrival_prompt"], REWARD_DEFAULTS["lap_prompt"])
+                                                REWARD_DEFAULTS["arrival_prompt"], REWARD_DEFAULTS["lap_prompt"],
+                                                False, 0)
         try:
             agent_count = int(agent_count)
             team = agent_count > 1
             waypoint_cell = parse_cell(waypoint_text, "waypoint")
-            drawn = generate(n, s, d, o, require_checkpoint=bool(required_cell) and team)
+            paired = team and bool(reward_settings[9])
+            if paired and required_cell:
+                raise ValueError("A run with exits and rewards cannot also have a required checkpoint.")
+            if paired:
+                drawn, drawn_exit = generate_paired(n, s, d, o)
+            else:
+                drawn, drawn_exit = generate(n, s, d, o, require_checkpoint=bool(required_cell) and team), None
             checkpoint = dict(waypoint=waypoint_cell) if waypoint_cell else {}
             # A team's generated checkpoint is where steering at a cell starts
             # unless a cell is named, as a waypoint is.
@@ -1316,7 +1344,7 @@ def _build_page(context):
                     chosen_agents = parse_agents(targets, agent_count, verb)
                     if chosen_agents is not None:
                         config[key] = chosen_agents
-                rewards = reward_config(*reward_settings)
+                rewards = reward_config(*reward_settings, drawn_exit=drawn_exit)
                 config.update(rewards)
             if steer[3] == "reward" and not (team and rewarded(config)):
                 raise ValueError("Steering by taste and reward exit needs a team with exits and rewards.")

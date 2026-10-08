@@ -17,6 +17,7 @@ from __future__ import annotations
 
 
 import html
+import json
 import logging
 from dataclasses import dataclass
 from functools import partial
@@ -56,6 +57,7 @@ from chatlab.ui.conversations import (
     delete_conversation,
     fork_conversation,
     new_conversation,
+    open_conversation,
     remember_forks,
     remember_message,
     restore_conversations,
@@ -99,6 +101,7 @@ from chatlab.ui.outputs import (
     CLEAR_OUTPUT_NAMES,
     FORK_OUTPUT_NAMES,
     NEW_CONVERSATION_OUTPUT_NAMES,
+    OPEN_CHAT_OUTPUT_NAMES,
     POLL_OUTPUT_NAMES,
     RESTORE_OUTPUT_NAMES,
     STEERED_LOAD_OUTPUT_NAMES,
@@ -285,7 +288,7 @@ def build_app() -> gr.Blocks:
             # The three pages share the rest of the width; one is visible at a
             # time, chosen by the nav.
             chat_page = build_chat_page(saved, states)
-            extension_pages, extension_model_buttons, extension_steering_buttons = (
+            extension_pages, extension_model_buttons, extension_steering_buttons, extension_chat_buttons = (
                 _build_extension_pages(extensions, extension_errors)
             )
             images = build_images_page(saved)
@@ -332,7 +335,9 @@ def build_app() -> gr.Blocks:
             demo, saved, theme_style, settings_page, models, chat_page.sampling,
             chat_page.inspector.color_scale, states.forks, settings_inputs,
         )
-        _wire_conversations(demo, states, pane, chat_page, settings_page, chat_inputs)
+        _wire_conversations(
+            demo, states, pane, chat_page, settings_page, chat_inputs, pages, extension_chat_buttons,
+        )
         wire_score_and_batch(
             chat_page, states, settings_page.system_prompt, settings_page.assistant_prefill,
         )
@@ -541,22 +546,26 @@ def _build_conversation_pane() -> ConversationPane:
     )
 
 
-def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tuple[list, list, list]:
+def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tuple[list, list, list, list]:
     """A hidden column per enabled extension, each built by the extension itself.
 
     An extension whose page fails to build has its error added to
     ``extension_errors``, which the Settings page lists, and a note drawn in
     its place. Returns the ``(label, column)`` pairs, the ``(button, model
     ID)`` pairs the pages asked to have open the Models page, and the
-    ``(button, vector, inputs)`` triples they asked to have steer Chat.
+    ``(button, vector, inputs)`` triples they asked to have steer Chat, and
+    the ``(button, conversation, inputs)`` triples they asked to have open a
+    conversation in Chat.
     """
 
     extension_pages = []
     extension_model_buttons = []
     extension_steering_buttons = []
+    extension_chat_buttons = []
     navigation = NavigationService(
         lambda button, model_id: extension_model_buttons.append((button, model_id)),
-        lambda button, vector, inputs, prepare=None, commit=None: extension_steering_buttons.append((button, vector, inputs, prepare, commit)))
+        lambda button, vector, inputs, prepare=None, commit=None: extension_steering_buttons.append((button, vector, inputs, prepare, commit)),
+        lambda button, conversation, inputs: extension_chat_buttons.append((button, conversation, inputs)))
     for extension in extensions:
         with gr.Column(scale=1, visible=False, elem_classes=["extension-page"]) as extension_page:
             context = ExtensionContext(
@@ -571,7 +580,7 @@ def _build_extension_pages(extensions: list, extension_errors: list[str]) -> tup
                 extension_errors.append(message)
                 gr.Markdown("This extension could not open. " + html.escape(message))
         extension_pages.append((extension.spec.page_label, extension_page))
-    return extension_pages, extension_model_buttons, extension_steering_buttons
+    return extension_pages, extension_model_buttons, extension_steering_buttons, extension_chat_buttons
 
 
 def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, buttons: list) -> None:
@@ -789,6 +798,8 @@ def _wire_conversations(
     chat_page: ChatPage,
     settings_page: SettingsPage,
     chat_inputs: list,
+    pages: Pages | None = None,
+    extension_chat_buttons: list = (),
 ) -> None:
     """Every listener that starts, stops, changes or switches a conversation.
 
@@ -1075,3 +1086,34 @@ def _wire_conversations(
         STEERED_LOAD_OUTPUT_NAMES,
         concurrency_id=CONVERSATION_PANE_QUEUE,
     )
+    # An extension's conversation, opened as a new one. The extension
+    # builds it at the click, outside the conversation queue; the opening is
+    # navigation, as New conversation is, so a reply still running in the
+    # conversation left behind carries on.
+    page_outputs = [] if pages is None else [
+        pages.nav, pages.conversations, pages.chat, pages.images, pages.models, pages.settings,
+        *(page for _, page in pages.extensions),
+    ]
+
+    def show_chat():
+        return (CHAT_PAGE, *show_page(CHAT_PAGE), *(gr.update(visible=False) for _ in pages.extensions))
+
+    for button, conversation, inputs in extension_chat_buttons:
+        payload = gr.State(None)
+
+        def build_conversation(*values, build=conversation):
+            try:
+                value = build(*values)
+            except ValueError as error:
+                raise gr.Error(str(error)) from error
+            return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+        built = button.click(build_conversation, list(inputs), payload, concurrency_id="extension-open-chat")
+        opened = navigate(
+            built.success, open_conversation,
+            [payload, states.conversation, states.forks, chat_page.inspector.color_scale,
+             *chat_page.sampling.controls],
+            OPEN_CHAT_OUTPUT_NAMES,
+        )
+        brings_its_sampling(opened)
+        opened.success(show_chat, None, page_outputs)
