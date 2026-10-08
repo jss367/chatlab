@@ -44,6 +44,7 @@ from chatlab.ui.chat_layout import (
 )
 from chatlab.ui.common import (
     CHAT_PAGE,
+    EXTENSIONS_PAGE,
     CONVERSATION_PANE_QUEUE,
     CONVERSATION_PANE_WIDTH,
     NAV_PANE_WIDTH,
@@ -65,7 +66,9 @@ from chatlab.ui.conversations import (
     save_conversation,
     switch_fork,
 )
-from chatlab.ui.extensions_page import data_directory, extension_css, restore_extensions
+from chatlab.ui.extensions_page import (
+    ExtensionsPage, build_extensions_page, data_directory, extension_css, restore_extensions,
+)
 from chatlab.ui.fork_tree import TREE_CSS, TREE_JS, render_fork_tree, select_tree_branch
 from chatlab.ui.generation import (
     ask_clear_chat,
@@ -213,6 +216,7 @@ class Pages:
     chat: gr.Column
     images: gr.Column
     models: gr.Column
+    extension_manager: gr.Column
     settings: gr.Column
     # Each enabled extension's page label and column, below the built-in pages.
     extensions: list
@@ -247,11 +251,11 @@ def build_app() -> gr.Blocks:
     warm_device()
     extensions, extension_errors = load_enabled(saved.enabled_extensions)
     # The built-in pages keep fixed places in the nav and the extensions an
-    # enabled build adds sit below them, above Settings. Spliced in among the
+    # enabled build adds sit below them, above Extensions and Settings. Spliced in among the
     # built-ins instead, an extension being enabled or removed would move
     # Images and Models up and down the pane under a reader who had learned
     # where they were.
-    page_choices = [*PAGES[:-1], *(ext.spec.page_label for ext in extensions), PAGES[-1]]
+    page_choices = [*PAGES[:3], *(ext.spec.page_label for ext in extensions), *PAGES[3:]]
     # Gradio otherwise caps the page at one of a handful of widths and centers
     # it, which leaves a band of empty room down each side on a wide screen.
     # The shell wants every pixel: the two side panes are a fixed width, so the
@@ -285,7 +289,7 @@ def build_app() -> gr.Blocks:
         with gr.Row(elem_id="shell"):
             nav = _build_nav(page_choices)
             pane = _build_conversation_pane()
-            # The three pages share the rest of the width; one is visible at a
+            # The pages share the rest of the width; one is visible at a
             # time, chosen by the nav.
             chat_page = build_chat_page(saved, states)
             extension_pages, extension_model_buttons, extension_steering_buttons, extension_chat_buttons = (
@@ -293,7 +297,8 @@ def build_app() -> gr.Blocks:
             )
             images = build_images_page(saved)
             models = build_models_page(saved)
-            settings_page = build_settings_page(saved, extensions, extension_errors)
+            extensions_page = build_extensions_page(saved.enabled_extensions, extension_errors)
+            settings_page = build_settings_page(saved)
 
         pages = Pages(
             nav=nav,
@@ -301,11 +306,12 @@ def build_app() -> gr.Blocks:
             chat=chat_page.column,
             images=images.column,
             models=models.column,
+            extension_manager=extensions_page.column,
             settings=settings_page.column,
             extensions=extension_pages,
         )
         badge_timer = chat_page.bar.badge_timer
-        _wire_pages(demo, pages, settings_page, models, extension_model_buttons)
+        _wire_pages(demo, pages, settings_page, extensions_page, models, extension_model_buttons)
         wire_model_bar(
             demo, nav, chat_page, settings_page.thinking_mode, models.weight_precision,
         )
@@ -587,7 +593,7 @@ def _wire_extension_steering(pages: Pages, chat_page, states: SharedState, butto
     """Each extension button that builds a steering vector, applied to the conversation and shown on Chat."""
 
     page_outputs = [pages.nav, pages.conversations, pages.chat, pages.images, pages.models,
-                    pages.settings, *(page for _, page in pages.extensions)]
+                    pages.extension_manager, pages.settings, *(page for _, page in pages.extensions)]
     capture_lock = STEERING_LOCK
     for entry in buttons:
         button, vector, inputs = entry[:3]
@@ -658,6 +664,7 @@ def _wire_pages(
     demo: gr.Blocks,
     pages: Pages,
     settings_page: SettingsPage,
+    extensions_page: ExtensionsPage,
     models: ModelsPage,
     extension_model_buttons: list,
 ) -> None:
@@ -666,14 +673,22 @@ def _wire_pages(
     pages.nav.change(
         show_page,
         pages.nav,
-        [pages.conversations, pages.chat, pages.images, pages.models, pages.settings],
+        [pages.conversations, pages.chat, pages.images, pages.models, pages.extension_manager, pages.settings],
     )
     # On the way to the page rather than on a timer: nothing here changes
     # while it is not being looked at, and reading it costs a subprocess.
     pages.nav.change(refresh_hardware, None, settings_page.hardware_view)
     demo.load(refresh_hardware, None, settings_page.hardware_view)
     settings_page.refresh_hardware_button.click(refresh_hardware, None, settings_page.hardware_view)
-    demo.load(restore_extensions, settings_page.active_extensions, settings_page.extension_settings)
+    demo.load(restore_extensions, extensions_page.active, extensions_page.controls)
+    def open_extensions():
+        return (EXTENSIONS_PAGE, *show_page(EXTENSIONS_PAGE),
+                *(gr.update(visible=False) for _ in pages.extensions))
+    settings_page.manage_extensions_button.click(
+        open_extensions, None,
+        [pages.nav, pages.conversations, pages.chat, pages.images, pages.models,
+         pages.extension_manager, pages.settings, *(page for _, page in pages.extensions)],
+    )
     for label, extension_page in pages.extensions:
         def show_extension(page, expected=label):
             return gr.update(visible=page == expected)
@@ -681,7 +696,7 @@ def _wire_pages(
     # Every page container go_to_models() publishes an update for, in the
     # order show_page() returns them.
     extension_page_outputs = [pages.nav, pages.conversations, pages.chat, pages.images,
-                              pages.models, pages.settings,
+                              pages.models, pages.extension_manager, pages.settings,
                               *(page for _, page in pages.extensions)]
     # The ID box and everything that has to move with it, in the order
     # select_model_to_load() returns them.
@@ -1091,7 +1106,7 @@ def _wire_conversations(
     # navigation, as New conversation is, so a reply still running in the
     # conversation left behind carries on.
     page_outputs = [] if pages is None else [
-        pages.nav, pages.conversations, pages.chat, pages.images, pages.models, pages.settings,
+        pages.nav, pages.conversations, pages.chat, pages.images, pages.models, pages.extension_manager, pages.settings,
         *(page for _, page in pages.extensions),
     ]
 

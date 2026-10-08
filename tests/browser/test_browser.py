@@ -77,6 +77,32 @@ class BrowserFlows:
         expect(self.page.locator("#stop-button")).to_be_hidden(timeout=20000)
         expect(self.page.get_by_role("button", name="Send", exact=True)).to_be_visible()
 
+    def test_extensions_navigation_and_saved_choice(self):
+        self.page.locator('#nav label').filter(has_text="Extensions").click()
+        expect(self.page.locator("#extensions-page")).to_be_visible()
+        expect(self.page.locator("#conversation-pane")).to_be_hidden()
+        expect(self.page.locator("#chat-page")).to_be_hidden()
+        expect(self.page.locator("#settings-page")).to_be_hidden()
+        choice = self.page.locator("#enabled-extensions input[type=checkbox]").first
+        choice.check()
+        expect(self.page.locator("#extensions-status")).to_contain_text("Restart ChatLab")
+        self.page.locator('#nav label').filter(has_text="Settings").click()
+        expect(self.page.locator("#extensions-page")).to_be_hidden()
+        self.page.get_by_role("button", name="Manage extensions", exact=True).click()
+        expect(self.page.locator("#extensions-page")).to_be_visible()
+        expect(self.page.locator("#settings-page")).to_be_hidden()
+        expect(choice).to_be_checked()
+        self.page.reload()
+        self.page.locator('#nav label').filter(has_text="Extensions").click()
+        expect(choice).to_be_checked()
+        expect(self.page.locator("#extensions-status")).to_contain_text("Restart ChatLab")
+        self.page.locator('#nav label').filter(has_text="Models").click()
+        expect(self.page.locator("#extensions-page")).to_be_hidden()
+        expect(self.page.locator("#models-page")).to_be_visible()
+        self.page.locator('#nav label').filter(has_text="Extensions").click()
+        expect(self.page.locator("#extensions-page")).to_be_visible()
+        expect(self.page.locator("#models-page")).to_be_hidden()
+
     def test_send_and_stop_keeps_partial_reply(self):
         self.send("Stop this response")
         expect(self.page.locator("#message-input textarea")).to_have_value("")

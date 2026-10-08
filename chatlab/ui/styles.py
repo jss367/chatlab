@@ -106,7 +106,7 @@ html, body {{ height: 100%; overflow: hidden; }}
 }}
 #nav-pane, #conversation-pane, #chat-page, #chat-workspace, #inspector-pane,
 #images-page, #images-workspace, #image-inspector,
-#models-page, #settings-page {{ box-sizing: border-box; min-height: 0; flex-wrap: nowrap; }}
+#models-page, #settings-page, #extensions-page {{ box-sizing: border-box; min-height: 0; flex-wrap: nowrap; }}
 #nav-pane, #conversation-pane, #inspector-pane, #image-inspector {{
   background: var(--background-fill-secondary);
 }}
@@ -175,13 +175,13 @@ body.pane-dragging {{ cursor: col-resize; user-select: none; }}
 }}
 body.column-dragging, body.column-dragging * {{ cursor: col-resize !important; }}
 body.column-dragging {{ user-select: none; }}
-#models-page, #settings-page {{
+#models-page, #settings-page, #extensions-page {{
   height: 100%; overflow-y: auto; overscroll-behavior-y: contain;
   padding: 24px 32px;
 }}
 /* Keep page headers and sections at their natural height so long content
    scrolls instead of shrinking and clipping the header. */
-#models-page > *, #settings-page > * {{ flex: 0 0 auto; }}
+#models-page > *, #settings-page > *, #extensions-page > * {{ flex: 0 0 auto; }}
 
 /* The Images page is the chat layout with a picture where the transcript
    goes: the workspace scrolls on the left, the readings scroll beside it.
@@ -224,27 +224,27 @@ body.column-dragging {{ user-select: none; }}
 :root {{
   --card-shadow: 0 1px 2px rgb(16 18 27 / 4%), 0 4px 14px rgb(16 18 27 / 5%);
 }}
-#models-page, #settings-page {{
+#models-page, #settings-page, #extensions-page {{
   background: var(--background-fill-secondary);
 }}
 #models-columns {{ align-items: flex-start; gap: 24px; }}
 #model-controls {{ gap: 24px; }}
-#models-page .model-card, #settings-page .settings-card {{
+#models-page .model-card, #settings-page .settings-card, #extensions-page .settings-card {{
   min-width: 0; padding: 20px; gap: 16px;
   border: 1px solid transparent; border-radius: 14px;
   background: var(--block-background-fill);
   box-shadow: var(--card-shadow);
 }}
-.dark #models-page .model-card, .dark #settings-page .settings-card {{
+.dark #models-page .model-card, .dark #settings-page .settings-card, .dark #extensions-page .settings-card {{
   border-color: var(--border-color-primary); box-shadow: none;
 }}
-#models-page .model-card > *, #settings-page .settings-card > * {{ flex-shrink: 0; }}
-#models-page .model-card h2, #settings-page .settings-card h2 {{
+#models-page .model-card > *, #settings-page .settings-card > *, #extensions-page .settings-card > * {{ flex-shrink: 0; }}
+#models-page .model-card h2, #settings-page .settings-card h2, #extensions-page .settings-card h2 {{
   margin: 0; padding-bottom: 12px;
   border-bottom: 1px solid var(--border-color-primary);
   font-size: 17px; line-height: 24px; font-weight: 600;
 }}
-#models-page button, #settings-page button {{ border-width: 1px; }}
+#models-page button, #settings-page button, #extensions-page button {{ border-width: 1px; }}
 #models-page textarea, #models-page input[data-testid="textbox"], #models-page input[type="password"],
 #models-page .model-sort .wrap,
 #settings-page textarea, #settings-page input[data-testid="textbox"],
@@ -311,8 +311,8 @@ body.column-dragging {{ user-select: none; }}
 }}
 #models-page .block.model-detail:not(:has(.md > *)) {{ display: none; }}
 @media (max-width: 800px) {{
-  #models-page, #settings-page {{ padding: 20px 16px; }}
-  #models-page .model-card, #settings-page .settings-card {{ padding: 16px; }}
+  #models-page, #settings-page, #extensions-page {{ padding: 20px 16px; }}
+  #models-page .model-card, #settings-page .settings-card, #extensions-page .settings-card {{ padding: 16px; }}
   #model-controls {{ min-width: min(360px, 100%) !important; }}
 }}
 
@@ -324,26 +324,26 @@ body.column-dragging {{ user-select: none; }}
 #settings-prompting, #settings-machine {{ gap: 24px; }}
 /* A setting's own explanation is a caption, not body text: Gradio's prose
    sizes the paragraph, so the class has to reach it. */
-#settings-page .scale-caption p {{
+#settings-page .scale-caption p, #extensions-page .scale-caption p {{
   margin: 0; font-size: 0.85rem; line-height: 1.55;
   color: var(--body-text-color-subdued);
 }}
-#settings-page .settings-card .form {{
+#settings-page .settings-card .form, #extensions-page .settings-card .form {{
   border: 0; box-shadow: none; background: transparent;
 }}
 /* A lone checkbox reads as a switch for the card it sits in rather than as
    a bordered field of its own. */
-#settings-page .settings-card label > input[type="checkbox"] {{ flex: 0 0 auto; }}
-#settings-page #enabled-extensions {{ border: 0; padding: 0; background: transparent; }}
+#settings-page .settings-card label > input[type="checkbox"], #extensions-page .settings-card label > input[type="checkbox"] {{ flex: 0 0 auto; }}
+#extensions-page #enabled-extensions {{ border: 0; padding: 0; background: transparent; }}
 /* A checkbox inside a group comes without the border the lone ones have,
    which left the box invisible against the card. */
-#settings-page #enabled-extensions input[type="checkbox"] {{
+#extensions-page #enabled-extensions input[type="checkbox"] {{
   border: 1px solid var(--checkbox-border-color); border-radius: 4px;
 }}
-#settings-page .extension-summary p {{
+#extensions-page .extension-summary p {{
   margin: 0; font-size: 0.85rem; color: var(--body-text-color-subdued);
 }}
-#settings-page #extensions-status p {{ margin: 0; font-size: 0.85rem; }}
+#extensions-page #extensions-status p {{ margin: 0; font-size: 0.85rem; }}
 /* The machine's figures as a table of readings: a name against a value, one
    per line, rather than a bulleted list of sentences. */
 #settings-page .hardware-panel .md > p:first-child {{
@@ -691,14 +691,14 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
 }}
 
 /* The nav is a Radio drawn as a column of tiles. Its inputs are hidden, the
-   selected tile is filled, and the last tile (Settings) is pushed to the
+   selected tile is filled, and Extensions and Settings are pushed to the
    bottom. Extension tiles follow the pages that ship with the app, under a
    hairline that ui.extensions_page draws on the first of them. */
 #nav-pane > *, #nav, #nav .wrap {{ height: 100%; }}
 #nav {{ overflow: visible !important; }}
 #nav .wrap {{ flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 0.3rem; }}
 /* Each tile stacks the icon over the page's name, so the name is on screen
-   rather than a hover away. Four pages and a couple of extensions is not a
+   rather than a hover away. Five built-in pages and optional tools is not a
    number worth hiding. */
 #nav label {{
   position: relative;
@@ -732,7 +732,7 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
   box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
 }}
 #nav label.selected span {{ color: var(--color-accent); }}
-#nav label:last-child {{ margin-top: auto; }}
+#nav label[data-testid="Extensions-radio-label"] {{ margin-top: auto; }}
 /* The radio inputs stay in the tab order, just out of sight, and the tile
    they belong to shows the keyboard focus ring. */
 #nav label input {{
