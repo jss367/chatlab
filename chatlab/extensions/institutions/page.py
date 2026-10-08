@@ -68,12 +68,14 @@ class Reruns:
     def __init__(self):
         self._lock = threading.Lock()
         self._active = {}
+        self._requests = {}
 
     def start(self, owner):
         with self._lock:
             if owner in self._active:
                 raise ValueError("A re-run is already generating in this view.")
             self._active[owner] = [threading.Event(), None]
+            self._requests[owner] = self._active[owner][0]
             return self._active[owner][0]
 
     def attach(self, owner, session):
@@ -89,6 +91,21 @@ class Reruns:
 
     def cancel(self, owner):
         with self._lock:
+            active = self._active.get(owner)
+            if active:
+                active[0].set()
+                if active[1] is not None:
+                    active[1].cancel()
+
+    def selected(self, owner, request):
+        """Whether this request still belongs to the selection on screen."""
+        with self._lock:
+            return self._requests.get(owner) is request
+
+    def invalidate(self, owner):
+        """A selection change discards late output, including final errors."""
+        with self._lock:
+            self._requests.pop(owner, None)
             active = self._active.get(owner)
             if active:
                 active[0].set()
@@ -281,7 +298,7 @@ def build_page(context):
     staging = {"directory": None}
 
     def forget(owner):
-        reruns.cancel(owner)
+        reruns.invalidate(owner)
         selections.forget(owner)
 
     with gr.Column(elem_id="institutions-page"):
@@ -531,16 +548,15 @@ def build_page(context):
 
     def download_conversation(loaded, chosen, index, attempt_value, with_reply):
         try:
-            found, entry, game = opened(loaded, chosen)
+            _, _, game = opened(loaded, chosen)
             value = conversation(game, index, attempt_value, bool(with_reply))
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
-        turn = game["turns"][index]
         if staging["directory"] is None or not Path(staging["directory"].name).is_dir():
             staging["directory"] = tempfile.TemporaryDirectory(prefix="chatlab-institutions-")
         directory = Path(staging["directory"].name)
-        name = (f"{found.run_id}-{game['arm']}-{game['condition']}-seed{game['seed']}-turn{index}-"
-                f"{turn['agent']}-r{turn['round']}-{turn['phase']}.json")
+        # Bundle metadata is untrusted and must never become a filesystem path.
+        name = f"institutions-conversation-{uuid4().hex}.json"
         path = directory / name
         for earlier in directory.glob("*.json"):
             earlier.unlink(missing_ok=True)
@@ -595,10 +611,16 @@ def build_page(context):
                               f"{verdict} under `{found.model}`.")
                 else:
                     length = f"Templated prompt: {prompt_tokens:,} tokens under `{session.model_id}`."
+                if not reruns.selected(session_id, cancel):
+                    return
                 yield (*rerun_frame(session_id, state, check="", payments=[]), length)
+                if not reruns.selected(session_id, cancel):
+                    return
                 stream = session.generate(messages, forced_ids=forced, **state["sampling"])
                 try:
                     for update in stream:
+                        if not reruns.selected(session_id, cancel):
+                            break
                         state.update(text=update.text, metrics=update.metrics)
                         yield (*rerun_frame(session_id, state), gr.skip())
                 finally:
@@ -608,6 +630,8 @@ def build_page(context):
             logger.warning("Institutions re-run of turn %s failed: %s", index, failure)
         finally:
             reruns.finish(session_id)
+        if not reruns.selected(session_id, cancel):
+            return
         if failure is not None and not state["metrics"]:
             raise gr.Error(failure)
         stopped = cancel.is_set()
@@ -645,8 +669,8 @@ def build_page(context):
 
     for event in (go.click, menu_action.input):
         event(cleared, None, inspector, queue=False)
-    go.click(generate, [runs, current, turn_index, attempt, owner, temperature, max_tokens, rerun_seed],
-             rerun_outputs, **serial)
+    generate_event = go.click(generate, [runs, current, turn_index, attempt, owner, temperature, max_tokens, rerun_seed],
+                              rerun_outputs, **serial)
     stop.click(reruns.cancel, owner, [], queue=False)
 
     def inspect_token(session_id, payload, event: gr.SelectData):
@@ -678,6 +702,12 @@ def build_page(context):
                 raise ValueError(STALE_TOKEN)
             if state["key"][:3] != [(chosen or {}).get("run"), (chosen or {}).get("file"), index]:
                 raise ValueError(STALE_TOKEN)
+            _, _, game = opened(loaded, chosen)
+            attempts = game["turns"][index]["attempts"]
+            position = (attempt_value if isinstance(attempt_value, int) and 0 <= attempt_value < len(attempts)
+                        else len(attempts) - 1)
+            if state["key"][3] != position:
+                raise ValueError(STALE_TOKEN)
         except (KeyError, TypeError, ValueError) as exc:
             raise gr.Error(STALE_TOKEN) from exc
         edit = dict(token_index=token_index, load_id=state.get("load_id"),
@@ -694,5 +724,15 @@ def build_page(context):
             raise gr.Error("Choose an alternative or type replacement text.")
         yield from generate(loaded, chosen, index, state["key"][3], session_id, temp, token_limit, seed_value, edit=edit)
 
-    menu_action.input(branch, [runs, current, turn_index, attempt, rerun_state, owner, token_state, menu_action,
-                               temperature, max_tokens, rerun_seed], rerun_outputs, **serial)
+    branch_event = menu_action.input(branch, [runs, current, turn_index, attempt, rerun_state, owner, token_state,
+                                             menu_action, temperature, max_tokens, rerun_seed], rerun_outputs, **serial)
+
+    def invalidate(session_id):
+        reruns.invalidate(session_id)
+        selections.forget(session_id)
+
+    # Invalidate immediately, outside the generation queue. Gradio cancellation
+    # also drops queued re-runs/branches captured before the new selection.
+    for event in (load.click, run.input, split.input, arm.input, condition.input, seed.input, iteration.input,
+                  overview_table.select, step.input, previous.click, following.click, turns_table.select, attempt.input):
+        event(invalidate, owner, [], queue=False, cancels=[generate_event, branch_event])

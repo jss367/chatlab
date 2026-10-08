@@ -21,7 +21,7 @@ from chatlab.extensions.institutions.replies import (
     check_payment, classify_payments, parse_json, prompt_context, read_reply,
 )
 from hangman_support import STOP, CharacterModel
-from ui_support import handlers_by_name
+from ui_support import handlers_by_name, listeners_named
 
 ARMS = {
     "anarchy": {"class": "none", "approval": False, "leader": "", "removal": "", "framing": "neutral",
@@ -422,6 +422,7 @@ class PageTests(unittest.TestCase):
         with gr.Blocks() as demo:
             build_page(context)
         self.addCleanup(demo.close)
+        self.demo = demo
         self.fn = handlers_by_name(demo)
 
     def open(self, split="eval", arm="democracy", condition="red", seed=None, iteration=None):
@@ -473,6 +474,69 @@ class PageTests(unittest.TestCase):
         saved = json.loads(Path(update["value"]).read_text())
         self.assertEqual(saved["format"], "chatlab-conversation-1")
         self.assertEqual(len(saved["turns"]), 1)
+
+    def test_download_metadata_cannot_overwrite_a_file_outside_staging(self):
+        runs, _, picked = self.open()
+        target = self.root / "escape-democracy-red-seed0-turn3-Ada-r1-work.json"
+        target.write_text("Keep this file.")
+        runs[0].manifest["run_id"] = str(self.root / "escape")
+        chosen = dict(picked[3], run=runs[0].run_id)
+        update = self.fn["download_conversation"](runs, chosen, 3, None, False)
+        self.assertEqual(target.read_text(), "Keep this file.")
+        self.assertNotEqual(Path(update["value"]).parent, self.root)
+        self.assertEqual(json.loads(Path(update["value"]).read_text())["format"], "chatlab-conversation-1")
+
+    def test_selection_change_discards_late_generation_output(self):
+        runs, _, picked = self.open()
+        stream = self.fn["generate"](runs, picked[3], 3, None, "owner", 0.7, 800, 5)
+        next(stream)  # The prompt-length frame reserves the model.
+        next(stream)  # A reply frame is in flight while the view changes.
+        if "invalidate" in self.fn:
+            self.fn["invalidate"]("owner")
+        shown = self.fn["show_turn"](runs, picked[3], 4, 0)
+        self.assertIn("Turn 4", shown[0])
+        self.assertEqual(list(stream), [])
+        self.assertFalse(self.manager.busy)
+
+    def test_selection_change_before_first_reply_makes_no_model_call(self):
+        runs, _, picked = self.open()
+        stream = self.fn["generate"](runs, picked[3], 3, None, "owner", 0.7, 800, 5)
+        next(stream)
+        self.fn["invalidate"]("owner")
+        self.assertEqual(list(stream), [])
+        self.assertEqual(self.manager.calls, [])
+        self.assertFalse(self.manager.busy)
+
+    def test_all_selection_controls_cancel_queued_reruns_and_branches(self):
+        jobs = {i for i, listener in self.demo.fns.items()
+                if getattr(listener.fn, "__name__", None) in ("generate", "branch")}
+        invalidators = listeners_named(self.demo, "invalidate")
+        self.assertEqual(len(invalidators), 13)
+        for listener in invalidators:
+            with self.subTest(target=listener.targets):
+                self.assertFalse(listener.queue)
+                cancellations = {i for other in self.demo.fns.values() if other.targets == listener.targets
+                                 for i in other.cancels}
+                self.assertEqual(cancellations, jobs)
+
+    def test_stopping_current_reply_keeps_partial_result_and_other_owners_do_not_cancel_it(self):
+        runs, _, picked = self.open()
+        stream = self.fn["generate"](runs, picked[3], 3, None, "owner", 0.7, 800, 5)
+        next(stream)
+        self.fn["invalidate"]("another-owner")
+        reply = next(stream)
+        self.fn["cancel"]("owner")
+        final, = list(stream)
+        self.assertEqual(final[3], reply[3])
+        self.assertIn("**Stopped.**", final[4])
+        self.assertFalse(self.manager.busy)
+
+    def test_branch_of_another_attempt_is_refused(self):
+        runs, _, picked = self.open()
+        state, payload, *_ = list(self.fn["generate"](runs, picked[3], 4, 1, "owner", 0.7, 800, 5))[-1]
+        action = json.dumps({"kind": "text", "text": "{", "selection": {"view_id": state["id"], "index": 0}})
+        with self.assertRaises(gr.Error):
+            list(self.fn["branch"](runs, picked[3], 4, 0, state, "owner", payload, action, 0.7, 800, 5))
 
     def test_rerun_measures_the_prompt_classifies_payments_and_branches(self):
         runs, _, picked = self.open()
