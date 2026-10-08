@@ -267,6 +267,11 @@ STEERING_OUTPUT_NAMES = (
 )
 STEERED_LOAD_OUTPUT_NAMES = (*LOAD_OUTPUT_NAMES, "forks", *STEERING_OUTPUT_NAMES)
 
+# An extension's conversation opened in Chat: a new conversation, as New
+# conversation starts one, holding what a saved file would load, system
+# prompt included.
+OPEN_CHAT_OUTPUT_NAMES = (*NEW_CONVERSATION_OUTPUT_NAMES, "system_prompt")
+
 # Every name above, which is what the layout's table has to cover.
 CONVERSATION_OUTPUT_NAMES = tuple(
     dict.fromkeys(
@@ -278,6 +283,7 @@ CONVERSATION_OUTPUT_NAMES = tuple(
             *NEW_CONVERSATION_OUTPUT_NAMES,
             *RESTORE_OUTPUT_NAMES,
             *STEERED_LOAD_OUTPUT_NAMES,
+            *OPEN_CHAT_OUTPUT_NAMES,
         )
     )
 )

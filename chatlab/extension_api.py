@@ -671,9 +671,10 @@ class NavigationService:
     The host wires both its navigation selection and page visibility after all
     pages exist. Extensions never need references to the host's UI components.
     """
-    def __init__(self, register_models_button, register_steering_button=None):
+    def __init__(self, register_models_button, register_steering_button=None, register_chat_button=None):
         self._register_models_button = register_models_button
         self._register_steering_button = register_steering_button
+        self._register_chat_button = register_chat_button
 
     def open_models(self, button, model_id=None):
         """Make this button open model loading when clicked.
@@ -713,6 +714,21 @@ class NavigationService:
             self._register_steering_button(button, vector, list(inputs))
         else:
             self._register_steering_button(button, vector, list(inputs), prepare)
+
+    def open_chat(self, button, conversation, inputs=()):
+        """Make this button open a new Chat conversation and switch to Chat.
+
+        ``conversation`` is called at the click with the values of
+        ``inputs`` and returns a ``chatlab-conversation-1`` object, as a saved
+        conversation file holds. The conversation on screen is put away, as
+        **New conversation** does, and the returned one is loaded in its
+        place through the same path as a saved file, system prompt included.
+        A ``ValueError`` it raises, or a conversation the load refuses, is
+        shown to the reader and nothing changes.
+        """
+        if self._register_chat_button is None:
+            raise ValueError("This host cannot open conversations in Chat.")
+        self._register_chat_button(button, conversation, list(inputs))
 
 
 @dataclass(frozen=True)

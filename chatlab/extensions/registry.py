@@ -46,6 +46,9 @@ CATALOGUE = (
     ExtensionSpec("direction_edits", "Direction edits",
                   "Inject a vector, erase or clamp a direction at chosen blocks, and see whether later blocks and the lens rebuild it.",
                   "Edits", "chatlab.extensions.direction_edits", icon="crosshair"),
+    ExtensionSpec("institutions", "Institutions pilot",
+                  "Step through recorded institution games round by round and open any agent's turn with its exact prompts.",
+                  "Institutions", "chatlab.extensions.institutions", icon="archive"),
 )
 
 
