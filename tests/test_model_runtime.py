@@ -423,6 +423,28 @@ class CacheStatusTests(unittest.TestCase):
 
 
 class CachedModelsTests(unittest.TestCase):
+    def test_local_blob_and_snapshot_links_count_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = self.make_cache_entry(root, "org/local", complete=True)
+            self.assertEqual(model_cache.folder_bytes(folder), len("cached") + len("abc123"))
+
+    def test_shared_blobs_count_once_in_inventory_size(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = self.make_cache_entry(root, "org/shared", complete=True)
+            shared = Path(root) / "blobs" / "shared-weights"
+            shared.parent.mkdir()
+            shared.write_bytes(b"x" * 1000)
+            blob = folder / "blobs" / "cached-blob"
+            blob.unlink()
+            blob.symlink_to(Path("../../blobs/shared-weights"))
+            (folder / "blobs" / "another-link").symlink_to(blob)
+            (folder / "blobs" / "broken-link").symlink_to("missing")
+
+            entry, = list_cached_models(Path(root))
+
+            self.assertTrue(entry.status.complete)
+            self.assertEqual(entry.size_bytes, 1000 + len("abc123"))
+
     def make_cache_entry(
         self, root: str, model_id: str, *, complete: bool
     ) -> Path:
