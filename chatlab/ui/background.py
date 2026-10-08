@@ -131,7 +131,8 @@ class ConversationJob:
                 # Snapshot the owned branch (and a token fork's source for
                 # inherited sampling) while holding the job lock. Unrelated
                 # history stays off this path.
-                names = self.save_names | {self.owner}
+                names = [name for name in self.saved["branches"]
+                         if name in self.save_names or name == self.owner]
                 owned = {"active": self.owner, "branches": {name: self.saved["branches"][name] for name in names}}
                 for field in ("updated", "origins", "sampling", "sampling_updated",
                               "archived", "archived_updated"):

@@ -559,6 +559,7 @@ def _replace(target: Path, text: str) -> bool:
 def write(
     forks: dict | None, path: Path | None = None, *,
     preserve_active: bool = False, preserve_archived: bool = False,
+    preserve_order: bool = False,
 ) -> Path | None:
     """Merge the pane into the file on disk and return the path; ``None`` if it could not be.
 
@@ -569,6 +570,8 @@ def write(
 
     Background jobs use ``preserve_active`` to save their source transcript
     without changing which conversation the reader selected most recently.
+    Partial snapshots also use ``preserve_order``: existing disk branches keep
+    their pane order, and new branches are appended in snapshot order.
     Clear all uses ``preserve_archived`` to keep branches archived by another
     page, including one that saves between the clear handler and this write.
     """
@@ -594,6 +597,12 @@ def write(
                         forks["updated"][name], existing["updated"].get(name, "")
                     )
         merged = merge(forks, existing)
+        if preserve_order and existing:
+            names = dict.fromkeys((*existing["branches"], *merged["branches"]))
+            merged["branches"] = {
+                name: merged["branches"][name] for name in names
+                if name in merged["branches"]
+            }
         if preserve_active and existing and existing["active"] in merged["branches"]:
             merged["active"] = existing["active"]
         if not _replace(target, dump(merged)):

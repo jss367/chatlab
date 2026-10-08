@@ -94,6 +94,40 @@ class LibraryWriterTests(unittest.TestCase):
         self.assertEqual(saved["branches"]["Main"][0]["content"], "one")
         self.assertEqual(saved["branches"]["Chat 1"][0]["content"], "two")
 
+    def test_partial_save_preserves_latest_pane_order_and_deletions(self):
+        initial = self.snapshot("main")
+        for name in ("Chat 1", "Chat 2", "Chat 3"):
+            put_branch(initial, name, [make_turn("user", name)])
+        library.write(initial, self.path)
+        partial = {"active": "Chat 2", "branches": {"Chat 2": initial["branches"]["Chat 2"]}}
+        partial = copy_forks(partial)
+        put_branch(partial, "Chat 2", [make_turn("assistant", "stream")])
+        receipt = self.writer.submit("generation", partial, self.path)
+        # A different tab reorders the pane and deletes an unrelated branch
+        # after the frame was queued. The partial save cannot own either edit.
+        other = copy_forks(initial)
+        other["branches"] = {name: other["branches"][name] for name in ("Chat 3", "Main", "Chat 2", "Chat 1")}
+        drop_branch(other, "Chat 1")
+        library.write(other, self.path)
+        self.assertTrue(self.writer.flush(receipt))
+        saved = library.read(self.path)
+        self.assertEqual(list(saved["branches"]), ["Chat 3", "Main", "Chat 2"])
+        self.assertEqual(saved["branches"]["Chat 2"][0]["content"], "stream")
+        self.assertEqual(saved["active"], "Main")
+        self.assertIn("Chat 1", saved["updated"])
+
+    def test_partial_token_fork_keeps_existing_order_and_appends_new_branch(self):
+        initial = self.snapshot("main")
+        put_branch(initial, "Chat 1", [make_turn("user", "parent")])
+        put_branch(initial, "Chat 2", [make_turn("user", "other")])
+        library.write(initial, self.path)
+        # Incoming subset order is not the pane's ordering authority.
+        partial = copy_forks({"active": "Fork 1", "branches": {"Fork 1": [], "Chat 1": initial["branches"]["Chat 1"]}})
+        put_branch(partial, "Fork 1", [make_turn("assistant", "fork")])
+        receipt = self.writer.submit("generation", partial, self.path)
+        self.assertTrue(self.writer.flush(receipt))
+        self.assertEqual(list(library.read(self.path)["branches"]), ["Main", "Chat 1", "Chat 2", "Fork 1"])
+
     def test_shutdown_drains_and_rejects_later_frames(self):
         receipt = self.writer.submit("tab", self.snapshot("kept"), self.path)
         self.assertTrue(self.writer.close())

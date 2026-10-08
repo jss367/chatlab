@@ -22,7 +22,9 @@ Navigation, explicit edits, and atomic branch-name reservations retain their
 synchronous saves. Queued frames still use `library.write` and its process-wide
 read/merge/replace lock. Transcript timestamps, independent sampling/archive
 timestamps, deletion tombstones, and the current selection on disk remain the
-merge authority. Multiple processes writing the same file remain unsupported.
+merge authority. Partial saves retain the latest pane order on disk and append
+new branches in snapshot order; they cannot reorder unrelated conversations.
+Multiple processes writing the same file remain unsupported.
 
 ## Accepted crash-loss window
 

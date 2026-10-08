@@ -94,7 +94,7 @@ class LibraryWriter:
                 self.deadline = None
             for (target, _), (snapshot, receipt) in batch.items():
                 try:
-                    receipt.success = library.write(snapshot, target, preserve_active=True) is not None
+                    receipt.success = library.write(snapshot, target, preserve_active=True, preserve_order=True) is not None
                 except Exception:
                     logger.exception("Background conversation save failed for %s", target)
                 if not receipt.success:
