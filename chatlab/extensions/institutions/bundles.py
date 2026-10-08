@@ -12,6 +12,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import gzip
 import json
+import math
 from pathlib import Path
 import statistics
 import threading
@@ -66,7 +67,12 @@ class Run:
 
 
 def _is_number(x):
-    return isinstance(x, (int, float)) and not isinstance(x, bool)
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        return math.isfinite(x)
+    except OverflowError:
+        return False
 
 
 def _is_integer(x):
@@ -75,6 +81,17 @@ def _is_integer(x):
 
 def _strings(x):
     return isinstance(x, list) and all(isinstance(v, str) for v in x)
+
+
+def _check_scores(scores, name):
+    numeric = ("harm", "usefulness", "diverted", "invoice_value", "unpaid", "misaligned_expelled",
+               "honest_expelled", "failed_turns", "turns")
+    if not isinstance(scores, dict) or not all(_is_number(scores.get(k)) for k in ("harm", "usefulness")):
+        raise ValueError(f"{name} has no harm and usefulness scores")
+    if (not all(_is_number(scores[k]) for k in numeric if k in scores)
+            or not isinstance(scores.get("payments", {}), dict)
+            or not all(_is_integer(n) and n >= 0 for n in scores.get("payments", {}).values())):
+        raise ValueError(f"{name} has malformed scores")
 
 
 def _inside(root, name):
@@ -97,16 +114,18 @@ def _game_entry(root, entry, arms):
         raise ValueError("an index entry is not an object")
     if entry.get("split") not in SPLITS or entry.get("condition") not in CONDITIONS:
         raise ValueError(f"{entry.get('file')!r} has an unknown split or condition")
-    if entry.get("arm") not in arms:
+    if not isinstance(entry.get("arm"), str) or entry["arm"] not in arms:
         raise ValueError(f"{entry.get('file')!r} names arm {entry.get('arm')!r}, which the manifest lacks")
     if not isinstance(entry.get("seed"), int) or isinstance(entry.get("seed"), bool):
         raise ValueError(f"{entry.get('file')!r} has no integer seed")
     iteration = entry.get("iteration")
     if entry["split"] == "dev" and (not isinstance(iteration, int) or isinstance(iteration, bool)):
         raise ValueError(f"{entry.get('file')!r} is a dev game without an iteration")
-    scores = entry.get("scores")
-    if not isinstance(scores, dict) or not all(_is_number(scores.get(k)) for k in ("harm", "usefulness")):
-        raise ValueError(f"{entry.get('file')!r} has no harm and usefulness scores")
+    if entry["split"] == "eval" and iteration is not None:
+        raise ValueError(f"{entry.get('file')!r} is an eval game with an iteration")
+    if "turns" in entry and (not _is_integer(entry["turns"]) or entry["turns"] < 0):
+        raise ValueError(f"{entry.get('file')!r} has no integer turn count")
+    _check_scores(entry.get("scores"), repr(entry.get("file")))
     path = _inside(root, entry.get("file"))
     try:
         with path.open("rb") as f:
@@ -128,7 +147,7 @@ def read_run(directory):
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise ValueError(f"cannot read {path}: {exc.strerror or exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"{path} is not valid JSON: {exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("format") != RUN_FORMAT:
         raise ValueError(f"{path} is not a {RUN_FORMAT} manifest")
@@ -138,12 +157,23 @@ def read_run(directory):
                          f"{EXPORTER_VERSION}")
     if not isinstance(manifest.get("run_id"), str) or not manifest["run_id"]:
         raise ValueError(f"{path} has no run ID")
+    if not isinstance(manifest.get("model", ""), str):
+        raise ValueError(f"{path} has a malformed model ID")
+    if not isinstance(manifest.get("sampling", {}), dict):
+        raise ValueError(f"{path} has malformed sampling metadata")
+    if "source_commit" in manifest and not isinstance(manifest["source_commit"], str):
+        raise ValueError(f"{path} has a malformed source commit")
     config, arms, index = manifest.get("config"), manifest.get("arms"), manifest.get("games")
-    if not isinstance(config, dict) or not all(isinstance(config.get(k), int) for k in
+    if not isinstance(config, dict) or not all(_is_integer(config.get(k)) for k in
                                                ("rounds", "vote_every", "capacity_per_round")):
         raise ValueError(f"{path} has no game config")
     if not isinstance(arms, dict) or not all(isinstance(a, dict) for a in arms.values()):
         raise ValueError(f"{path} has no arms")
+    for spec in arms.values():
+        if (not all(isinstance(spec[k], str) for k in
+                    ("class", "leader", "removal", "framing", "framing_text", "rules_text") if k in spec)
+                or "approval" in spec and not isinstance(spec["approval"], bool)):
+            raise ValueError(f"{path} has a malformed arm specification")
     if not isinstance(index, list):
         raise ValueError(f"{path} has no game index")
     games, warnings = [], []
@@ -197,6 +227,8 @@ def _check_game(game, name):
             or game.get("condition") not in CONDITIONS or not _is_integer(game.get("seed"))):
         raise ValueError(f"{name} has malformed arm, condition or seed metadata")
     world = game.get("world")
+    if "strategy" in game and not isinstance(game["strategy"], str):
+        raise ValueError(f"{name} has a malformed strategy")
     if (not isinstance(world, dict) or not _strings(world.get("agents"))
             or not all(_strings(world.get(k, [])) for k in ("misaligned", "faction_accounts"))
             or world.get("dictator") is not None and not isinstance(world["dictator"], str)):
@@ -207,8 +239,7 @@ def _check_game(game, name):
             raise ValueError(f"{name} has no {key} list")
     if not isinstance(game.get("system_prompts"), dict) or not isinstance(game.get("scores"), dict):
         raise ValueError(f"{name} has no system prompts or scores")
-    if not all(_is_number(game["scores"].get(k)) for k in ("harm", "usefulness")):
-        raise ValueError(f"{name} has no harm and usefulness scores")
+    _check_scores(game["scores"], name)
     if (not isinstance(game["scores"].get("payments", {}), dict) or not _strings(game["log"])
             or not all(isinstance(v, str) for v in game["system_prompts"].values())):
         raise ValueError(f"{name} has malformed scores, log or system prompts")
@@ -224,6 +255,9 @@ def _check_game(game, name):
         for record in game[kind]:
             if (not isinstance(record, dict) or not _is_integer(record.get("round"))
                     or not all(isinstance(record.get(k), str) for k in keys)
+                    or not all(isinstance(record[k], bool) for k in
+                               ("by_misaligned", "misaligned", "leader_misaligned") if k in record)
+                    or record.get("decision") is not None and not isinstance(record["decision"], str)
                     or kind in ("payments", "proposals") and not _is_number(record.get("amount"))
                     or kind == "invalid_payments" and "payment" not in record):
                 raise ValueError(f"{name}: a {kind} record is malformed")
@@ -239,8 +273,11 @@ def _check_game(game, name):
     tickets = world.get("tickets", {})
     registry = world.get("registry", {} if not tickets else None)
     if (not isinstance(tickets, dict) or not isinstance(registry, dict)
+            or not all(isinstance(v, str) for v in registry.values())
             or not all(isinstance(t, dict) and isinstance(t.get("vendor"), str)
-                       and _is_number(t.get("total")) for t in tickets.values())):
+                       and _is_number(t.get("total"))
+                       and ("phishing" not in t or isinstance(t["phishing"], bool))
+                       and ("remit_to" not in t or isinstance(t["remit_to"], str)) for t in tickets.values())):
         raise ValueError(f"{name}: world tickets or registry are malformed")
     for i, turn in enumerate(game["turns"]):
         if (not isinstance(turn, dict) or not isinstance(turn.get("agent"), str)
@@ -248,10 +285,13 @@ def _check_game(game, name):
                 or turn.get("phase") not in PHASES or not isinstance(turn.get("attempts"), list)
                 or not turn["attempts"]
                 or turn.get("parsed") is not None and not isinstance(turn["parsed"], dict)
+                or "ok" in turn and not isinstance(turn["ok"], bool)
                 or not all(isinstance(a, dict) and isinstance(a.get("user"), str)
                            and isinstance(a.get("text", ""), str)
-                           and (not isinstance(a.get("input_tokens"), int)
-                                or _is_integer(a.get("output_tokens", 0))) for a in turn["attempts"])):
+                           and (a.get("input_tokens") is None or _is_integer(a["input_tokens"]))
+                           and ("output_tokens" not in a or _is_integer(a["output_tokens"]))
+                           and ("log_lines" not in a or _is_integer(a["log_lines"]))
+                           for a in turn["attempts"])):
             raise ValueError(f"{name}: turn {i} is malformed")
     for phase in game["phases"]:
         if (not isinstance(phase, dict) or phase.get("phase") not in PHASES
@@ -261,6 +301,19 @@ def _check_game(game, name):
                 or not all(_is_integer(i) and 0 <= i < len(game["turns"]) for i in phase["turn_indices"])):
             raise ValueError(f"{name}: a phase is malformed")
     return game
+
+
+def _check_game_index(run, entry, game):
+    """Check the selection/result identity even when reusing a cached file."""
+    expected = {k: entry[k] for k in ("arm", "condition", "seed", "split", "scores")}
+    expected.update(run_id=run.run_id, iteration=entry["iteration"])
+    if (not isinstance(game.get("run_id"), str) or game.get("split") not in SPLITS
+            or (game.get("split") == "dev" and not _is_integer(game.get("iteration")))
+            or any(game.get(k) != value for k, value in expected.items())
+            or "turns" in entry and len(game["turns"]) != entry["turns"]):
+        raise ValueError(f"{entry['file']} has metadata or scores that do not match its index entry")
+    if run.arms[game["arm"]].get("leader") == "dictator" and not isinstance(game["world"].get("dictator", ""), str):
+        raise ValueError(f"{entry['file']} has a malformed dictator")
 
 
 def read_game(run, entry):
@@ -274,6 +327,7 @@ def read_game(run, entry):
     with _cache_lock:
         held = _cache.get(key)
         if held is not None and held[0] == stamp:
+            _check_game_index(run, entry, held[1])
             _cache.move_to_end(key)
             return held[1]
     try:
@@ -285,10 +339,7 @@ def read_game(run, entry):
     except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{entry['file']} is not a readable game: {exc}") from exc
     _check_game(game, entry["file"])
-    if any(game[k] != entry[k] for k in ("arm", "condition", "seed")):
-        raise ValueError(f"{entry['file']} has metadata that does not match its index entry")
-    if run.arms[game["arm"]].get("leader") == "dictator" and not isinstance(game["world"].get("dictator", ""), str):
-        raise ValueError(f"{entry['file']} has a malformed dictator")
+    _check_game_index(run, entry, game)
     with _cache_lock:
         _cache[key] = (stamp, game)
         _cache.move_to_end(key)

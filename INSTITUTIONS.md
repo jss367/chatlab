@@ -57,6 +57,19 @@ load note. Game files are read when a game is opened, and the few most recently 
 A game that turns out to be malformed when it is opened says so and is not shown. Loaded runs belong to
 the browser session: reloading the page means loading again.
 
+The bundle reader validates the fields consumed by the page before accepting them:
+
+| Input | Consumers and checks |
+| --- | --- |
+| Manifest | Run IDs and model IDs are strings; config counters are integers; sampling is an object; arm display text is strings and approval is a boolean. Missing model metadata remains an empty model ID. |
+| Game index | Split and condition are known values, the arm exists, seed and dev iteration are integers, eval iteration is absent or null, optional turn count is an integer, and scores contain finite numeric results and integer payment counts. File paths must stay within the run directory. |
+| Game identity and results | Run ID, split, arm, condition, seed, iteration and the complete scores object agree with the manifest/index. An indexed turn count agrees with the number of turns. These comparisons also run when a cached game is used with a reloaded manifest. |
+| Header and phase records | Member/faction names and log lines are strings; system prompts are strings; scores, elections, ballots, leader records, payments, proposals, expulsions and refused payments have the fields and types used by their views. Ticket vendors and totals support the payment checker. |
+| Turns and attempts | Agent, round, phase, parsed-reply object, prompt/reply text and token counts have the types used by the turn view and conversation export. Phase log bounds and turn indices stay within the recorded lists. |
+
+Malformed manifests are refused or skipped; malformed index entries are skipped with a warning.
+Malformed or inconsistent game files are refused when opened, before any view uses their data.
+
 ## What each view shows
 
 **Arms.** For the chosen run, one row per arm: its class, the number of eval red games, their mean harm,

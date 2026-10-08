@@ -268,6 +268,7 @@ class BundleTests(unittest.TestCase):
         directory = write_bundle(self.root, "run", [("eval", democracy_game(), None)])
         run = load_bundles(str(self.root))[0][0]
         path = directory / run.games[0]["file"]
+        original = json.loads(gzip.decompress(path.read_bytes()))
         cases = [
             (("world", "agents"), [None]), (("world", "misaligned"), None),
             (("world", "faction_accounts"), [1]), (("world", "dictator"), []),
@@ -284,10 +285,23 @@ class BundleTests(unittest.TestCase):
             (("phases", 0, "log_end"), 99), (("phases", 0, "turn_indices"), [True]),
             (("votes",), [{"round": 1, "ballots": {"Ada": None}}]),
             (("invalid_payments",), [{"round": 1, "by": "Ada", "error": "bad"}]),
+            (("scores", "payments"), {"correct": True}), (("scores", "harm"), float("nan")),
+            (("scores", "usefulness"), float("inf")), (("turns", 0, "ok"), "yes"),
+            (("turns", 0, "attempts", 0, "input_tokens"), True),
+            (("turns", 0, "attempts", 0, "log_lines"), "1"),
+            (("strategy",), []), (("world", "registry", "Acme"), []),
+            (("world", "tickets", "T-001", "phishing"), "yes"),
+            (("world", "tickets", "T-001", "remit_to"), []),
+            (("payments", 0, "by_misaligned"), "yes"),
+            (("proposals", 0, "by_misaligned"), []), (("proposals", 0, "decision"), []),
+            (("expulsions", 0, "misaligned"), 1), (("elections", 0, "leader_misaligned"), []),
         ]
+        cases += [(("scores", key), "bad") for key in
+                  ("diverted", "invoice_value", "unpaid", "misaligned_expelled",
+                   "honest_expelled", "failed_turns", "turns")]
         for fields, value in cases:
             with self.subTest(fields=fields):
-                game = json.loads(json.dumps(democracy_game()))
+                game = json.loads(json.dumps(original))
                 parent = game
                 for key in fields[:-1]:
                     parent = parent[key]
@@ -295,6 +309,92 @@ class BundleTests(unittest.TestCase):
                 path.write_bytes(gzip.compress(json.dumps(game).encode()))
                 with self.assertRaises(ValueError):
                     read_game(run, run.games[0])
+
+    def test_manifest_consumer_metadata_is_validated_before_loading(self):
+        directory = write_bundle(self.root, "run", [("eval", democracy_game(), None)])
+        path = directory / "manifest.json"
+        original = json.loads(path.read_text())
+        cases = [(("model",), v) for v in (None, True, 7, [], {"id": "model"})]
+        cases += [(("sampling",), []), (("source_commit",), {}),
+                  (("config", "rounds"), True), (("config", "vote_every"), "2"),
+                  (("config", "capacity_per_round"), []),
+                  (("arms", "democracy", "approval"), "yes")]
+        cases += [(("arms", "democracy", key), []) for key in
+                  ("class", "leader", "removal", "framing", "framing_text", "rules_text")]
+        for fields, value in cases:
+            with self.subTest(fields=fields, value=value):
+                manifest = json.loads(json.dumps(original))
+                parent = manifest
+                for key in fields[:-1]:
+                    parent = parent[key]
+                parent[fields[-1]] = value
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):
+                    bundles.read_run(directory)
+        for model in ("", "org/model"):
+            path.write_text(json.dumps({**original, "model": model}))
+            self.assertEqual(bundles.read_run(directory)[0].model, model)
+        del original["model"]
+        path.write_text(json.dumps(original))
+        self.assertEqual(bundles.read_run(directory)[0].model, "")
+        path.write_bytes(b'\xff')
+        with self.assertRaisesRegex(ValueError, "not valid JSON"):
+            bundles.read_run(directory)
+
+    def test_malformed_index_types_are_skipped_instead_of_breaking_the_run(self):
+        directory = write_bundle(self.root, "run", [("eval", democracy_game(), None)])
+        path = directory / "manifest.json"
+        original = json.loads(path.read_text())
+        cases = [("arm", []), ("seed", True), ("iteration", 1), ("turns", "9"),
+                 ("turns", True), ("scores", {"harm": 0, "usefulness": 1, "payments": []}),
+                 ("scores", {"harm": float("inf"), "usefulness": 1}),
+                 ("scores", {"harm": 0, "usefulness": 1, "honest_expelled": "bad"})]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                manifest = json.loads(json.dumps(original))
+                manifest["games"][0][key] = value
+                path.write_text(json.dumps(manifest))
+                run, warnings = bundles.read_run(directory)
+                self.assertEqual(run.games, ())
+                self.assertEqual(len(warnings), 1)
+
+    def test_all_mirrored_game_fields_match_the_index_including_on_cache_hits(self):
+        for split, iteration in (("eval", None), ("dev", 1)):
+            directory = write_bundle(self.root, split, [(split, democracy_game(), iteration)])
+            run = bundles.read_run(directory)[0]
+            entry = run.games[0]
+            path = directory / entry["file"]
+            original = json.loads(gzip.decompress(path.read_bytes()))
+            cases = [("run_id", "another-run"), ("split", "dev" if split == "eval" else "eval"),
+                     ("iteration", 99), ("scores", {**original["scores"], "harm": 0.75})]
+            for key, value in cases:
+                with self.subTest(split=split, key=key):
+                    path.write_bytes(gzip.compress(json.dumps({**original, key: value}).encode()))
+                    with self.assertRaisesRegex(ValueError, "index entry"):
+                        read_game(run, entry)
+            path.write_bytes(gzip.compress(json.dumps(original).encode()))
+            self.assertEqual(read_game(run, entry), original)
+            for key in ("run_id", "split", "scores", *(("iteration",) if split == "dev" else ())):
+                with self.subTest(split=split, missing=key):
+                    game = dict(original)
+                    del game[key]
+                    path.write_bytes(gzip.compress(json.dumps(game).encode()))
+                    with self.assertRaises(ValueError):
+                        read_game(run, entry)
+            path.write_bytes(gzip.compress(json.dumps(original).encode()))
+            read_game(run, entry)  # prime cache, then reload only the manifest
+            manifest = json.loads((directory / "manifest.json").read_text())
+            for field, value in (("run_id", "other"), ("scores", {**entry["scores"], "harm": 0.5}),
+                                 ("turns", len(original["turns"]) + 1)):
+                changed = json.loads(json.dumps(manifest))
+                if field == "run_id":
+                    changed[field] = value
+                else:
+                    changed["games"][0][field] = value
+                (directory / "manifest.json").write_text(json.dumps(changed))
+                reloaded = bundles.read_run(directory)[0]
+                with self.assertRaisesRegex(ValueError, "index entry"):
+                    read_game(reloaded, reloaded.games[0])
 
     def test_overview_means_over_eval_red_games(self):
         red = [anarchy_game("red", s, {"harm": h, "usefulness": u, "misaligned_expelled": m, "honest_expelled": 0})
@@ -510,6 +610,14 @@ class PageTests(unittest.TestCase):
                 self.assertIsNone(step["value"])
                 self.assertEqual(self.fn["show_phase"](runs, current, 0), ("", [], [], None))
 
+    def test_loading_refuses_a_nonstring_recorded_model_before_opening_turns(self):
+        path = self.root / "run" / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["model"] = {"id": "org/agent-model"}
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(gr.Error, "malformed model ID"):
+            self.fn["load_source"](str(self.root), None)
+
     def test_picking_stepping_and_opening_a_turn(self):
         runs, rows, picked = self.open()
         self.assertEqual([r[0] for r in rows], list(ARMS))
@@ -558,6 +666,10 @@ class PageTests(unittest.TestCase):
         target.write_text("Keep this file.")
         runs[0].manifest["run_id"] = str(self.root / "escape")
         chosen = dict(picked[3], run=runs[0].run_id)
+        path = runs[0].root / chosen["file"]
+        game = json.loads(gzip.decompress(path.read_bytes()))
+        game["run_id"] = runs[0].run_id
+        path.write_bytes(gzip.compress(json.dumps(game).encode()))
         update = self.fn["download_conversation"](runs, chosen, 3, None, False)
         self.assertEqual(target.read_text(), "Keep this file.")
         self.assertNotEqual(Path(update["value"]).parent, self.root)
