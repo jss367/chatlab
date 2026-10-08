@@ -14,7 +14,7 @@ from chatlab.extensions.maze_experiments.page import context_view, prompt_readin
 from chatlab.extensions.maze_experiments.runner import (Episode, context_messages, fork_token_edit, from_payload,
                                                         read_run_file, stream_episode)
 
-from maze_support import CONFIG, MAZE, Manager, team_episode
+from maze_support import CONFIG, MAZE, VECTOR, Manager, team_episode
 
 RUN = CONFIG | {"interruption_text": ""}
 THOUGHT = "The goal is east of me."
@@ -142,6 +142,36 @@ class SplittingTests(unittest.TestCase):
 
 
 class TemplateTests(unittest.TestCase):
+    def test_failed_steering_preflight_keeps_selection_pending_for_another_template(self):
+        class RejectedQwen(Qwen38Manager):
+            def check_steering(self, steering):
+                raise ValueError("Vector belongs to another model")
+
+        class AcceptedContent(ContentOnlyManager):
+            def check_steering(self, steering):
+                pass
+
+        ep = Episode(MAZE, RUN | {"steering": VECTOR, "steer_when": {"moves": 0}, "steer_responses": 0})
+        rejected = RejectedQwen([])
+        with self.assertRaisesRegex(ValueError, "another model"):
+            list(stream_episode(ep, rejected))
+        self.assertTrue(ep.select_history)
+        self.assertEqual(ep.phase, "ready")
+        self.assertEqual(ep.turns, [])
+        self.assertFalse(rejected.busy)
+        list(stream_episode(ep, AcceptedContent([reasoned(), reasoned()])))
+        self.assertEqual(ep.config["reasoning_history"], "content")
+        self.assertIn("<think>" + THOUGHT, bytes(ep.turns[1]["prompt_ids"]).decode())
+
+    def test_editable_prompt_marker_cannot_imply_template_support(self):
+        marker = "chatlab_reasoning_history_probe"
+        for key in ("system_prompt", "instruction"):
+            with self.subTest(key=key):
+                ep = Episode(MAZE, RUN | {key: marker + " " + marker})
+                list(stream_episode(ep, ContentOnlyManager([reasoned(), reasoned()])))
+                self.assertEqual(ep.config["reasoning_history"], "content")
+                self.assertIn("<think>" + THOUGHT, bytes(ep.turns[1]["prompt_ids"]).decode())
+
     def test_fresh_trials_select_content_under_the_shared_batch_session(self):
         manager = ContentOnlyManager([reasoned()] * 4)
         session = manager.open_session()

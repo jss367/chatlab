@@ -1747,32 +1747,33 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             raise ValueError("Start a new episode to run again. This episode is finished or is a saved replay. Use Play or Next to inspect its recorded responses.")
         manager = session or models.open_session()
         try:
+            # A rejected load leaves an unstarted run's template selection
+            # pending, so retrying with another model probes that model.
+            if steering_active(episode.config):
+                manager.check_steering(episode.config["steering"])
             if episode.select_history:
                 marker = "chatlab_reasoning_history_probe"
                 probe = episode.agents[0]["messages"] + [{"role": "assistant", "content": "An earlier response.",
-                                             "reasoning_content": marker},
-                                            {"role": "user", "content": "Continue."}]
+                                                         "reasoning_content": ""},
+                                                        {"role": "user", "content": "Continue."}]
+                baseline = manager.prompt_text(probe, episode.tools)
+                probe[-2]["reasoning_content"] = marker
                 rendered = manager.prompt_text(probe, episode.tools)
                 # ModelService readers return (text, load); a pinned session
-                # returns text directly. No generation is needed for this check.
+                # returns text directly. Comparing marker counts isolates the
+                # synthetic field from occurrences in editable prompt text.
                 if isinstance(rendered, tuple):
                     rendered = rendered[0]
-                episode.config[HISTORY_FIELD] = (REASONING_CONTENT if rendered and marker in rendered
-                                                 else CONTENT_HISTORY)
+                if isinstance(baseline, tuple):
+                    baseline = baseline[0]
+                reads_reasoning = (rendered is not None and baseline is not None
+                                   and rendered.count(marker) > baseline.count(marker))
+                episode.config[HISTORY_FIELD] = REASONING_CONTENT if reads_reasoning else CONTENT_HISTORY
                 episode.select_history = False
         except BaseException:
             if session is None:
                 manager.close()
             raise
-        # Steering can start several responses in, so a vector this load
-        # cannot take is refused before the run starts rather than there.
-        if steering_active(episode.config):
-            try:
-                manager.check_steering(episode.config["steering"])
-            except BaseException:
-                if session is None:
-                    manager.close()
-                raise
         episode.busy = True
         episode.pause_requested = episode.stop_requested = False
         episode.autosave_error = None
