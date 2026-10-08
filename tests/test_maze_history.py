@@ -306,6 +306,19 @@ class ContextPaneTests(unittest.TestCase):
 
 
 class DeclarationTests(unittest.TestCase):
+    def test_explicit_content_histories_are_rebuilt_but_legacy_files_keep_their_exemption(self):
+        payload = saved(single_run("content")[0])
+        self.assertEqual(from_payload(payload).messages, payload["messages"])
+        for role in ("assistant", "tool"):
+            with self.subTest(role=role):
+                broken = copy.deepcopy(payload)
+                message = next(m for m in reversed(broken["messages"]) if m["role"] == role)
+                message["content"] += " Altered history."
+                with self.assertRaisesRegex(ValueError, "disagree"):
+                    from_payload(broken)
+                legacy = written_before_the_field(broken)
+                self.assertEqual(from_payload(legacy).messages, legacy["messages"])
+
     def test_a_new_run_whose_messages_keep_reasoning_in_content_is_refused(self):
         payload = saved(single_run("reasoning_content")[0])
         payload["messages"][-2] = assistant_message(REASONED, True, "content")

@@ -2366,7 +2366,7 @@ def from_payload(data, read_prompt=None):
     check_messages(result.messages, history_form(result.config))
     if inserted:
         validate_inserts(result, read_prompt)
-    elif history_form(result.config) == REASONING_CONTENT:
+    elif HISTORY_FIELD in data["config"]:
         # Written since the field was, so every response is checked against
         # the form it names. A run written before it is read as it always was.
         validate_history(result)
