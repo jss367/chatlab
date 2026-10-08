@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gradio as gr
 
+from chatlab.themes import preview_stylesheet
 from chatlab.ui.common import (
     ARCHIVED_VIEW_CLASS,
     CONVERSATION_PANE_WIDTH,
@@ -91,6 +92,18 @@ html, body {{ height: 100%; overflow: hidden; }}
    A style element applies wherever it lands in the document, so the block
    holding it takes no room in the layout. */
 #theme-style {{ display: none !important; }}
+/* Keep the option text and checkmark in the interface colors. Only this
+   compact background/surface/accent preview uses the option's own palette. */
+#theme-choice [role="option"] {{
+  position: relative; padding-right: 88px !important;
+}}
+#theme-choice [role="option"]::after {{
+  content: ""; position: absolute; right: 14px; top: 50%;
+  transform: translateY(-50%); width: 60px; height: 18px;
+  border-radius: 4px; box-shadow: 0 0 0 1px var(--border-color-primary);
+  pointer-events: none;
+}}
+{preview_stylesheet()}
 /* The token menu's bridge controls are hidden, but Gradio wraps each of them
    in a form of its own, and a hidden child inside a shown wrapper is still a
    flex item: the column they share with the shell was spending a gap on each
