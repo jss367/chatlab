@@ -1283,6 +1283,26 @@ authenticate the publisher.
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
+A separate real-browser suite exercises sending and stopping replies, switching
+conversations during generation, replacing a response token through its context
+menu, forking, and restoring saved history in a fresh browser session. It runs
+the actual Gradio app with a slow deterministic CPU model; it downloads no model
+weights and uses temporary settings and history files.
+
+```bash
+.venv/bin/python -m pip install -r requirements-browser.txt
+.venv/bin/python -m playwright install chromium webkit
+.venv/bin/python -m unittest discover -s tests/browser -v
+```
+
+Both engines run by default. Set `CHATLAB_TEST_BROWSERS=chromium` or `webkit` to
+run one. CI runs Chromium on Linux and WebKit on macOS. Playwright WebKit covers
+the macOS rendering engine, but is not the packaged app's native WKWebView or
+Safari binary ([Playwright browser documentation](https://playwright.dev/python/docs/browsers)).
+Screenshots, traces and server logs are saved under `.context/browser-tests/`
+(or `CHATLAB_BROWSER_ARTIFACTS`). Open a trace with
+`.venv/bin/python -m playwright show-trace <trace.zip>`.
+
 The application deliberately leaves `trust_remote_code` disabled. Models that require executing custom repository code will not load unless their architecture is supported directly by Transformers or, for an image model, by diffusers.
 
 The image tests need no pipeline weights. `tests/fake_pipeline.py` is a

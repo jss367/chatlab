@@ -1,0 +1,2 @@
+# Browser-only test dependency; production and handler tests do not need it.
+playwright==1.58.0
