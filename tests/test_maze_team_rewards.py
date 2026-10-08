@@ -136,6 +136,24 @@ class RewardRunTests(unittest.TestCase):
         self.assertFalse(any(t["steered"] for t in ep.turns))
         self.assertEqual(manager.checked, [])
 
+    def test_run_details_name_the_responses_the_run_steers(self):
+        def details(**changes):
+            return team_status(run(**changes)[0]).split("**Exits and rewards:** ", 1)[1].split("\n", 1)[0]
+        self.assertIn("1 steered response after arriving", details())
+        self.assertIn("taste at strength 1", details())
+        # A vector at strength 0 steers the taste at its own strength and nothing after arriving.
+        line = details(steering=dict(VECTOR, strength=0.0), taste_strength=1.0)
+        self.assertIn("1 unsteered response after arriving", line)
+        self.assertIn("taste at strength 1", line)
+        # A vector switched off steers neither, and neither does a taste at strength 0.
+        line = details(steering=dict(VECTOR, enabled=False), taste_strength=1.0)
+        self.assertIn("1 unsteered response after arriving", line)
+        self.assertIn("taste, unsteered", line)
+        line = details(taste_strength=0.0)
+        self.assertIn("1 steered response after arriving", line)
+        self.assertIn("taste, unsteered", line)
+        self.assertIn("1 unsteered, no vector response after arriving", details(steering=None, taste_strength=None))
+
     def test_a_lap_is_not_begun_on_the_last_round(self):
         # Lap 1 ends with round 4 (the taste, two moves, one message each).
         ep, _ = run(round_limit=4)

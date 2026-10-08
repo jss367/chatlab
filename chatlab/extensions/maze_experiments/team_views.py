@@ -5,7 +5,7 @@ import html
 
 from .dynamic_maze import maze_at_turn
 from .maze import DIRECTIONS, GOAL_MODES
-from .runner import TERMINAL, visible_text
+from .runner import TERMINAL, steering_active, visible_text
 from .team import DROPPED, LIMITED, MESSAGE_LIMIT, TEAM_GOALS
 
 # The first four agents' colours, none of them the destination's green.
@@ -285,15 +285,19 @@ def reward_status(ep):
     parts = [("Exits " + ", ".join(f"{label} {tuple(cell)}" for label, cell in exits.items())) if ep.exits
              else f"Destination {tuple(ep.maze.goal)}"]
     if config["reward_exit"] is not None:
-        vector = "steered" if config.get("steering") else "unsteered, no vector"
+        # Labeled as steers_next steers them: a vector switched off or at
+        # strength 0 leaves these responses unsteered.
+        vector = ("steered" if steering_active(config)
+                  else "unsteered" if config.get("steering") else "unsteered, no vector")
         parts.append(f"reward at {config['reward_exit']} · {config['arrival_responses']} {vector} "
                      f"response{'' if config['arrival_responses'] == 1 else 's'} after arriving there")
     if config["arrival_responses"]:
         parts.append(f"{config['arrival_responses']} response{'' if config['arrival_responses'] == 1 else 's'} "
                      "after every arrival")
     if config["taste"]:
-        parts.append(f"taste at strength {config['taste_strength']:g}" if config.get("steering")
-                     else "taste, unsteered")
+        vector = config.get("steering")
+        parts.append(f"taste at strength {config['taste_strength']:g}"
+                     if vector and vector.get("enabled", True) and config["taste_strength"] else "taste, unsteered")
     lines = ["**Exits and rewards:** " + " · ".join(parts), f"**Laps:** {ep.lap} of {config['laps']}"]
     by_agent = {index: [] for index in range(len(ep.agents))}
     for event in ep.events:
