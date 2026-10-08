@@ -164,6 +164,7 @@ def build_settings_page(
                         choices=themes.THEME_CHOICES,
                         value=saved.theme,
                         label="Color theme",
+                        elem_id="theme-choice",
                         info=(
                             "The colors the whole interface is drawn in. "
                             "Every one of them is drawn both light and "

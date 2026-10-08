@@ -137,6 +137,31 @@ THEME_NAMES = tuple(THEMES)
 # Label against name, which is what a Dropdown's choices are.
 THEME_CHOICES = [(theme.label, name) for name, theme in THEMES.items()]
 
+
+def preview_stylesheet() -> str:
+    """Dropdown swatches read their own palette, independent of the active theme.
+
+    Match options by label so filtering or reordering cannot mix up previews.
+    The body class also covers system appearance changes without any script.
+    """
+
+    rules = []
+    for theme in THEMES.values():
+        neutral = theme.ramp("neutral")
+        accent = theme.ramp("primary")[BUTTON_STEP]
+        selector = f'#theme-choice [role="option"][aria-label="{theme.label}"]'
+        for mode, background, surface in (
+            ("", theme.paper, neutral[100]),
+            (".dark ", neutral[DARKEST_STEP], neutral[900]),
+        ):
+            rules.append(
+                f"{mode}{selector}::after {{ background: linear-gradient(to right, "
+                f"{background} 0% 33.333%, {surface} 33.333% 66.667%, "
+                f"{accent} 66.667% 100%); }}"
+            )
+    return "\n".join(rules)
+
+
 # Whether a theme is drawn light or dark is a separate choice from which
 # theme it is: every one of them has both. Gradio decides it once at startup
 # from the system setting, so these are the two overrides plus the setting
