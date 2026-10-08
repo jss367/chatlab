@@ -677,6 +677,9 @@ def run_desktop() -> int:
             flow.wait_for_swap()
         if connection is not None:
             connection.close()
+        from chatlab import library_writer
+
+        library_writer.shutdown()
         logging.info("Stopping ChatLab")
         demo.close(verbose=False)
     return 0
