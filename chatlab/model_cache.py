@@ -1055,22 +1055,28 @@ def _adapter_status(
     return status
 
 
-def folder_bytes(folder: Path) -> int:
-    """The bytes a cache folder holds, counting every regular file once.
+def folder_bytes(folder: Path, *, seen: set[Path] | None = None) -> int:
+    """Bytes of files a cache folder references, counting each target once.
 
     In the usual layout the snapshots are symlinks into ``blobs`` and only
-    the blobs count; on a filesystem without symlinks the snapshots hold the
-    files themselves and count instead. Either way this is what deleting the
-    folder frees, every revision included, where :func:`cache_status` sizes
-    the ``main`` snapshot alone.
+    the blobs count; newer caches also link blobs to a shared store outside
+    the model folder. Follow those links too, deduplicating resolved paths
+    across blobs and snapshots. This measures every revision's referenced
+    files, not necessarily the space deleting the folder would free when
+    another model shares those files.
+    Pass the same ``seen`` set across folders to measure their combined size.
     """
 
     total = 0
+    if seen is None:
+        seen = set()
     for entry in folder.rglob("*"):
         try:
-            if entry.is_file() and not entry.is_symlink():
-                total += entry.stat().st_size
-        except OSError:
+            target = entry.resolve()
+            if target not in seen and target.is_file():
+                total += target.stat().st_size
+                seen.add(target)
+        except (OSError, RuntimeError):
             continue
     return total
 
@@ -1112,9 +1118,9 @@ class CachedModel:
     cut-off download left behind is listed with its missing files rather than
     hidden. ``disk_bytes`` is the whole folder, every revision included, as
     :func:`folder_bytes` measures it: what the list shows as the size, what
-    the size orders sort by, and what removing the model frees, so those
-    three never disagree. ``files`` counts what the ``main`` snapshot has so
-    far; ``updated``
+    the size orders sort by. Shared blobs may remain after removing the
+    model, so this is not a promise of reclaimed space. ``files`` counts what
+    the ``main`` snapshot has so far; ``updated``
     is the newest write among the model's files, as epoch seconds, which is
     when it was last downloaded or resumed. ``architecture`` and ``dtype``
     come from the snapshot's ``config.json`` and are absent when it is.
@@ -1514,8 +1520,8 @@ def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> int:
     The locks in this process are the manager's business, see
     :meth:`ModelManager.remove`.
 
-    The size is measured over the whole folder before deletion, so it counts
-    every revision the folder held, not just the ``main`` snapshot. A model
+    The size counts regular files inside the folder before deletion, across
+    every revision, excluding links to shared blobs that remain on disk. A model
     with nothing on disk raises ``FileNotFoundError``; a folder that cannot
     be deleted raises the ``OSError`` that stopped it, with whatever was
     already removed gone.
@@ -1530,6 +1536,12 @@ def remove_cached_model(model_id: str, cache_dir: Path | None = None) -> int:
         raise ModelDownloading(
             f"{checked_id} is being downloaded or loaded by another process."
         )
-    freed = folder_bytes(folder)
+    freed = 0
+    for entry in folder.rglob("*"):
+        try:
+            if entry.is_file() and not entry.is_symlink():
+                freed += entry.stat().st_size
+        except OSError:
+            continue
     shutil.rmtree(folder)
     return freed
