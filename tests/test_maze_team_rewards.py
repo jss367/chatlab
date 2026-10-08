@@ -11,12 +11,12 @@ import gradio as gr
 from chatlab.extension_api import TokenInspector
 from chatlab.extensions.maze_experiments.page import build_page
 
-from chatlab.extensions.maze_experiments.maze import Maze
+from chatlab.extensions.maze_experiments.maze import Maze, generate_paired, parting_cell
 from chatlab.extensions.maze_experiments.reasoning_check import read_responses
 from chatlab.extensions.maze_experiments.runner import context_messages, fork_token_edit, from_payload, stream_episode
-from chatlab.extensions.maze_experiments.team import REWARD_FORMAT
-from chatlab.extensions.maze_experiments.team_views import (mail_text, positions_after, response_line, statuses_after,
-                                                            team_board, team_history_rows, team_status)
+from chatlab.extensions.maze_experiments.team import REWARD_DEFAULTS, REWARD_FORMAT
+from chatlab.extensions.maze_experiments.team_views import (mail_text, positions_after, response_line, reward_status,
+                                                            statuses_after, team_board, team_history_rows, team_status)
 from maze_support import Manager, SteeringManager, VECTOR, call, saved, say, scenario, scored, team_episode
 from ui_support import listeners_by_name
 
@@ -302,9 +302,7 @@ class RewardRunTests(unittest.TestCase):
         for message, change in cases.items():
             with self.subTest(message), self.assertRaisesRegex(ValueError, message):
                 from_payload(forged(change))
-        plain = forged(lambda d: [d["config"].pop(key) for key in list(d["config"])
-                                  if key in ("exits", "reward_exit", "arrival_responses", "arrival_prompt", "taste",
-                                             "taste_prompt", "taste_strength", "laps", "lap_prompt")])
+        plain = forged(lambda d: [d["config"].pop(key) for key in list(d["config"]) if key in REWARD_DEFAULTS])
         with self.assertRaisesRegex(ValueError, "recorded as chatlab-maze-team-3"):
             from_payload(plain)
 
@@ -388,6 +386,105 @@ class RewardRunTests(unittest.TestCase):
         self.assertEqual(saved(from_payload(saved(forked))), saved(forked))
 
 
+# A longer corridor: exit A two moves west of the start, exit B four moves east.
+LONG = Maze((".......",) + ("#######",) * 6, (0, 2), (0, 0))
+LONG_ID = LONG.tool_id()
+TEAM_REWARD = dict(communication=True, team_goal="all", exits=[[0, 6]], reward_exit="A", arrival_responses=1,
+                   laps=1, steering=VECTOR, team_reward=2)
+
+
+def long_move(direction):
+    return call(direction, maze_id=LONG_ID)
+
+
+# agent-1 reaches A in round 2 and writes in round 3 while agent-2 walks on to B.
+LONG_SCRIPT = [long_move("west"), long_move("east"),
+               long_move("west"), long_move("east"),
+               say("A was lovely."), long_move("east"),
+               long_move("east"),
+               say("B was plain.")]
+
+
+def run_long(**changes):
+    ep = team_episode(LONG, TEAM_REWARD | changes)
+    manager = SteeringManager(list(LONG_SCRIPT))
+    manager.generate = scored(manager.generate)
+    list(stream_episode(ep, manager))
+    return ep, manager
+
+
+class TeamRewardTests(unittest.TestCase):
+    def test_an_arrival_at_the_reward_exit_steers_the_teammates_still_moving(self):
+        ep, manager = run_long()
+        self.assertEqual(ep.phase, "arrived", ep.detail)
+        steered = [(t["round"], t["agent"], t["kind"]) for t in ep.turns if t["steered"]]
+        # Its own response after arriving, then agent-2's next two moves. Its
+        # arrival at B, unrewarded, is not.
+        self.assertEqual(steered, [(2, 0, "arrival"), (2, 1, "move"), (3, 1, "move")])
+        strengths = [kw["steering"] and kw["steering"]["strength"] for _, kw in manager.calls]
+        self.assertEqual(strengths, [None] * 4 + [VECTOR["strength"]] * 3 + [None])
+        self.assertEqual(ep.agents[1]["reward_left"], 0)
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        forged = saved(ep)
+        forged["turns"][5]["steered"] = False
+        with self.assertRaisesRegex(ValueError, "steered flag"):
+            from_payload(forged)
+
+    def test_a_team_reward_of_one_steers_one_move(self):
+        ep, _ = run_long(team_reward=1)
+        self.assertEqual([(t["round"], t["agent"]) for t in ep.turns if t["steered"]], [(2, 0), (2, 1)])
+
+    def test_without_a_team_reward_only_the_arriving_agent_is_steered(self):
+        ep, _ = run_long(team_reward=0)
+        self.assertEqual([(t["round"], t["agent"]) for t in ep.turns if t["steered"]], [(2, 0)])
+        self.assertNotIn("reward_left", ep.agents[0])
+
+    def test_a_team_reward_with_the_vector_off_steers_nothing(self):
+        ep, manager = run_long(steering=dict(VECTOR, enabled=False))
+        self.assertFalse(any(t["steered"] for t in ep.turns))
+        self.assertIn("team reward of 2 responses, unsteered", reward_status(ep))
+
+    def test_run_details_give_route_lengths_where_routes_part_and_norms(self):
+        ep, _ = run_long(taste=True, taste_strength=-2.0)
+        details = reward_status(ep)
+        self.assertIn("Exits A (0, 0) at 2 moves, B (0, 6) at 4 moves", details)
+        self.assertIn("routes part at (0, 2), 0 moves in", details)
+        norm = (1 + 4 + .25) ** .5
+        self.assertIn(f"after arriving there · norm {norm * 4:.3g}", details)
+        self.assertIn(f"taste at strength -2 · norm {norm * 2:.3g}", details)
+        self.assertIn("also steers the next 2 responses of every teammate still moving", details)
+
+    def test_refused_team_rewards_and_paired_exits(self):
+        refused = {"Name one": dict(reward_exit=None),
+                   "team_reward must be an integer": dict(team_reward=9),
+                   "same route length": dict(paired_exits=True),
+                   "paired_exits is either true or false": dict(paired_exits="yes")}
+        for message, change in refused.items():
+            with self.subTest(message), self.assertRaisesRegex(ValueError, message):
+                team_episode(LONG, TEAM_REWARD | change)
+        self.assertTrue(team_episode(HALL, REWARD | dict(paired_exits=True)).config["paired_exits"])
+
+
+class PairedExitTests(unittest.TestCase):
+    def test_both_exits_are_drawn_at_the_route_length(self):
+        for seed in range(12):
+            maze, second = generate_paired(7, seed, 6, .7)
+            distances = maze.distances(maze.start)
+            self.assertEqual((distances[maze.goal], distances[second]), (6, 6))
+            self.assertNotIn(second, (maze.goal, maze.start))
+            self.assertEqual(generate_paired(7, seed, 6, .7), (maze, second))
+            fork, steps = parting_cell(maze, maze.goal, second)
+            self.assertTrue(0 <= steps < 6)
+            self.assertEqual(distances[fork], steps)
+        with self.assertRaisesRegex(ValueError, "two cells at that route length"):
+            generate_paired(3, 1, 8, .5)
+
+    def test_the_parting_cell_is_the_last_one_both_routes_share(self):
+        fork = Maze((".....", "#.#.#", "#...#", "#.###", "#.###"), (4, 1), (0, 0))
+        self.assertEqual(parting_cell(fork, (0, 0), (0, 4)), ((2, 1), 2))
+        self.assertEqual(parting_cell(LONG, (0, 0), (0, 6)), ((0, 2), 0))
+
+
 class RewardPageTests(unittest.TestCase):
     def test_prepare_export_reload_and_rebuild_a_reward_run(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -434,6 +531,35 @@ class RewardPageTests(unittest.TestCase):
             finally:
                 demo.close()
 
+
+    def test_a_drawn_exit_b_and_a_team_reward_reload_into_the_same_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=TokenInspector(), models=Manager([]), data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = listeners_by_name(demo)
+                prepare, load = callbacks["prepare_episode"], callbacks["load"]
+                ep = team_episode(HALL, {})
+                settings = dict(agents=2, team_goal="all", distance=4, vector=VECTOR, strength=3., layer=1,
+                                steer="reward", reward_exit="A", arrival_responses=1, paired_exits=True,
+                                team_reward=2)
+                new = prepare.fn(ep, False, "s", None, *scenario(**settings))[0]
+                maze, second = generate_paired(5, 7, 4, .7)
+                self.assertEqual(new.maze, maze)
+                self.assertEqual(new.config["exits"], [list(second)])
+                self.assertEqual((new.config["paired_exits"], new.config["team_reward"]), (True, 2))
+                loaded = load.fn(str(new.export()), ep, False, "s", None)
+                filled = {block._id: value.get("value") if isinstance(value, dict) and value.get("__type__") == "update"
+                          else value for block, value in zip(load.outputs, loaded)}
+                rebuilt = prepare.fn(ep, False, "s", None, *[filled[block._id] for block in prepare.inputs[4:]])[0]
+                self.assertEqual(rebuilt.config, new.config)
+                self.assertEqual(rebuilt.maze, new.maze)
+                with self.assertRaisesRegex(gr.Error, "Leave Extra exits blank"):
+                    prepare.fn(ep, False, "s", None, *scenario(**settings, exits="0, 1"))
+            finally:
+                demo.close()
 
 if __name__ == "__main__":
     unittest.main()

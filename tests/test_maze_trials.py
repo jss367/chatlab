@@ -214,9 +214,9 @@ class TrialFileTests(unittest.TestCase):
         self.assertEqual(len(frame), len(callback.outputs))
         self.assertEqual(frame[0].config['trial']['id'], 'clean')
         self.assertEqual(old.payload(), before)
-        self.assertEqual(frame[-25], 'None')
-        self.assertEqual(frame[-23:-21], (None, None))
-        self.assertIn('Clean trial', frame[-24])
+        self.assertEqual(frame[-27], 'None')
+        self.assertEqual(frame[-25:-23], (None, None))
+        self.assertIn('Clean trial', frame[-26])
 
     def test_the_trial_note_stops_naming_a_trial_the_episode_no_longer_is(self):
         # Every other way of replacing the episode has to say so, or the pane
@@ -229,7 +229,7 @@ class TrialFileTests(unittest.TestCase):
         self.addCleanup(demo.close)
         callbacks = listeners_by_name(demo)
         loaded = callbacks['load_trial'].fn(data, 'clean', Episode(MAZE, CONFIG), False, 'test-session')
-        self.assertIn('Clean trial', loaded[-24])
+        self.assertIn('Clean trial', loaded[-26])
         prepare = callbacks['prepare_episode']
         values = [component.value for component in prepare.inputs[4:]]
         fresh = prepare.fn(loaded[0], False, 'test-session', data, *values)
@@ -250,7 +250,7 @@ class TrialFileTests(unittest.TestCase):
         load = callbacks['load']
         replayed = load.fn(str(path), Episode(MAZE, CONFIG), False, 'test-session', None)
         self.assertEqual(len(replayed), len(load.outputs))
-        self.assertIn('Replaying: Clean trial', replayed[-22])
+        self.assertIn('Replaying: Clean trial', replayed[-24])
 
     def test_a_stamp_written_elsewhere_is_named_by_whatever_it_recorded(self):
         # A harness outside this page stamps a run with the id it scheduled and
@@ -285,7 +285,7 @@ class TrialFileTests(unittest.TestCase):
         replayed = load.fn(str(path), Episode(MAZE, CONFIG), False, 'test-session', None)
         self.assertEqual(len(replayed), len(load.outputs))
         self.assertTrue(replayed[0].replay_only)
-        self.assertIn('Replaying: diagnostics', replayed[-22])
+        self.assertIn('Replaying: diagnostics', replayed[-24])
 
     def test_a_note_that_cannot_be_written_is_refused_where_a_board_is(self):
         # The note is returned with the board, so it has to be built under the
