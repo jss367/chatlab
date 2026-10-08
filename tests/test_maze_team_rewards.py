@@ -126,6 +126,25 @@ class RewardRunTests(unittest.TestCase):
         self.assertEqual((ep.phase, ep.rounds), ("budget", 5))
         from_payload(saved(ep))
 
+    def test_a_taste_at_its_own_strength_is_steered_when_the_reward_strength_is_zero(self):
+        ep, manager = run(steering=dict(VECTOR, strength=0.0), taste_strength=1.0)
+        self.assertEqual([(t["round"], t["agent"]) for t in ep.turns if t["steered"]], [(0, 0), (0, 1)])
+        self.assertEqual([kw["steering"]["strength"] for _, kw in manager.calls[:2]], [1.0, 1.0])
+        self.assertEqual(manager.checked, [dict(VECTOR, strength=0.0)])
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        ep, manager = run(steering=dict(VECTOR, enabled=False), taste_strength=1.0)
+        self.assertFalse(any(t["steered"] for t in ep.turns))
+        self.assertEqual(manager.checked, [])
+
+    def test_a_lap_is_not_begun_on_the_last_round(self):
+        # Lap 1 ends with round 4 (the taste, two moves, one message each).
+        ep, _ = run(round_limit=4)
+        self.assertEqual((ep.phase, ep.rounds, ep.lap_rounds), ("budget", 4, []))
+        self.assertIn("round limit after lap 1 of 2", ep.detail)
+        self.assertEqual([a["position"] for a in ep.agents], [(0, 0), (0, 4)])
+        self.assertEqual([a["status"] for a in ep.agents], ["arrived", "arrived"])
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+
     def test_configurations_no_run_could_use_are_refused(self):
         cases = {
             "at least one": dict(arrival_responses=0),

@@ -283,6 +283,13 @@ def steering_active(config):
     return bool(vector and vector.get("enabled", True) and vector.get("strength", 1) != 0)
 
 
+def steering_used(config):
+    """Whether any response of the run can be steered: at the vector's strength, or a taste at its own."""
+    vector = config.get("steering")
+    return steering_active(config) or bool(vector and vector.get("enabled", True) and config.get("taste")
+                                           and config.get("taste_strength"))
+
+
 def steered_at(config, start, index, position, moves):
     """Whether response ``index`` is steered, given the run as it stands before it.
 
@@ -673,11 +680,12 @@ class Episode:
             # The taste is steered at its own strength, and the responses after
             # arriving at the reward exit at the vector's. Nothing else is.
             agent = self.agents[index]
-            if not steering_active(self.config):
-                return False
             if agent["talk"] == "taste":
-                return self.config["taste_strength"] != 0
-            return agent["talk"] == "arrival" and agent["exit"] == self.config["reward_exit"]
+                # At its own strength, so a vector switched off is the only thing that stops it.
+                vector = self.config.get("steering")
+                return bool(vector and vector.get("enabled", True) and self.config["taste_strength"])
+            return (steering_active(self.config) and agent["talk"] == "arrival"
+                    and agent["exit"] == self.config["reward_exit"])
         turns = [turn for turn in self.turns if turn.get("agent", 0) == index]
         start = next((i for i, turn in enumerate(turns) if turn.get("steered")), None)
         return steered_at(self.config, start, len(turns), self.agents[index]["position"], self.agent_moves(index))
@@ -1886,10 +1894,16 @@ def start_lap(episode):
 def settle_rewarded(episode, actions, sent):
     """Decide whether the round a run with exits and rewards just resolved ends a lap, or the run."""
     config, agents = episode.config, episode.agents
-    if not episode.responders() and episode.lap < config["laps"] and any(a["status"] not in LIMITED for a in agents):
+    laps_left = episode.lap < config["laps"] and any(a["status"] not in LIMITED for a in agents)
+    out_of_rounds = episode.rounds >= config["round_limit"]
+    # A lap that cannot have a round of its own is not begun.
+    if not episode.responders() and laps_left and not out_of_rounds:
         start_lap(episode)
     moved = sum(action["event"]["accepted"] for action in actions if "event" in action)
-    if not episode.responders():
+    if not episode.responders() and laps_left:
+        episode.phase, episode.detail = "budget", (f"The team reached its round limit after lap {episode.lap} of "
+                                                   f"{config['laps']}.")
+    elif not episode.responders():
         lap = f" in lap {episode.lap}" if config["laps"] > 1 else ""
         if all(agent["status"] == "arrived" for agent in agents):
             episode.phase = "arrived"
@@ -2040,7 +2054,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
         manager = session or models.open_session()
         # Steering can start several responses in, so a vector this load
         # cannot take is refused before the run starts rather than there.
-        if steering_active(episode.config):
+        if steering_used(episode.config):
             try:
                 manager.check_steering(episode.config["steering"])
             except BaseException:
