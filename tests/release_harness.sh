@@ -9,7 +9,11 @@ set -uo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 real=${1:-"$here/../scripts/release.sh"}
 [ -x "$real" ] || { echo "no release.sh at $real" >&2; exit 2; }
-root=$(mktemp -d /tmp/relharness.XXXX)
+root=$(mktemp -d /tmp/relharness.XXXX) || {
+    echo "Could not create the release harness scratch directory" >&2
+    exit 1
+}
+[ -n "$root" ] && [ -d "$root" ] || exit 1
 export PATH="$root/bin:$PATH"
 export RELHARNESS_STATE="$root/releases.txt"
 export CHATLAB_RELEASE_REPO=fake/repo
@@ -63,12 +67,12 @@ PKILL
 chmod +x "$root/bin/gh" "$root/bin/open" "$root/bin/pgrep" "$root/bin/osascript" "$root/bin/pkill"
 export RELHARNESS_RUNNING="$root/app-running"
 
-git init -q --bare "$root/origin.git"
+git init -q --bare "$root/origin.git" || exit 1
 # The default branch of a fresh repository is master on an unconfigured Git,
 # and every clone below wants main.
-git -C "$root/origin.git" symbolic-ref HEAD refs/heads/main
-git clone -q "$root/origin.git" "$root/work" 2>/dev/null
-cd "$root/work"
+git -C "$root/origin.git" symbolic-ref HEAD refs/heads/main || exit 1
+git clone -q "$root/origin.git" "$root/work" 2>/dev/null || exit 1
+cd "$root/work" || exit 1
 git config user.email t@example.invalid; git config user.name Test
 mkdir -p chatlab scripts tests .desktop-venv/bin
 printf '__version__ = "0.15.0"\nBUNDLE_IDENTIFIER = "build.chatlab.app"\n' > chatlab/version.py

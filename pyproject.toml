@@ -15,3 +15,30 @@ ignore = [
 "tests/*" = ["E731"]
 # app.py re-exports the names the tests read as app.X.
 "chatlab/app.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.12"
+files = [
+    "chatlab/generation_request.py",
+    "chatlab/ui/reply_state.py",
+    "chatlab/ui/reply_render.py",
+    "chatlab/ui/reply_stream.py",
+    "chatlab/ui/generation.py",
+]
+strict = true
+# Existing runtime/UI modules retain their dynamic interfaces. Check the new
+# request, state, renderer and controller together, expanding this list as
+# other boundaries gain types rather than hiding errors across the repository.
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "chatlab.ui.generation"
+# Check the typed request calls from legacy Gradio adapters without requiring
+# every unrelated edit/undo handler and persisted JSON object to be migrated.
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+check_untyped_defs = false
+warn_return_any = false

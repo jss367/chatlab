@@ -1281,8 +1281,14 @@ authenticate the publisher.
 ## Tests
 
 ```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m mypy
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+Type checking currently covers reply requests, transcript state, rendering,
+stream orchestration, and typed calls in the existing control adapters. Other
+runtime and UI modules remain outside that incremental check.
 
 A separate real-browser suite exercises sending and stopping replies, switching
 conversations during generation, replacing a response token through its context
