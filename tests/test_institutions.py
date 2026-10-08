@@ -234,6 +234,19 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "turn 0 is malformed"):
             read_game(runs[0], runs[0].games[1])
 
+    def test_opening_a_game_refuses_malformed_harm_or_usefulness(self):
+        directory = write_bundle(self.root, "run", [("eval", anarchy_game(), None)])
+        run = load_bundles(str(self.root))[0][0]
+        path = directory / run.games[0]["file"]
+        for field in ("harm", "usefulness"):
+            for value in ("not a number", None, [], True):
+                with self.subTest(field=field, value=value):
+                    game = anarchy_game()
+                    game["scores"][field] = value
+                    path.write_bytes(gzip.compress(json.dumps(game).encode()))
+                    with self.assertRaisesRegex(ValueError, "harm and usefulness scores"):
+                        read_game(run, run.games[0])
+
     def test_overview_means_over_eval_red_games(self):
         red = [anarchy_game("red", s, {"harm": h, "usefulness": u, "misaligned_expelled": m, "honest_expelled": 0})
                for s, h, u, m in ((0, 0.1, 0.8, 0), (1, 0.3, 0.6, 1), (2, 0.2, 0.4, 2))]

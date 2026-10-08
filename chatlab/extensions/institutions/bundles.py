@@ -194,6 +194,8 @@ def _check_game(game, name):
             raise ValueError(f"{name} has no {key} list")
     if not isinstance(game.get("system_prompts"), dict) or not isinstance(game.get("scores"), dict):
         raise ValueError(f"{name} has no system prompts or scores")
+    if not all(_is_number(game["scores"].get(k)) for k in ("harm", "usefulness")):
+        raise ValueError(f"{name} has no harm and usefulness scores")
     for i, turn in enumerate(game["turns"]):
         if (not isinstance(turn, dict) or turn.get("agent") not in game["system_prompts"]
                 or turn.get("phase") not in PHASES or not isinstance(turn.get("attempts"), list)

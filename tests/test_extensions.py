@@ -692,6 +692,36 @@ assert 'chatlab.extensions.probes.page' not in sys.modules
         finally:
             demo.close()
 
+    def test_opened_saved_conversation_preserves_steering_and_restores_its_controls(self):
+        from chatlab.conversation import MAIN_BRANCH, branch_sampling, make_turn, new_forks, to_json
+        from chatlab.steering import expand, normalize
+        from chatlab.ui.conversations import open_conversation
+        from chatlab.ui.steering import steering_updates, store
+
+        old_vector = {"format": "chatlab-steering-1", "model_id": "old/model", "layer": 1,
+                      "vector": [0.0, 1.0], "strength": 1.0, "enabled": True}
+        saved_vector = dict(old_vector, model_id="saved/model", layer=3, strength=-2.5, enabled=False)
+        earlier = [make_turn("user", "Keep the source chat.")]
+        loaded = [make_turn("user", "Use the saved chat.")]
+        for vector in (saved_vector, None):
+            with self.subTest(steering=vector):
+                forks = store(new_forks(), old_vector)
+                forks["branches"][MAIN_BRANCH] = earlier
+                frame = open_conversation(to_json(loaded, system_prompt="Saved system", steering=vector),
+                                          earlier, forks)
+                new_forks_value = frame["forks"]
+                opened_steering = branch_sampling(new_forks_value, new_forks_value["active"]).get("steering")
+                self.assertEqual(expand(opened_steering), normalize(vector))
+                self.assertEqual(expand(branch_sampling(new_forks_value, MAIN_BRANCH)["steering"]),
+                                 normalize(old_vector))
+                self.assertEqual([t["content"] for t in new_forks_value["branches"][MAIN_BRANCH]],
+                                 ["Keep the source chat."])
+                value, enabled, strength, layer, _ = steering_updates(new_forks_value)
+                self.assertEqual(expand(value), normalize(vector))
+                self.assertEqual((enabled["value"], strength["value"], layer["value"]),
+                                 (False, -2.5, 3) if vector else (False, 1, 0))
+
+
     def test_extension_tiles_sit_under_the_built_in_pages_behind_a_rule(self):
         specs = [
             ExtensionSpec('one', 'One', '', 'One', 'one_module'),

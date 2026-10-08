@@ -654,12 +654,16 @@ def open_conversation(
 
     try:
         loaded, system_prompt = from_json(payload)
+        steering = compact_steering(json.loads(payload).get("steering"))
     except ValueError as error:
         raise gr.Error(f"Could not open that conversation: {error}") from error
     started = new_conversation(turns, forks, scale_name, *sampling, preserve_source=preserve_source)
     forks = started["forks"]
     name = forks["active"]
     put_branch(forks, name, loaded)
+    held = branch_sampling(forks, name)
+    held["steering"] = steering
+    put_branch_sampling(forks, name, held)
     messages, _ = display_messages(loaded)
     answered = bool(loaded) and loaded[-1]["role"] == "assistant"
     return Frame(
