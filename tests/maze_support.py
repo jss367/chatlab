@@ -54,8 +54,12 @@ class Manager:
     def _prompt_token_ids(self, messages, tools=None):
         # Stands in for a chat template: the fixture's vocabulary is UTF-8
         # bytes, so a rendering the reader can read round-trips through decode.
+        # An earlier response's reasoning block is built from reasoning_content,
+        # as Qwen3.8's template builds it.
         rendered = "".join([f"<tools>{json.dumps(tools)}</tools>" if tools else ""]
-                           + [f"<{m['role']}>{m['content']}" for m in messages] + ["<assistant>"])
+                           + [f"<{m['role']}>" + (f"<think>{m['reasoning_content']}</think>"
+                                                  if "reasoning_content" in m else "") + m["content"]
+                              for m in messages] + ["<assistant>"])
         return list(rendered.encode()), False
 
     def claim_generation(self):

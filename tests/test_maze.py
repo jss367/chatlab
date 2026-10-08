@@ -1043,9 +1043,12 @@ class MazeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Episode(MAZE, CONFIG | dict(goal_mode="hint", goal_hint="", instruction="Find it."))
         # Runs predating the setting keep the wording their goal mode sent.
+        # They predate the history form too, which would otherwise rebuild
+        # this history under the default wording and refuse it.
         old = ep.payload()
         old["config"].pop("system_prompt")
         old["config"].pop("instruction")
+        old["config"].pop("reasoning_history")
         legacy = from_payload(json.loads(json.dumps(old)))
         self.assertEqual(legacy.config["instruction"], default_instruction("coordinates"))
         self.assertIn("**Setup prompt:** Default", status(legacy))
@@ -1748,12 +1751,15 @@ class MazeTests(unittest.TestCase):
                 list(stream_episode(ep, manager))
                 self.assertEqual(ep.phase, "arrived")
                 self.assertEqual(ep.tool_attempts, 2)
-                self.assertEqual(manager.calls[1][0][-2], {
-                    "role": "assistant", "content": "<think>" + suffix,
-                })
+                # The reasoning goes in the field templates read an earlier
+                # turn's reasoning block from, and the answer after it.
+                message = {"role": "assistant", "reasoning_content": thought,
+                           "content": call_text(MAZE.maze_id, "east")}
+                self.assertEqual(manager.calls[1][0][-2], message)
                 # Replay keeps actual emitted text; only templated history is reconstructed.
                 self.assertEqual(ep.turns[0]["text"], raw)
-                self.assertEqual(ep.payload()["messages"][-2]["content"], "<think>" + suffix)
+                self.assertEqual(ep.payload()["messages"][-2], message)
+                self.assertEqual(ep.payload()["config"]["reasoning_history"], "reasoning_content")
 
     def test_unfinished_and_thought_calls_do_not_move(self):
         for text, ids, phase in ((call_text(MAZE.maze_id, "east"), [8], "budget"),

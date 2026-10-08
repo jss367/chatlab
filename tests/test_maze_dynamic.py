@@ -209,6 +209,10 @@ class ChangingMapTests(unittest.TestCase):
         pending = json.loads(json.dumps(pending.payload()))
         dropped = copy.deepcopy(applied)
         dropped["config"]["map_updates"] = []
+        # Its history was written under the closure it now reports dropping,
+        # which the rebuild a run naming its history form gets would refuse.
+        # Read as a run written before the field, which gets none.
+        dropped["config"].pop("reasoning_history")
         dropped["dropped_closures"] = [dict(before_turn=1, cell=[0, 2], reason="x")]
         for name, payload in (("applied", applied), ("pending", pending), ("dropped", dropped)):
             with self.subTest(closure=name):
