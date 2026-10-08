@@ -2,8 +2,11 @@
 
 Every branch in the conversations pane - the main conversation, its forks and
 the chats started beside it - is written to one JSON file as it changes and
-read back when the page next loads, so a browser reload, an app restart or a
-crash loses nothing that was said. The file holds the whole pane: the name of
+read back when the page next loads. Streaming frames are coalesced by
+``library_writer`` every 500 ms, with explicit flushes at completion,
+cancellation and orderly shutdown. An abrupt crash can lose that interval
+plus write/scheduling time of streamed output under healthy storage; failed
+or stalled storage can extend it. The file holds the whole pane: the name of
 the active branch and the turns of every branch, in the order the pane lists
 them, each with when it last changed. It is written whole and swapped into
 place, so a crash mid-write leaves the previous copy rather than half of a
@@ -556,6 +559,7 @@ def _replace(target: Path, text: str) -> bool:
 def write(
     forks: dict | None, path: Path | None = None, *,
     preserve_active: bool = False, preserve_archived: bool = False,
+    preserve_order: bool = False,
 ) -> Path | None:
     """Merge the pane into the file on disk and return the path; ``None`` if it could not be.
 
@@ -566,6 +570,8 @@ def write(
 
     Background jobs use ``preserve_active`` to save their source transcript
     without changing which conversation the reader selected most recently.
+    Partial snapshots also use ``preserve_order``: existing disk branches keep
+    their pane order, and new branches are appended in snapshot order.
     Clear all uses ``preserve_archived`` to keep branches archived by another
     page, including one that saves between the clear handler and this write.
     """
@@ -591,6 +597,12 @@ def write(
                         forks["updated"][name], existing["updated"].get(name, "")
                     )
         merged = merge(forks, existing)
+        if preserve_order and existing:
+            names = dict.fromkeys((*existing["branches"], *merged["branches"]))
+            merged["branches"] = {
+                name: merged["branches"][name] for name in names
+                if name in merged["branches"]
+            }
         if preserve_active and existing and existing["active"] in merged["branches"]:
             merged["active"] = existing["active"]
         if not _replace(target, dump(merged)):

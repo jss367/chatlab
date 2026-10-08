@@ -584,7 +584,7 @@ average beside a moved frame would be quietly wrong.
 
 ## Working with a conversation
 
-- Switching conversations, starting a new chat, or forking a conversation keeps the original response generating in the background. Its entry shows **Generating…**, and its response is saved as it progresses. Return to that conversation to see its latest text and token measurements.
+- Switching conversations, starting a new chat, or forking a conversation keeps the original response generating in the background. Its entry shows **Generating…**, and its response is saved on a dedicated writer at most every 500 ms while streaming, with final saves flushed on completion, cancellation, and orderly shutdown. An abrupt process crash may lose the latest 500 ms plus write and scheduling time of streamed output under healthy storage; storage stalls or failures can extend that window. Saves replace the file atomically, but do not promise durability through power loss. Return to that conversation to see its latest text and token measurements. See [conversation save scheduling and measurements](CONVERSATION_SAVES.md) for the benchmark and durability details.
 - **Stop Chat** works even while you are viewing another chat; the status line names the conversation it would stop. It stops at the next generation update and keeps whatever was produced so far.
 - One response generates at a time. You can browse and draft messages elsewhere while it runs; wait for it to finish or press **Stop** before sending another message. Stop a running response before editing, undoing, loading into, or deleting its conversation, or clearing all conversations.
 - **Retry** regenerates the last reply. Because **New seed each response** is on by default, a retry actually explores a different sample; turn it off to lock the seed and reproduce a response exactly. The seed field always shows the seed that produced the response on screen.
@@ -1288,6 +1288,26 @@ authenticate the publisher.
 Type checking currently covers reply requests, transcript state, rendering,
 stream orchestration, and typed calls in the existing control adapters. Other
 runtime and UI modules remain outside that incremental check.
+
+A separate real-browser suite exercises sending and stopping replies, switching
+conversations during generation, replacing a response token through its context
+menu, forking, and restoring saved history in a fresh browser session. It runs
+the actual Gradio app with a slow deterministic CPU model; it downloads no model
+weights and uses temporary settings and history files.
+
+```bash
+.venv/bin/python -m pip install -r requirements-browser.txt
+.venv/bin/python -m playwright install chromium webkit
+.venv/bin/python -m unittest discover -s tests/browser -v
+```
+
+Both engines run by default. Set `CHATLAB_TEST_BROWSERS=chromium` or `webkit` to
+run one. CI runs Chromium on Linux and WebKit on macOS. Playwright WebKit covers
+the macOS rendering engine, but is not the packaged app's native WKWebView or
+Safari binary ([Playwright browser documentation](https://playwright.dev/python/docs/browsers)).
+Screenshots, traces and server logs are saved under `.context/browser-tests/`
+(or `CHATLAB_BROWSER_ARTIFACTS`). Open a trace with
+`.venv/bin/python -m playwright show-trace <trace.zip>`.
 
 The application deliberately leaves `trust_remote_code` disabled. Models that require executing custom repository code will not load unless their architecture is supported directly by Transformers or, for an image model, by diffusers.
 

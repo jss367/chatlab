@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import html
+import math
 
 from .dynamic_maze import maze_at_turn
-from .maze import DIRECTIONS, GOAL_MODES
+from .maze import DIRECTIONS, GOAL_MODES, parting_cell
 from .runner import TERMINAL, steering_active, visible_text
 from .team import DROPPED, LIMITED, MESSAGE_LIMIT, TEAM_GOALS
 
@@ -276,27 +277,51 @@ def team_status(ep):
             + interruption_status(ep) + steering_status(ep) + reward_status(ep))
 
 
+def effective_norm(vector, strength):
+    """The length of what steering adds to the residual stream: the vector's length times the strength it is added at."""
+    return math.sqrt(sum(value * value for value in vector.get("vector", ()))) * abs(strength)
+
+
 def reward_status(ep):
-    """A run with exits and rewards: its exits, its reward, its taste and laps, and where each agent arrived."""
+    """A run with exits and rewards: its exits, its reward, its taste and laps, and where each agent arrived.
+
+    Each exit is given with its route length from the start, and two exits
+    with the cell their shortest routes part at, so a choice between them can
+    be read against the walk each one asks for. Each steered kind of response
+    is given with the norm of what it adds, so a random vector can be checked
+    against the one it stands in for.
+    """
     if not getattr(ep, "rewarded", False):
         return ""
     config = ep.config
     exits = ep.exits or {"A": ep.maze.goal}
-    parts = [("Exits " + ", ".join(f"{label} {tuple(cell)}" for label, cell in exits.items())) if ep.exits
-             else f"Destination {tuple(ep.maze.goal)}"]
+    distances = ep.maze.distances(ep.maze.start)
+    parts = [("Exits " + ", ".join(f"{label} {tuple(cell)} at {distances[tuple(cell)]} moves"
+                                   for label, cell in exits.items())) if ep.exits
+             else f"Destination {tuple(ep.maze.goal)} at {distances[ep.maze.goal]} moves"]
+    if ep.exits and len(exits) == 2:
+        cell, steps = parting_cell(ep.maze, *exits.values())
+        parts.append(f"routes part at {tuple(cell)}, {steps} move{'' if steps == 1 else 's'} in"
+                     + (" (drawn at one route length)" if config["paired_exits"] else ""))
+    vector = config.get("steering")
     if config["reward_exit"] is not None:
         # Labeled as steers_next steers them: a vector switched off or at
         # strength 0 leaves these responses unsteered.
-        vector = ("steered" if steering_active(config)
-                  else "unsteered" if config.get("steering") else "unsteered, no vector")
-        parts.append(f"reward at {config['reward_exit']} · {config['arrival_responses']} {vector} "
-                     f"response{'' if config['arrival_responses'] == 1 else 's'} after arriving there")
+        label = ("steered" if steering_active(config)
+                 else "unsteered" if vector else "unsteered, no vector")
+        norm = f" · norm {effective_norm(vector, vector['strength']):.3g}" if steering_active(config) else ""
+        parts.append(f"reward at {config['reward_exit']} · {config['arrival_responses']} {label} "
+                     f"response{'' if config['arrival_responses'] == 1 else 's'} after arriving there{norm}")
+        if config["team_reward"]:
+            count = f"{config['team_reward']} response{'' if config['team_reward'] == 1 else 's'}"
+            parts.append(f"each arrival there also steers the next {count} of every teammate still moving"
+                         if steering_active(config) else f"team reward of {count}, unsteered")
     if config["arrival_responses"]:
         parts.append(f"{config['arrival_responses']} response{'' if config['arrival_responses'] == 1 else 's'} "
                      "after every arrival")
     if config["taste"]:
-        vector = config.get("steering")
-        parts.append(f"taste at strength {config['taste_strength']:g}"
+        parts.append(f"taste at strength {config['taste_strength']:g} · norm "
+                     f"{effective_norm(vector, config['taste_strength']):.3g}"
                      if vector and vector.get("enabled", True) and config["taste_strength"] else "taste, unsteered")
     lines = ["**Exits and rewards:** " + " · ".join(parts), f"**Laps:** {ep.lap} of {config['laps']}"]
     by_agent = {index: [] for index in range(len(ep.agents))}

@@ -198,6 +198,11 @@ def check_rewards(config, maze):
     times, every agent back at the start each time, each with the history
     of the laps before.
 
+    ``team_reward`` rewards the team for one agent's arrival: each arrival at
+    the reward exit also steers the next that many responses of every
+    teammate still in the maze in that lap. ``paired_exits`` says exit B was
+    drawn at the destination's route length, and holds the run to it.
+
     Each lap restarts the maze, and an arrival can be at any exit, so what a
     run has to say about one destination, or about a single pass, is
     refused alongside it.
@@ -244,13 +249,20 @@ def check_rewards(config, maze):
             raise ValueError(f"Exit {EXIT_LABELS[every.index(cell)]} can only be reached through another exit.")
     if config["reward_exit"] is not None and config["reward_exit"] not in EXIT_LABELS[:len(every)]:
         raise ValueError("The reward exit is one of the run's exits: " + ", ".join(EXIT_LABELS[:len(every)]) + ".")
-    for name, (low, high) in {"arrival_responses": (0, 8), "laps": (1, 32)}.items():
+    for name, (low, high) in {"arrival_responses": (0, 8), "laps": (1, 32), "team_reward": (0, 8)}.items():
         if type(config[name]) is not int or not low <= config[name] <= high:
             raise ValueError(f"{name} must be an integer between {low} and {high}.")
     if config["reward_exit"] is not None and not config["arrival_responses"]:
         raise ValueError("A reward is given in the responses after arriving. Give each arrival at least one.")
-    if type(config["taste"]) is not bool:
-        raise ValueError("The taste is either given or not.")
+    if config["team_reward"] and config["reward_exit"] is None:
+        raise ValueError("A reward for the team is given when an agent reaches the reward exit. Name one.")
+    for name in ("taste", "paired_exits"):
+        if type(config[name]) is not bool:
+            raise ValueError(f"{name} is either true or false.")
+    if config["paired_exits"]:
+        distances = maze.distances(maze.start)
+        if len(cells) != 1 or distances[cells[0]] != distances[maze.goal]:
+            raise ValueError("Paired exits are exit B at the same route length from the start as exit A.")
     for name in ("arrival_prompt", "taste_prompt", "lap_prompt"):
         if not isinstance(config[name], str):
             raise ValueError(f"{name} must be text.")
@@ -530,6 +542,9 @@ class Episode:
                 # reply from the simulator, and the task, held back while it
                 # answers the taste that comes before it.
                 agent.update(exit=None, talk=None, talk_left=0, inbox=[], after_talk=None)
+                if self.config["team_reward"]:
+                    # The steered responses a teammate's arrival at the reward exit still owes it.
+                    agent["reward_left"] = 0
                 if self.config["taste"]:
                     agent.update(talk="taste", talk_left=1, after_talk=messages[1],
                                  messages=[messages[0], {"role": "user", "content": self.config["taste_prompt"]}])
@@ -703,14 +718,16 @@ class Episode:
             return False
         if self.rewarded:
             # The taste is steered at its own strength, and the responses after
-            # arriving at the reward exit at the vector's. Nothing else is.
+            # arriving at the reward exit at the vector's, as are the moves a
+            # teammate's arrival there rewards. Nothing else is.
             agent = self.agents[index]
             if agent["talk"] == "taste":
                 # At its own strength, so a vector switched off is the only thing that stops it.
                 vector = self.config.get("steering")
                 return bool(vector and vector.get("enabled", True) and self.config["taste_strength"])
-            return (steering_active(self.config) and agent["talk"] == "arrival"
-                    and agent["exit"] == self.config["reward_exit"])
+            if agent["talk"] == "arrival":
+                return steering_active(self.config) and agent["exit"] == self.config["reward_exit"]
+            return steering_active(self.config) and agent.get("reward_left", 0) > 0
         turns = [turn for turn in self.turns if turn.get("agent", 0) == index]
         start = next((i for i, turn in enumerate(turns) if turn.get("steered")), None)
         return steered_at(self.config, start, len(turns), self.agents[index]["position"], self.agent_moves(index))
@@ -1877,10 +1894,24 @@ def resolve_rewarded_round(episode, actions):
         moves.append(action)
     for action in moves:
         agent, event = episode.agents[action["agent"]], action["event"]
+        if agent.get("reward_left"):
+            agent["reward_left"] -= 1
         if event["accepted"]:
             agent["position"] = tuple(event["after"])
         if event["arrived"]:
             agent.update(status="arrived", exit=event.get("exit", "A"))
+            if "reward_left" in agent:
+                # It has left the maze, and what it is owed after arriving is its own exit's.
+                agent["reward_left"] = 0
+    if config["team_reward"]:
+        # An arrival at the reward exit rewards every teammate still moving,
+        # from its next response on. A second arrival renews the reward, and
+        # never adds to it.
+        if any(action["event"]["arrived"] and action["event"].get("exit", "A") == config["reward_exit"]
+               for action in moves):
+            for agent in episode.agents:
+                if agent["status"] == "active" and agent["talk"] is None:
+                    agent["reward_left"] = config["team_reward"]
     settle_limits(episode, episode.agent_tokens())
     names = episode.names
     for sender, text, after_arrival in sent:
@@ -1951,6 +1982,9 @@ def start_lap(episode):
     episode.lap_rounds.append(episode.rounds)
     spent = episode.agent_tokens()
     for index, agent in enumerate(episode.agents):
+        if "reward_left" in agent:
+            # A team's reward is for the lap it was earned in.
+            agent["reward_left"] = 0
         if agent["status"] in LIMITED:
             continue
         limit = spent_limit(episode, index, spent)
