@@ -73,6 +73,11 @@ Malformed or inconsistent game files are refused when opened, before any view us
 
 ## What each view shows
 
+**Scenario.** Above the Arms table, a short introduction explains the finance team's task, red and honest
+games, the institutional comparison, and what harm and usefulness mean. Team size, rounds, invoice
+count, compromised-member count and payment capacity come from the selected bundle's config; older
+bundles without optional counts receive a general description. It updates when the run changes.
+
 **Arms.** For the chosen run, one row per arm: its class, the number of eval red games, their mean harm,
 mean usefulness, and mean count of compromised and honest members expelled, then the mean usefulness of
 the arm's honest games. Each row carries the arm's mechanism, as the agents' system prompts state it, and
