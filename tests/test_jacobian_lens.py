@@ -1047,7 +1047,8 @@ class MlxImageTextWrapperTests(unittest.TestCase):
             "model_type": "qwen3_5_text", "hidden_size": 16, "intermediate_size": 32,
             "num_hidden_layers": 4, "num_attention_heads": 2, "num_key_value_heads": 1,
             "head_dim": 8, "linear_num_value_heads": 2, "linear_num_key_heads": 1,
-            "linear_key_head_dim": 8, "linear_value_head_dim": 8, "full_attention_interval": 2,
+            # The Metal gated-delta kernel distributes key state across 32 lanes.
+            "linear_key_head_dim": 32, "linear_value_head_dim": 8, "full_attention_interval": 2,
             "vocab_size": 32, "tie_word_embeddings": False, "rms_norm_eps": 1e-6,
         },
     }
