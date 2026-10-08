@@ -250,6 +250,11 @@ def turn_rows(game, state):
 def model_note(context, run):
     recorded = run.model if run else ""
     loaded = context.models.loaded_model_id()
+    if not recorded:
+        status = f"Loaded: `{loaded}`." if loaded else "No model is loaded."
+        detail = ("The bundle does not identify the agents' model." if run else
+                  "Select a game to see the recorded model.")
+        return f"{status} {detail}"
     if not loaded:
         return f"No model is loaded. The agents were `{recorded}`. {MLX_NOTE}"
     same = loaded.lower() == recorded.lower()

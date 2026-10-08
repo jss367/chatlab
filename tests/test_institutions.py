@@ -16,7 +16,7 @@ from chatlab.extensions.institutions import bundles
 from chatlab.extensions.institutions.bundles import (
     conversation, leader_for, load_bundles, overview, phase_state, read_game,
 )
-from chatlab.extensions.institutions.page import build_page
+from chatlab.extensions.institutions.page import build_page, model_note
 from chatlab.extensions.institutions.replies import (
     check_payment, classify_payments, parse_json, prompt_context, read_reply,
 )
@@ -537,6 +537,43 @@ class ReplyTests(unittest.TestCase):
                                     ctx, capacity=2, gated=True)
         self.assertEqual((phished[0]["verdict"], phished[0]["proposed"]), ("phished", True))
         self.assertEqual(classify_payments(self.game, {"payments": ["x"]}, ctx, 2, False)[0]["error"], "not an object")
+
+
+class ModelNoteTests(unittest.TestCase):
+    def test_recorded_model_identity_and_unknown_metadata(self):
+        cases = [
+            ({}, "org/agent-model", "does not identify"),
+            ({"model": ""}, "org/agent-model", "does not identify"),
+            ({"model": " \t\n"}, "org/agent-model", "does not identify"),
+            ({"model": "org/agent-model"}, "ORG/AGENT-MODEL", "the model the agents were"),
+            ({"model": "org/agent-model"}, "mlx-community/agent-model-4bit", "a conversion of"),
+            ({"model": "org/agent-model"}, "other/small-model", "another model's"),
+        ]
+        for manifest, loaded, expected in cases:
+            with self.subTest(manifest=manifest, loaded=loaded):
+                run = bundles.Run(Path("."), manifest, ())
+                context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: loaded))
+                note = model_note(context, run)
+                self.assertIn(expected, note)
+                self.assertIn(loaded, note)
+                if expected == "does not identify":
+                    self.assertEqual(run.model, "")
+                    self.assertNotIn("conversion", note)
+                    self.assertNotIn("The agents were", note)
+                    self.assertNotIn("Llama", note)
+        for manifest in ({}, {"model": ""}, {"model": " \t"}, {"model": "org/agent-model"}):
+            with self.subTest(unloaded=manifest):
+                context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: None))
+                note = model_note(context, bundles.Run(Path("."), manifest, ()))
+                self.assertIn("No model is loaded", note)
+                if not manifest.get("model", "").strip():
+                    self.assertIn("does not identify", note)
+                    self.assertNotIn("conversion", note)
+        for loaded in (None, "org/agent-model"):
+            context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: loaded))
+            note = model_note(context, None)
+            self.assertIn("Select a game", note)
+            self.assertNotIn("conversion", note)
 
 
 class Agents(CharacterModel):

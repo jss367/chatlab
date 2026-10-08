@@ -54,7 +54,7 @@ class Run:
 
     @property
     def model(self):
-        return self.manifest.get("model") or ""
+        return (self.manifest.get("model") or "").strip()
 
     @property
     def sampling(self):
