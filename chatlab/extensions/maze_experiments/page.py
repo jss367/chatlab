@@ -1310,6 +1310,8 @@ def _build_page(context):
             team = agent_count > 1
             waypoint_cell = parse_cell(waypoint_text, "waypoint")
             paired = team and bool(reward_settings[9])
+            if paired and required_cell:
+                raise ValueError("A run with exits and rewards cannot also have a required checkpoint.")
             if paired:
                 drawn, drawn_exit = generate_paired(n, s, d, o)
             else:

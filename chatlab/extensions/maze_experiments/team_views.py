@@ -298,7 +298,7 @@ def reward_status(ep):
     distances = ep.maze.distances(ep.maze.start)
     parts = [("Exits " + ", ".join(f"{label} {tuple(cell)} at {distances[tuple(cell)]} moves"
                                    for label, cell in exits.items())) if ep.exits
-             else f"Destination {tuple(ep.maze.goal)}"]
+             else f"Destination {tuple(ep.maze.goal)} at {distances[ep.maze.goal]} moves"]
     if ep.exits and len(exits) == 2:
         cell, steps = parting_cell(ep.maze, *exits.values())
         parts.append(f"routes part at {tuple(cell)}, {steps} move{'' if steps == 1 else 's'} in"

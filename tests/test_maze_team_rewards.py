@@ -454,6 +454,12 @@ class TeamRewardTests(unittest.TestCase):
         self.assertIn(f"taste at strength -2 · norm {norm * 2:.3g}", details)
         self.assertIn("also steers the next 2 responses of every teammate still moving", details)
 
+    def test_single_exit_reward_details_include_its_route_length(self):
+        for settings in ({"arrival_responses": 1}, {"taste": True}, {"laps": 2}):
+            with self.subTest(settings=settings):
+                ep = team_episode(LONG, dict(team_goal="all", **settings))
+                self.assertIn("Destination (0, 0) at 2 moves", reward_status(ep))
+
     def test_refused_team_rewards_and_paired_exits(self):
         refused = {"Name one": dict(reward_exit=None),
                    "team_reward must be an integer": dict(team_reward=9),
@@ -486,6 +492,26 @@ class PairedExitTests(unittest.TestCase):
 
 
 class RewardPageTests(unittest.TestCase):
+    def test_paired_exits_cannot_silently_drop_a_required_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=TokenInspector(), models=Manager([]), data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                prepare = listeners_by_name(demo)["prepare_episode"]
+                ep = team_episode(HALL, {})
+                for settings in (dict(size=3, seed=0, distance=1, openness=.7),
+                                 dict(size=5, seed=7, distance=4, openness=.7)):
+                    with self.subTest(settings=settings), self.assertRaisesRegex(gr.Error, "required checkpoint"):
+                        prepare.fn(ep, False, "s", None, *scenario(agents=2, team_goal="all", required=True,
+                                                                    paired_exits=True, **settings))
+                new = prepare.fn(ep, False, "s", None,
+                                 *scenario(agents=2, team_goal="all", required=True, distance=4))[0]
+                self.assertIsNotNone(new.config["required_checkpoint"])
+            finally:
+                demo.close()
+
     def test_prepare_export_reload_and_rebuild_a_reward_run(self):
         with tempfile.TemporaryDirectory() as directory:
             context = SimpleNamespace(tokens=TokenInspector(), models=Manager([]), data_dir=Path(directory),
