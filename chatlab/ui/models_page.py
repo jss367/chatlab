@@ -2146,7 +2146,14 @@ def act_on_my_model(action: str | None, hf_token: str):
     if request.get("action") == "redownload":
         yield from redownload_my_model(name, hf_token)
     elif request.get("action") == "remove":
-        yield remove_my_model(name)
+        card = remove_my_model(name)
+        # The status card can be below a long list. Announce the outcome
+        # where the reader clicked, including why a removal was refused.
+        if card.tone == "success":
+            gr.Info(card.detail, title=card.title)
+        else:
+            announce_switch_outcome(card)
+        yield card
     else:
         yield gr.skip()
 
