@@ -1902,11 +1902,36 @@ def resolve_rewarded_round(episode, actions):
     settle_rewarded(episode, actions, sent)
 
 
+def spent_limit(episode, index, spent):
+    """The limit agent ``index`` has used all of, ``"out_of_tokens"`` or ``"out_of_calls"``, or None.
+
+    Read from its counters rather than its status, since an agent that
+    arrives on its last sampled token or its last call keeps the status
+    ``arrived``, which settle_limits leaves alone.
+    """
+    config = episode.config
+    tokens = config.get("agent_token_budget")
+    if tokens is not None and spent[index] >= tokens:
+        return "out_of_tokens"
+    if episode.agent_attempts(index) >= config.get("attempt_budget", math.inf):
+        return "out_of_calls"
+    return None
+
+
 def start_lap(episode):
-    """Bring every agent a limit has not stopped back to the start, telling each that the next lap begins."""
+    """Bring every agent a limit has not stopped back to the start, telling each that the next lap begins.
+
+    An agent that arrived on the last of its tokens or calls has none for the
+    new lap, so it stops there with the limit it reached instead.
+    """
     episode.lap_rounds.append(episode.rounds)
+    spent = episode.agent_tokens()
     for index, agent in enumerate(episode.agents):
         if agent["status"] in LIMITED:
+            continue
+        limit = spent_limit(episode, index, spent)
+        if limit:
+            agent.update(status=limit, exit=None)
             continue
         agent.update(position=tuple(episode.maze.start), status="active", exit=None)
         inbox, agent["inbox"] = agent["inbox"], []
@@ -1917,7 +1942,10 @@ def start_lap(episode):
 def settle_rewarded(episode, actions, sent):
     """Decide whether the round a run with exits and rewards just resolved ends a lap, or the run."""
     config, agents = episode.config, episode.agents
-    laps_left = episode.lap < config["laps"] and any(a["status"] not in LIMITED for a in agents)
+    # Only an agent with tokens and calls left can run another lap.
+    spent = episode.agent_tokens()
+    laps_left = episode.lap < config["laps"] and any(
+        agent["status"] not in LIMITED and not spent_limit(episode, index, spent) for index, agent in enumerate(agents))
     out_of_rounds = episode.rounds >= config["round_limit"]
     # A lap that cannot have a round of its own is not begun.
     if not episode.responders() and laps_left and not out_of_rounds:
@@ -1928,7 +1956,11 @@ def settle_rewarded(episode, actions, sent):
                                                    f"{config['laps']}.")
     elif not episode.responders():
         lap = f" in lap {episode.lap}" if config["laps"] > 1 else ""
-        if all(agent["status"] == "arrived" for agent in agents):
+        if all(agent["status"] == "arrived" for agent in agents) and episode.lap < config["laps"]:
+            episode.phase, episode.detail = "budget", (f"Every agent reached an exit in lap {episode.lap}, and none "
+                                                       f"has the tokens or calls for lap {episode.lap + 1} of "
+                                                       f"{config['laps']}.")
+        elif all(agent["status"] == "arrived" for agent in agents):
             episode.phase = "arrived"
             episode.detail = (f"Every agent reached an exit{lap} by round {episode.rounds}: " + ", ".join(
                 f"{agent['name']} at {agent['exit']}" for agent in agents) + ".")

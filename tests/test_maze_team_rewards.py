@@ -167,6 +167,33 @@ class RewardRunTests(unittest.TestCase):
                                  ["Exit A was quiet.", "Exit B felt wonderful. Come east."])
                 self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
 
+    def test_agents_that_arrive_on_their_last_call_begin_no_lap(self):
+        ep, manager = run(SCRIPT[:8] + [move("east")] * 4, attempt_budget=2)
+        self.assertEqual((ep.phase, ep.rounds, ep.lap_rounds), ("budget", 4, []))
+        self.assertIn("none has the tokens or calls for lap 2 of 2", ep.detail)
+        self.assertEqual(len(manager.calls), 8)
+        self.assertEqual([a["status"] for a in ep.agents], ["arrived", "arrived"])
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+
+    def test_an_agent_that_arrives_on_its_last_token_sits_out_the_next_lap(self):
+        script = list(SCRIPT[:8])
+        script[7] = say("B" * 250)
+        # agent-2 arrives and writes on exactly the last of its tokens; agent-1 has some left.
+        budget = sum(len(ids) for _, ids in script[1::2])
+        ep, manager = run(script + [move("east"), move("east"), say("Done.")], agent_token_budget=budget,
+                          per_turn_tokens=400)
+        self.assertEqual(ep.lap_rounds, [4])
+        self.assertEqual(ep.agent_tokens()[1], budget)
+        self.assertEqual(ep.agents[1]["status"], "out_of_tokens")
+        self.assertEqual(ep.agents[1]["position"], (0, 4))
+        self.assertFalse(any(t["agent"] == 1 for t in ep.turns[8:]))
+        self.assertFalse(any(m["role"] == "user" and m["content"].startswith("Lap 2")
+                             for m in ep.agents[1]["messages"]))
+        self.assertEqual((ep.agents[0]["status"], ep.agents[0]["exit"]), ("arrived", "B"))
+        self.assertEqual(ep.phase, "budget", ep.detail)
+        self.assertEqual(len(manager.calls), 11)
+        self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+
     def test_configurations_no_run_could_use_are_refused(self):
         cases = {
             "at least one": dict(arrival_responses=0),
