@@ -1319,7 +1319,7 @@ def _build_inspector(
                 "For one step, choose an alternative and press **Next token** "
                 "below the message box. Keep pressing it to extend the reply."
             )
-            with gr.Row():
+            with gr.Row(elem_classes=["inspector-control-row"]):
                 branch_text = gr.Textbox(
                     label="Or type your own replacement",
                     placeholder=(
@@ -1389,7 +1389,7 @@ def _build_layers() -> Layers:
                 "fit new ones. Supports Llama, Mistral, Qwen, Gemma, OLMo, GLM-4, Phi-3, "
                 "Granite, Cohere, and SmolLM3 text models, as Transformers weights or MLX conversions."
             )
-            with gr.Row():
+            with gr.Row(elem_classes=["inspector-control-row"]):
                 lens_repository = gr.Textbox(
                     label="Hub repository", placeholder="For example, mhough/olmo3-jacobian-lenses",
                     scale=1,
@@ -1418,7 +1418,7 @@ def _build_layers() -> Layers:
         # bridge class, not visible=False, which would take the box
         # out of the DOM where the page script has to find it.
         pinned_token_id = gr.Textbox(elem_id="jacobian-pin-id", elem_classes=[MENU_BRIDGE_CLASS])
-    with gr.Row():
+    with gr.Row(elem_classes=["inspector-control-row"]):
         inspect_button = gr.Button(
             "Inspect layers", size="sm", scale=0, min_width=160,
             elem_classes=icon_classes("layers"), elem_id="inspect-layers",
@@ -1436,7 +1436,7 @@ def _build_layers() -> Layers:
         info="0 averages every layer. Release the slider to repaint.",
     )
     attention_panel = gr.HTML(charts.EMPTY_ATTENTION)
-    with gr.Row():
+    with gr.Row(elem_classes=["inspector-control-row"]):
         kv_layer = gr.Slider(
             1,
             1,

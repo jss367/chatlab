@@ -127,6 +127,7 @@ from chatlab.ui.steering import (
     steering_updates,
 )
 from chatlab.ui.styles import (
+    INSPECTOR_CONTAINER_CSS,
     COLUMN_JS,
     CSS,
     THEME,
@@ -269,6 +270,7 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(
         title="ChatLab", css=CSS + TOKEN_MENU_CSS + TREE_CSS + JACOBIAN_CSS + ATTENTION_TRACE_CSS + extension_css(extensions), theme=THEME, fill_width=True,
         analytics_enabled=False,
+        head=f"<style>{INSPECTOR_CONTAINER_CSS}</style>",
     ) as demo:
         # The chosen theme's colors, as a stylesheet on the page. Gradio fixes
         # THEME above when the interface is built, so a theme picked later is

@@ -62,6 +62,21 @@ THEME = gr.themes.Base(
 ALERT_MASK = mask("alert")
 
 
+# Gradio's CSS scoping drops @container blocks. Keep these rules in the
+# document head, scoped explicitly to the inspector, so the browser reads
+# them unchanged.
+INSPECTOR_CONTAINER_CSS = """
+@container inspector (max-width: 340px) {
+  #inspector-pane .inspector-control-row {
+    flex-direction: column; align-items: stretch;
+  }
+  #inspector-pane .inspector-control-row > * {
+    flex: 0 0 auto !important; width: 100%;
+  }
+}
+"""
+
+
 CSS = f"""
 /* A viewport-sized shell gives every pane its own scroll boundary. */
 html, body {{ height: 100%; overflow: hidden; }}
@@ -624,6 +639,8 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
 #conversation-pane .row button {{ flex: 1 1 auto; flex-wrap: nowrap; }}
 #chat-tab button {{ font-size: 13px; }}
 #shell button:focus-visible {{ outline: 2px solid var(--color-accent); outline-offset: 2px; }}
+/* Immediate press feedback also works while a slow action is starting. */
+#shell button:active:not(:disabled) {{ filter: brightness(0.92); }}
 /* Each sampling slider carries its own ↺, in the corner Gradio draws one in.
    It is a button of ours rather than Gradio's, which restores the value its
    slider was built with - here the saved setting already on screen; see
@@ -635,12 +652,19 @@ label.{ICON_CLASS} {{ display: inline-flex; }}
 /* Through #shell because #chat-tab sets a size on every button below it, and
    a rule of one class would lose to it. */
 #shell .sampling-field .sampling-reset {{
-  position: absolute; top: 8px; right: 8px; z-index: 1;
-  width: 24px; min-width: 0 !important; height: 24px;
+  position: absolute; top: 4px; right: 4px; z-index: 1;
+  width: 32px; min-width: 0 !important; height: 32px;
   padding: 0; font-size: 0; border-radius: var(--radius-sm);
 }}
 #shell .sampling-field .sampling-reset::before {{ width: 14px; height: 14px; }}
-.sampling-field .tab-like-container {{ margin-right: 30px; }}
+.sampling-field .tab-like-container {{ margin-right: 38px; }}
+
+/* Both inspectors have an explicit flex basis, so inline-size containment
+   does not change their width. Controls respond to the draggable pane,
+   independently of the window's breakpoints. */
+#inspector-pane, #image-inspector {{ container: inspector / inline-size; }}
+#inspector-pane .row > .form, #image-inspector .row > .form {{ min-width: 0 !important; }}
+#inspector-pane .prose, #image-inspector .prose {{ overflow-wrap: anywhere; }}
 
 /* Compact windows retain separate scroll areas in two stacked rows. */
 @media (max-width: 1050px) {{
@@ -996,7 +1020,7 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
 }}
 #conversation-list .conversation-action {{
   display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px;
+  width: 32px; min-width: 32px; height: 32px; padding: 0; border: 0; border-radius: 5px;
   background: transparent; color: var(--body-text-color-subdued); cursor: pointer;
 }}
 #conversation-list .conversation-action::before {{
