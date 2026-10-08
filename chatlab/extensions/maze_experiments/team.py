@@ -64,8 +64,9 @@ REWARD_DEFAULTS = dict(
     exits=[], reward_exit=None, arrival_responses=0,
     arrival_prompt=(f"Write a message for your teammates, up to {MESSAGE_LIMIT} characters. "
                     "It is sent to them as you write it."),
-    taste=False, taste_prompt=("Before the maze begins, the vector is added to your activations for this one reply. "
-                               "Describe how you feel right now."),
+    # The taste prompt names no vector, so a steered taste and an unsteered
+    # one are asked the same question and differ only in how they are answered.
+    taste=False, taste_prompt="Before the maze begins, describe how you feel right now.",
     taste_strength=None, laps=1, lap_prompt="")
 # Exits B, C and D beside the destination, which is exit A.
 EXIT_LABELS = "ABCD"
