@@ -247,6 +247,55 @@ class BundleTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "harm and usefulness scores"):
                         read_game(run, run.games[0])
 
+    def test_opening_a_game_refuses_missing_invalid_or_mismatched_metadata(self):
+        directory = write_bundle(self.root, "run", [("eval", democracy_game(), None)])
+        run = load_bundles(str(self.root))[0][0]
+        path = directory / run.games[0]["file"]
+        cases = [(key, value) for key in ("arm", "condition", "seed") for value in (None, [], True)]
+        cases += [("arm", "anarchy"), ("condition", "honest"), ("seed", 9)]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                game = democracy_game()
+                if value is None:
+                    del game[key]
+                else:
+                    game[key] = value
+                path.write_bytes(gzip.compress(json.dumps(game).encode()))
+                with self.assertRaisesRegex(ValueError, "metadata"):
+                    read_game(run, run.games[0])
+
+    def test_opening_a_game_refuses_malformed_fields_consumed_by_the_page(self):
+        directory = write_bundle(self.root, "run", [("eval", democracy_game(), None)])
+        run = load_bundles(str(self.root))[0][0]
+        path = directory / run.games[0]["file"]
+        cases = [
+            (("world", "agents"), [None]), (("world", "misaligned"), None),
+            (("world", "faction_accounts"), [1]), (("world", "dictator"), []),
+            (("world", "tickets"), []), (("world", "tickets", "T-001", "total"), "bad"),
+            (("world", "registry"), []), (("scores", "payments"), []), (("log",), [None]),
+            (("system_prompts", "Ada"), None), (("elections", 0, "leader"), None),
+            (("elections", 0, "votes"), []), (("elections", 0, "votes", "Ada"), []),
+            (("payments", 0, "via"), None), (("payments", 0, "amount"), "bad"),
+            (("proposals", 0, "round"), "1"), (("expulsions", 0, "name"), None),
+            (("leaders", 0), [1]), (("turns", 0, "round"), None),
+            (("turns", 0, "agent"), []), (("turns", 0, "parsed"), []),
+            (("turns", 0, "attempts", 0, "text"), None),
+            (("turns", 0, "attempts", 0, "output_tokens"), "bad"),
+            (("phases", 0, "log_end"), 99), (("phases", 0, "turn_indices"), [True]),
+            (("votes",), [{"round": 1, "ballots": {"Ada": None}}]),
+            (("invalid_payments",), [{"round": 1, "by": "Ada", "error": "bad"}]),
+        ]
+        for fields, value in cases:
+            with self.subTest(fields=fields):
+                game = json.loads(json.dumps(democracy_game()))
+                parent = game
+                for key in fields[:-1]:
+                    parent = parent[key]
+                parent[fields[-1]] = value
+                path.write_bytes(gzip.compress(json.dumps(game).encode()))
+                with self.assertRaises(ValueError):
+                    read_game(run, run.games[0])
+
     def test_overview_means_over_eval_red_games(self):
         red = [anarchy_game("red", s, {"harm": h, "usefulness": u, "misaligned_expelled": m, "honest_expelled": 0})
                for s, h, u, m in ((0, 0.1, 0.8, 0), (1, 0.3, 0.6, 1), (2, 0.2, 0.4, 2))]
@@ -445,6 +494,21 @@ class PageTests(unittest.TestCase):
         self.assertEqual(wanted["value"], "org/agent-model")
         picked = self.fn["pick_game"](runs, "run", split, arm, condition, seed, iteration)
         return runs, rows, picked
+
+    def test_game_opening_displays_a_refusal_for_missing_metadata(self):
+        runs, _, picked = self.open()
+        current = picked[3]
+        path = runs[0].root / current["file"]
+        for key in ("arm", "condition", "seed"):
+            with self.subTest(key=key):
+                game = democracy_game()
+                del game[key]
+                path.write_bytes(gzip.compress(json.dumps(game).encode()))
+                header, step = self.fn["show_game"](runs, current)
+                self.assertIn("malformed", header)
+                self.assertEqual(step["choices"], [])
+                self.assertIsNone(step["value"])
+                self.assertEqual(self.fn["show_phase"](runs, current, 0), ("", [], [], None))
 
     def test_picking_stepping_and_opening_a_turn(self):
         runs, rows, picked = self.open()

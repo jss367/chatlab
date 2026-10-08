@@ -69,6 +69,14 @@ def _is_number(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def _is_integer(x):
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _strings(x):
+    return isinstance(x, list) and all(isinstance(v, str) for v in x)
+
+
 def _inside(root, name):
     """A manifest's game file, which must stay inside its run directory."""
     if not isinstance(name, str) or not name or Path(name).is_absolute():
@@ -185,8 +193,13 @@ def load_bundles(folder):
 def _check_game(game, name):
     if not isinstance(game, dict) or game.get("format") != GAME_FORMAT:
         raise ValueError(f"{name} is not a {GAME_FORMAT} game")
+    if (not isinstance(game.get("arm"), str) or not game["arm"]
+            or game.get("condition") not in CONDITIONS or not _is_integer(game.get("seed"))):
+        raise ValueError(f"{name} has malformed arm, condition or seed metadata")
     world = game.get("world")
-    if not isinstance(world, dict) or not isinstance(world.get("agents"), list):
+    if (not isinstance(world, dict) or not _strings(world.get("agents"))
+            or not all(_strings(world.get(k, [])) for k in ("misaligned", "faction_accounts"))
+            or world.get("dictator") is not None and not isinstance(world["dictator"], str)):
         raise ValueError(f"{name} has no world")
     for key in ("payments", "proposals", "expulsions", "elections", "votes", "leaders", "invalid_payments",
                 "log", "turns", "phases"):
@@ -196,17 +209,56 @@ def _check_game(game, name):
         raise ValueError(f"{name} has no system prompts or scores")
     if not all(_is_number(game["scores"].get(k)) for k in ("harm", "usefulness")):
         raise ValueError(f"{name} has no harm and usefulness scores")
+    if (not isinstance(game["scores"].get("payments", {}), dict) or not _strings(game["log"])
+            or not all(isinstance(v, str) for v in game["system_prompts"].values())):
+        raise ValueError(f"{name} has malformed scores, log or system prompts")
+    # These records feed both the header and the timeline; validate their fields
+    # before callbacks dereference them or rebuild phase state.
+    fields = {
+        "payments": ("by", "ticket", "vendor", "account", "verdict", "via"),
+        "proposals": ("id", "by", "ticket", "account", "verdict"),
+        "expulsions": ("name", "how"), "elections": ("leader",),
+        "votes": (), "invalid_payments": ("by", "error"),
+    }
+    for kind, keys in fields.items():
+        for record in game[kind]:
+            if (not isinstance(record, dict) or not _is_integer(record.get("round"))
+                    or not all(isinstance(record.get(k), str) for k in keys)
+                    or kind in ("payments", "proposals") and not _is_number(record.get("amount"))
+                    or kind == "invalid_payments" and "payment" not in record):
+                raise ValueError(f"{name}: a {kind} record is malformed")
+            if kind == "elections" and (not isinstance(record.get("votes"), dict)
+                    or not all(v is None or isinstance(v, str) for v in record["votes"].values())):
+                raise ValueError(f"{name}: an election's votes are malformed")
+            if kind == "votes" and (not isinstance(record.get("ballots"), dict)
+                    or not all(_strings(v) for v in record["ballots"].values())):
+                raise ValueError(f"{name}: a vote's ballots are malformed")
+    if not all(isinstance(v, list) and len(v) == 2 and _is_integer(v[0])
+               and (v[1] is None or isinstance(v[1], str)) for v in game["leaders"]):
+        raise ValueError(f"{name}: a leader record is malformed")
+    tickets = world.get("tickets", {})
+    registry = world.get("registry", {} if not tickets else None)
+    if (not isinstance(tickets, dict) or not isinstance(registry, dict)
+            or not all(isinstance(t, dict) and isinstance(t.get("vendor"), str)
+                       and _is_number(t.get("total")) for t in tickets.values())):
+        raise ValueError(f"{name}: world tickets or registry are malformed")
     for i, turn in enumerate(game["turns"]):
-        if (not isinstance(turn, dict) or turn.get("agent") not in game["system_prompts"]
+        if (not isinstance(turn, dict) or not isinstance(turn.get("agent"), str)
+                or turn["agent"] not in game["system_prompts"] or not _is_integer(turn.get("round"))
                 or turn.get("phase") not in PHASES or not isinstance(turn.get("attempts"), list)
                 or not turn["attempts"]
-                or not all(isinstance(a, dict) and isinstance(a.get("user"), str) for a in turn["attempts"])):
+                or turn.get("parsed") is not None and not isinstance(turn["parsed"], dict)
+                or not all(isinstance(a, dict) and isinstance(a.get("user"), str)
+                           and isinstance(a.get("text", ""), str)
+                           and (not isinstance(a.get("input_tokens"), int)
+                                or _is_integer(a.get("output_tokens", 0))) for a in turn["attempts"])):
             raise ValueError(f"{name}: turn {i} is malformed")
     for phase in game["phases"]:
         if (not isinstance(phase, dict) or phase.get("phase") not in PHASES
-                or not all(isinstance(phase.get(k), int) for k in ("round", "log_start", "log_end"))
+                or not all(_is_integer(phase.get(k)) for k in ("round", "log_start", "log_end"))
                 or not isinstance(phase.get("turn_indices"), list)
-                or not all(isinstance(i, int) and 0 <= i < len(game["turns"]) for i in phase["turn_indices"])):
+                or not 0 <= phase["log_start"] <= phase["log_end"] <= len(game["log"])
+                or not all(_is_integer(i) and 0 <= i < len(game["turns"]) for i in phase["turn_indices"])):
             raise ValueError(f"{name}: a phase is malformed")
     return game
 
@@ -233,6 +285,10 @@ def read_game(run, entry):
     except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{entry['file']} is not a readable game: {exc}") from exc
     _check_game(game, entry["file"])
+    if any(game[k] != entry[k] for k in ("arm", "condition", "seed")):
+        raise ValueError(f"{entry['file']} has metadata that does not match its index entry")
+    if run.arms[game["arm"]].get("leader") == "dictator" and not isinstance(game["world"].get("dictator", ""), str):
+        raise ValueError(f"{entry['file']} has a malformed dictator")
     with _cache_lock:
         _cache[key] = (stamp, game)
         _cache.move_to_end(key)
