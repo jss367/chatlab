@@ -1280,8 +1280,14 @@ authenticate the publisher.
 ## Tests
 
 ```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m mypy
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+Type checking currently covers reply requests, transcript state, rendering,
+stream orchestration, and typed calls in the existing control adapters. Other
+runtime and UI modules remain outside that incremental check.
 
 The application deliberately leaves `trust_remote_code` disabled. Models that require executing custom repository code will not load unless their architecture is supported directly by Transformers or, for an image model, by diffusers.
 

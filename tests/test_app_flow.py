@@ -193,7 +193,7 @@ class PanelSessionTests(unittest.TestCase):
         self.assertIsNone(self.bound(0, app.remember_inspect_target("score"))(scored[2], select(0)))
 
     def test_hidden_streams_never_build_or_publish_token_spans(self):
-        with mock.patch("chatlab.ui.generation.transcript_update", side_effect=AssertionError("hidden repaint")):
+        with mock.patch("chatlab.ui.reply_render.transcript_update", side_effect=AssertionError("hidden repaint")):
             frames = self.respond(0)
         self.assertTrue(all(frame["strip"] == gr.skip() for frame in frames))
         self.assertTrue(frames[-1]["turns"][-1]["tokens"])
@@ -1323,7 +1323,7 @@ class TokenViewTests(unittest.TestCase):
     def test_refusal_before_opening_frame_keeps_edit_retryable(self):
         final = self.respond()
         _, _, target = self.open_editor(final)
-        with mock.patch("chatlab.ui.generation.steering_from_controls", side_effect=SteeringError("Invalid steering")):
+        with mock.patch("chatlab.ui.reply_state.steering_from_controls", side_effect=SteeringError("Invalid steering")):
             restored = list(save_token_edit(target, "replacement", "draft", final["turns"], *SETTINGS))[-1]
         self.assertEqual(restored["turns"], final["turns"])
         self.assertTrue(restored["token_editor"]["visible"])
@@ -3559,7 +3559,7 @@ class NextTokenTests(unittest.TestCase):
             yield
 
         with mock.patch.object(runtime.MANAGER, "generate", side_effect=fail):
-            with self.assertLogs("chatlab.ui.generation", level="ERROR"):
+            with self.assertLogs("chatlab.ui.reply_stream", level="ERROR"):
                 frames = list(app.next_token(pick, "draft", later["turns"], *SETTINGS))
         self.assertIn("Replay failed", frames[-1]["status"])
         for frame in frames:
