@@ -1055,7 +1055,7 @@ def _adapter_status(
     return status
 
 
-def folder_bytes(folder: Path) -> int:
+def folder_bytes(folder: Path, *, seen: set[Path] | None = None) -> int:
     """Bytes of files a cache folder references, counting each target once.
 
     In the usual layout the snapshots are symlinks into ``blobs`` and only
@@ -1064,10 +1064,12 @@ def folder_bytes(folder: Path) -> int:
     across blobs and snapshots. This measures every revision's referenced
     files, not necessarily the space deleting the folder would free when
     another model shares those files.
+    Pass the same ``seen`` set across folders to measure their combined size.
     """
 
     total = 0
-    seen: set[Path] = set()
+    if seen is None:
+        seen = set()
     for entry in folder.rglob("*"):
         try:
             target = entry.resolve()

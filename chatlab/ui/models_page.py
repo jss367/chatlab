@@ -48,6 +48,7 @@ from chatlab.model_cache import (
     cache_status,
     estimate_parameter_bytes,
     estimate_snapshot_bytes,
+    folder_bytes,
     format_bytes,
     format_count,
     is_adapter_snapshot,
@@ -1929,7 +1930,11 @@ def my_models_summary(
             f"No models in the Hugging Face cache yet ({root}). "
             "Find one under **Discover models**."
         )
-    total = format_bytes(sum(entry.size_bytes for entry in models))
+    seen: set[Path] = set()
+    total = format_bytes(sum(
+        folder_bytes(entry.path, seen=seen) if entry.path is not None else entry.size_bytes
+        for entry in models
+    ))
     count = f"{len(models)} model{'s' if len(models) != 1 else ''}"
     line = f"{count} · {total} on disk in {root}"
     if shown is None or len(shown) == len(models):

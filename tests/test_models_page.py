@@ -401,6 +401,22 @@ class CachedModelListTests(unittest.TestCase):
 class RemoveCachedModelTests(unittest.TestCase):
     """Removing a model deletes its folder and nothing else."""
 
+    def test_summary_counts_a_blob_shared_between_models_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            shared = Path(root) / "blobs" / "weights"
+            shared.parent.mkdir()
+            shared.write_bytes(b"x" * 1_000_000)
+            for model in (OLMO, "org/other"):
+                folder = lay_out(root, model, {"config.json": b"{}", "model.safetensors": b"x"})
+                blob = folder / "blobs" / "blob1"
+                blob.unlink()
+                blob.symlink_to(shared)
+            entries = list_cached_models(Path(root))
+
+            self.assertEqual(len(entries), 2)
+            self.assertTrue(all(entry.size_bytes > 1_000_000 for entry in entries))
+            self.assertIn("1.0 MB on disk", models_page.my_models_summary(entries))
+
     def test_shared_blobs_remain_and_are_not_reported_as_freed(self):
         with tempfile.TemporaryDirectory() as root:
             folder = lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x"})
@@ -1035,6 +1051,14 @@ class MyModelsPaneTests(unittest.TestCase):
         runtime.MANAGER = self.manager
         models_page.list_cached_models = lambda: list(self.entries)
         models_page.cache_root = lambda: Path("/cache")
+        sizes = mock.patch.object(
+            models_page, "folder_bytes",
+            side_effect=lambda path, **kwargs: next(
+                entry.size_bytes for entry in self.entries if entry.path == path
+            ),
+        )
+        sizes.start()
+        self.addCleanup(sizes.stop)
         self.addCleanup(
             lambda: setattr(runtime, "MANAGER", originals[0])
             or setattr(models_page, "list_cached_models", originals[1])
