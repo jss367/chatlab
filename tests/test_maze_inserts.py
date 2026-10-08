@@ -645,7 +645,8 @@ class ReasoningInterruptionTests(unittest.TestCase):
         manager.reasoning_prefilled = True
         list(stream_episode(episode, manager, single_step=True))
         self.assertTrue(episode.interrupted)
-        self.assertEqual(episode.messages[-2]["content"], "<think>Distracted" + rest)
+        self.assertEqual(episode.messages[-2], {"role": "assistant", "reasoning_content": "Distracted",
+                                                "content": call_text(MAZE.tool_id(), "east")})
         self.assertEqual(episode.position, (0, 2))
 
 

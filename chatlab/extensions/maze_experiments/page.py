@@ -553,7 +553,12 @@ def transport_text(ep):
 def transcript(messages, tools):
     """The messages and the move tool as they were recorded, with no model to spell them."""
     parts = [f"[tool schemas]\n{json.dumps(tools, indent=2)}"]
-    parts += [f"[{message['role']}]\n{message['content']}" for message in messages]
+    for message in messages:
+        # Reasoning the run keeps in a field of its own is shown ahead of the
+        # answer, where the response wrote it.
+        if "reasoning_content" in message:
+            parts.append(f"[{message['role']} reasoning]\n{message['reasoning_content']}")
+        parts.append(f"[{message['role']}]\n{message['content']}")
     return "\n\n".join(parts)
 
 

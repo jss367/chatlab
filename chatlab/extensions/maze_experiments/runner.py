@@ -23,6 +23,8 @@ from uuid import uuid4
 
 from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, close_cell, load_maze,
                            maze_at_turn, validate_drops, validate_pending, validate_updates)
+from .history import (CONTENT as CONTENT_HISTORY, FIELD as HISTORY_FIELD, REASONING_CONTENT, assistant_message,
+                      check_messages, history_form, response_text)
 from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, check_insert, render_insert
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call, unavoidable_cells
 from .team import (DROPPED, FORMAT as TEAM_FORMAT, LEGACY_FORMAT as LEGACY_TEAM_FORMAT, LIMITED, MAX_AGENTS,
@@ -37,6 +39,13 @@ logger = logging.getLogger(__name__)
 
 FORMAT = "chatlab-maze-run-1"
 TERMINAL = {"arrived", "abandoned", "budget", "stopped", "error"}
+# What a saved run says the prompts after its first response were built from.
+TOKENIZER_NOTES = {
+    CONTENT_HISTORY: "Every turn records its actual prompt IDs. Later turns are templated from the complete prior "
+                     "response text, including reasoning.",
+    REASONING_CONTENT: "Every turn records its actual prompt IDs. Later turns are templated from each prior "
+                       "response's reasoning, in reasoning_content, and its answer, in content.",
+}
 # How long after an interruption a first accepted move still counts as recovery.
 # The pilot's window, kept as the default so runs written before it was
 # configurable are read under the window that scored them.
@@ -350,6 +359,11 @@ class Episode:
             self.config = check_team_config(self.config)
         self.config.setdefault("goal_mode", "coordinates")
         self.config.setdefault("goal_hint", "")
+        # A run started here keeps an earlier response's reasoning in the field
+        # templates read it from. A saved run naming no form is given the form
+        # it was written in by its reader, before it gets here.
+        self.config.setdefault(HISTORY_FIELD, REASONING_CONTENT)
+        history_form(self.config)
         # Runs predating editable wording carry no prompt, so they keep the
         # defaults their goal mode sent. An empty string is a deliberate blank.
         if not isinstance(self.config.get("system_prompt"), str):
@@ -567,7 +581,7 @@ class Episode:
             # response's context shifted.
             kind = INSERT_FORMAT if self.config.get("context_inserts") else CHANGING_FORMAT if self.map_changes else FORMAT
             return {"format": kind, "maze": self.maze.to_dict(), "config": self.config,
-                    "exploratory": True, "tokenizer_note": "Every turn records its actual prompt IDs. Later turns are templated from the complete prior response text, including reasoning.",
+                    "exploratory": True, "tokenizer_note": TOKENIZER_NOTES[history_form(self.config)],
                     **{k: getattr(self, k) for k in keys}}
 
     def save(self, directory: Path):
@@ -1465,8 +1479,13 @@ def fork_team(episode, turn_index):
 
 
 def assistant_content(turn):
-    """A response as the history carries it, with the reasoning a template opened for it restored."""
-    return ("<think>" if turn.get("reasoning_prefilled") else "") + turn["text"]
+    """A response's whole text, with the reasoning a template opened for it restored."""
+    return response_text(turn["text"], turn.get("reasoning_prefilled", False))
+
+
+def history_message(episode, turn):
+    """A response as its run's history carries it, in the form the run names. See history.py."""
+    return assistant_message(turn["text"], turn.get("reasoning_prefilled", False), history_form(episode.config))
 
 
 def reply_messages(episode, turn, event):
@@ -1475,7 +1494,7 @@ def reply_messages(episode, turn, event):
     ``episode`` stands where the call left it. Generation and the check of a
     saved run's history both write the pair through here.
     """
-    return [{"role": "assistant", "content": assistant_content(turn)},
+    return [history_message(episode, turn),
             {"role": "tool", "content": json.dumps(episode.model_state(event["error"]), separators=(",", ":"))}]
 
 
@@ -1532,7 +1551,7 @@ def take_action(episode, turn, index):
         turn["outcome"] = "no_call"
         return None
     episode.tool_attempts += 1
-    return dict(agent=turn.get("agent", 0), turn=index, content=content, args=args, error=error)
+    return dict(agent=turn.get("agent", 0), turn=index, args=args, error=error)
 
 
 def resolve_round(episode, actions):
@@ -1586,7 +1605,7 @@ def resolve_round(episode, actions):
         inbox = [{"from": episode.agents[sender]["name"], "text": text}
                  for sender, text in sent if sender != action["agent"]]
         episode.agents[action["agent"]]["messages"].extend([
-            {"role": "assistant", "content": action["content"]},
+            history_message(episode, episode.turns[action["turn"]]),
             {"role": "tool", "content": json.dumps(episode.agent_state(action["agent"], action["event"]["error"], inbox),
                                                    separators=(",", ":"))}])
     episode.rounds += 1
@@ -2207,13 +2226,15 @@ def validate_history(episode):
     Walks the responses in order on a fresh episode of the same scenario,
     landing each closure and each insertion at its own boundary and adding the
     pair each call left, and names the first response whose context disagrees.
+    Each response is written in the history form the run names, so a file
+    whose messages keep their reasoning another way is refused.
     """
     config = copy.deepcopy(episode.config)
-    config.pop("context_inserts")
+    config.pop("context_inserts", None)
     config["map_updates"] = []
     rebuilt = Episode(episode.maze, config)
     updates = episode.config.get("map_updates", [])
-    by_boundary = {insert["before_turn"]: insert for insert in episode.config["context_inserts"]}
+    by_boundary = {insert["before_turn"]: insert for insert in episode.config.get("context_inserts", ())}
     by_turn = {e["turn"]: e for e in episode.events if e["source"] == "model"}
     saved = episode.messages
     if not isinstance(saved, list):
@@ -2273,7 +2294,8 @@ def from_payload(data, read_prompt=None):
         raise ValueError(f"A run whose map changes has to be recorded as {CHANGING_FORMAT}." if not inserted else
                          "A run whose map changes has to record the changing map, with its environment identifier.")
     maze = load_maze(data["maze"]) if changing else Maze.from_dict(data["maze"])
-    result = Episode(maze, data["config"])
+    # A run naming no history form was written before the field, in the one form there was.
+    result = Episode(maze, {HISTORY_FIELD: CONTENT_HISTORY, **data["config"]})
     allowed = result.payload().keys() - {"format", "maze", "config", "exploratory", "tokenizer_note"}
     for key in allowed:
         if key in data:
@@ -2316,8 +2338,15 @@ def from_payload(data, read_prompt=None):
     validate_steering(result)
     validate_checkpoint_closures(result)
     result.position = position
+    if not isinstance(result.messages, list):
+        raise ValueError("A run's messages must be a list.")
+    check_messages(result.messages, history_form(result.config))
     if inserted:
         validate_inserts(result, read_prompt)
+    elif history_form(result.config) == REASONING_CONTENT:
+        # Written since the field was, so every response is checked against
+        # the form it names. A run written before it is read as it always was.
+        validate_history(result)
     # A response that ended before it could be read never finished its round.
     result.rounds = sum(turn.get("finish_reason") in ("stop", "length", "incomplete_stream") for turn in result.turns)
     result.replay_only = True
@@ -2560,6 +2589,8 @@ def team_from_payload(data, read_prompt=None):
     # Taken out of the config and landed again one at a time, where each says
     # it landed, as the live run landed them.
     config = copy.deepcopy(data["config"])
+    # A run naming no history form was written before the field, in the one form there was.
+    config.setdefault(HISTORY_FIELD, CONTENT_HISTORY)
     updates, inserts = config.pop("map_updates", []), config.pop("context_inserts", [])
     drops, pending = data.get("dropped_closures", []), data.get("close_next", [])
     if not all(isinstance(value, list) for value in (updates, inserts, drops, pending)):
@@ -2574,6 +2605,11 @@ def team_from_payload(data, read_prompt=None):
     # once the run says a reader asked for one. It is what lets an agent be
     # interrupted ahead of its own trigger, so it is read before the rounds.
     saved_agents, queued_agents = data.get("agents"), set()
+    # Checked ahead of the replay, which compares every history whole, so a
+    # file keeping its reasoning another way than it says is told so.
+    for recorded in saved_agents if isinstance(saved_agents, list) else ():
+        if isinstance(recorded, dict) and isinstance(recorded.get("messages"), list):
+            check_messages(recorded["messages"], history_form(result.config))
     if not legacy:
         if not isinstance(saved_agents, list) or len(saved_agents) != len(result.agents):
             raise ValueError("The run's agents do not match what its responses produce.")
