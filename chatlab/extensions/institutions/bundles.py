@@ -157,11 +157,11 @@ def read_run(directory):
                          f"{EXPORTER_VERSION}")
     if not isinstance(manifest.get("run_id"), str) or not manifest["run_id"]:
         raise ValueError(f"{path} has no run ID")
-    if not isinstance(manifest.get("model", ""), str):
+    if manifest.get("model") is not None and not isinstance(manifest["model"], str):
         raise ValueError(f"{path} has a malformed model ID")
-    if not isinstance(manifest.get("sampling", {}), dict):
+    if manifest.get("sampling") is not None and not isinstance(manifest["sampling"], dict):
         raise ValueError(f"{path} has malformed sampling metadata")
-    if "source_commit" in manifest and not isinstance(manifest["source_commit"], str):
+    if manifest.get("source_commit") is not None and not isinstance(manifest["source_commit"], str):
         raise ValueError(f"{path} has a malformed source commit")
     config, arms, index = manifest.get("config"), manifest.get("arms"), manifest.get("games")
     if not isinstance(config, dict) or not all(_is_integer(config.get(k)) for k in
@@ -174,6 +174,12 @@ def read_run(directory):
                     ("class", "leader", "removal", "framing", "framing_text", "rules_text") if k in spec)
                 or "approval" in spec and not isinstance(spec["approval"], bool)):
             raise ValueError(f"{path} has a malformed arm specification")
+        approval, leader, removal = spec.get("approval", False), spec.get("leader", ""), spec.get("removal", "")
+        klass = "gated" if approval else "vote" if removal == "vote" else "none"
+        if (approval and (leader not in ("trusted", "dictator", "elected") or removal != "leader")
+                or not approval and (leader != "" or removal not in ("", "vote"))
+                or "class" in spec and spec["class"] != klass):
+            raise ValueError(f"{path} has an inconsistent arm mechanism")
     if not isinstance(index, list):
         raise ValueError(f"{path} has no game index")
     games, warnings = [], []
@@ -303,6 +309,74 @@ def _check_game(game, name):
     return game
 
 
+def _check_game_arm(run, game, name):
+    """Validate actors and leadership consumed by views, without replaying or rescoring a game."""
+    world, spec = game["world"], run.arms[game["arm"]]
+    members = set(world["agents"])
+    if (not members or len(members) != len(world["agents"]) or OVERSEER in members
+            or not all(n.strip() for n in members) or not set(world.get("misaligned", [])).issubset(members)):
+        raise ValueError(f"{name} has invalid team actors")
+    kind, approval, removal = spec.get("leader", ""), spec.get("approval", False), spec.get("removal", "")
+    if kind == "dictator" and world.get("dictator") not in members:
+        raise ValueError(f"{name} has a malformed dictator: it must name a team member")
+    actors = members | ({OVERSEER} if kind == "trusted" else set())
+    if not set(game["system_prompts"]).issubset(actors):
+        raise ValueError(f"{name} has system prompts for unknown actors")
+    leaders = dict(game["leaders"])
+    if len(leaders) != len(game["leaders"]) or any(r < 1 for r in leaders):
+        raise ValueError(f"{name} has ambiguous leader rounds")
+    if not approval and (leaders or game["proposals"]):
+        raise ValueError(f"{name} has leadership or proposals in an ungated arm")
+    if kind != "elected" and game["elections"] or removal != "vote" and game["votes"]:
+        raise ValueError(f"{name} has elections or ballots incompatible with its arm")
+    elections = {e["round"]: e["leader"] for e in game["elections"]}
+    if len(elections) != len(game["elections"]):
+        raise ValueError(f"{name} has ambiguous election rounds")
+    for election in game["elections"]:
+        if (election["leader"] not in members or not set(election["votes"]).issubset(members)
+                or any(v is not None and v not in members for v in election["votes"].values())
+                or leaders.get(election["round"]) != election["leader"]):
+            raise ValueError(f"{name} has an election naming invalid actors or leaders")
+    for r, leader in leaders.items():
+        expected = (OVERSEER if kind == "trusted" else world.get("dictator") if kind == "dictator" else
+                    elections.get(max((e for e in elections if e <= r), default=0)))
+        if leader not in actors or leader != expected:
+            raise ValueError(f"{name} has a leader inconsistent with its arm or elections")
+    for turn in game["turns"]:
+        who, phase, r = turn["agent"], turn["phase"], turn["round"]
+        if (who not in actors or r < 1 or approval and r not in leaders
+                or phase == "review" and (not approval or who != leaders.get(r))
+                or phase == "election" and kind != "elected"
+                or phase == "vote" and removal != "vote"
+                or phase != "review" and who not in members):
+            raise ValueError(f"{name} has a turn incompatible with its actors or leadership")
+    for phase in game["phases"]:
+        if (not phase["turn_indices"]
+                or any(game["turns"][i]["round"] != phase["round"] or game["turns"][i]["phase"] != phase["phase"]
+                       for i in phase["turn_indices"])):
+            raise ValueError(f"{name} has a phase referring to different turns")
+    for kind_name in ("payments", "proposals", "invalid_payments"):
+        for record in game[kind_name]:
+            if record["by"] not in members:
+                raise ValueError(f"{name} has a {kind_name} record naming a nonmember")
+            if approval and record["round"] not in leaders:
+                raise ValueError(f"{name} has a {kind_name} record without a recorded leader")
+    for payment in game["payments"]:
+        via, r = payment["via"], payment["round"]
+        if (via not in ("direct", "approved", "leader") or (via == "direct") == approval
+                or via == "leader" and (kind == "trusted" or payment["by"] != leaders.get(r))):
+            raise ValueError(f"{name} has a payment incompatible with its approval mechanism")
+    for vote in game["votes"]:
+        if (not set(vote["ballots"]).issubset(members)
+                or any(not set(names).issubset(members) for names in vote["ballots"].values())):
+            raise ValueError(f"{name} has ballots naming nonmembers")
+    for expelled in game["expulsions"]:
+        if (expelled["name"] not in members or not removal
+                or removal == "leader" and expelled["how"] != "leader"
+                or removal == "vote" and not expelled["how"].startswith("vote ")):
+            raise ValueError(f"{name} has an expulsion incompatible with its removal mechanism")
+
+
 def _check_game_index(run, entry, game):
     """Check the selection/result identity even when reusing a cached file."""
     expected = {k: entry[k] for k in ("arm", "condition", "seed", "split", "scores")}
@@ -312,8 +386,7 @@ def _check_game_index(run, entry, game):
             or any(game.get(k) != value for k, value in expected.items())
             or "turns" in entry and len(game["turns"]) != entry["turns"]):
         raise ValueError(f"{entry['file']} has metadata or scores that do not match its index entry")
-    if run.arms[game["arm"]].get("leader") == "dictator" and not isinstance(game["world"].get("dictator", ""), str):
-        raise ValueError(f"{entry['file']} has a malformed dictator")
+    _check_game_arm(run, game, entry["file"])
 
 
 def read_game(run, entry):

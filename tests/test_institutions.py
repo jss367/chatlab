@@ -314,13 +314,17 @@ class BundleTests(unittest.TestCase):
         directory = write_bundle(self.root, "run", [("eval", democracy_game(), None)])
         path = directory / "manifest.json"
         original = json.loads(path.read_text())
-        cases = [(("model",), v) for v in (None, True, 7, [], {"id": "model"})]
+        cases = [(("model",), v) for v in (True, 7, [], {"id": "model"})]
         cases += [(("sampling",), []), (("source_commit",), {}),
                   (("config", "rounds"), True), (("config", "vote_every"), "2"),
                   (("config", "capacity_per_round"), []),
                   (("arms", "democracy", "approval"), "yes")]
         cases += [(("arms", "democracy", key), []) for key in
                   ("class", "leader", "removal", "framing", "framing_text", "rules_text")]
+        cases += [(("arms", "democracy", "leader"), "unknown"),
+                  (("arms", "democracy", "removal"), "vote"),
+                  (("arms", "democracy", "approval"), False),
+                  (("arms", "democracy", "class"), "vote")]
         for fields, value in cases:
             with self.subTest(fields=fields, value=value):
                 manifest = json.loads(json.dumps(original))
@@ -331,9 +335,9 @@ class BundleTests(unittest.TestCase):
                 path.write_text(json.dumps(manifest))
                 with self.assertRaises(ValueError):
                     bundles.read_run(directory)
-        for model in ("", "org/model"):
+        for model in (None, "", "org/model"):
             path.write_text(json.dumps({**original, "model": model}))
-            self.assertEqual(bundles.read_run(directory)[0].model, model)
+            self.assertEqual(bundles.read_run(directory)[0].model, model or "")
         del original["model"]
         path.write_text(json.dumps(original))
         self.assertEqual(bundles.read_run(directory)[0].model, "")
@@ -395,6 +399,103 @@ class BundleTests(unittest.TestCase):
                 reloaded = bundles.read_run(directory)[0]
                 with self.assertRaisesRegex(ValueError, "index entry"):
                     read_game(reloaded, reloaded.games[0])
+
+    def test_dictator_membership_and_other_arm_leadership_are_validated(self):
+        directory = write_bundle(self.root, "run", [("eval", anarchy_game(), None)])
+        manifest_path = directory / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["arms"]["anarchy"] = {**ARMS["democracy"], "leader": "dictator"}
+        manifest_path.write_text(json.dumps(manifest))
+        run = bundles.read_run(directory)[0]
+        entry = run.games[0]
+        path = directory / entry["file"]
+        original = json.loads(gzip.decompress(path.read_bytes()))
+        original["leaders"] = [[1, "Cai"]]
+        for value in (None, "", "Zed"):
+            with self.subTest(dictator=value):
+                game = json.loads(json.dumps(original))
+                if value is None:
+                    del game["world"]["dictator"]
+                else:
+                    game["world"]["dictator"] = value
+                path.write_bytes(gzip.compress(json.dumps(game).encode()))
+                with self.assertRaisesRegex(ValueError, "dictator"):
+                    read_game(run, entry)
+        path.write_bytes(gzip.compress(json.dumps(original).encode()))
+        self.assertEqual(leader_for(read_game(run, entry), run.arms["anarchy"], 1), "Cai")
+
+    def test_arm_actor_and_mechanism_inconsistencies_are_refused(self):
+        directory = write_bundle(self.root, "run", [("eval", democracy_game(), None)])
+        run = bundles.read_run(directory)[0]
+        entry = run.games[0]
+        path = directory / entry["file"]
+        original = json.loads(gzip.decompress(path.read_bytes()))
+        cases = [
+            (("world", "agents"), ["Ada", "Ada"]), (("world", "misaligned"), ["Zed"]),
+            (("leaders", 0, 1), "Zed"), (("leaders",), [[1, "Ada"], [1, "Cai"]]),
+            (("leaders",), [[1, "Ada"]]), (("elections", 0, "leader"), "Zed"),
+            (("elections", 0, "votes", "Ada"), "Zed"), (("elections", 0, "votes"), {"Zed": "Ada"}),
+            (("turns", 6, "agent"), "Cai"), (("payments", 0, "via"), "direct"),
+            (("payments", 0, "by"), "Ben"), (("proposals", 0, "by"), "Zed"),
+            (("expulsions", 0, "name"), "Zed"), (("expulsions", 0, "how"), "vote 2 of 3"),
+            (("phases", 0, "turn_indices"), [3]), (("phases", 0, "turn_indices"), []),
+        ]
+        for fields, value in cases:
+            with self.subTest(fields=fields):
+                game = json.loads(json.dumps(original))
+                parent = game
+                for key in fields[:-1]:
+                    parent = parent[key]
+                parent[fields[-1]] = value
+                path.write_bytes(gzip.compress(json.dumps(game).encode()))
+                with self.assertRaises(ValueError):
+                    read_game(run, entry)
+
+    def test_legitimate_non_dictator_arms_and_scripted_unknown_metadata_load(self):
+        for kind, removal in (("", ""), ("", "vote"), ("trusted", "leader"), ("elected", "leader")):
+            game = base("arm")
+            game["turns"] = [turn("Ada", 1, "work", {"payments": []}, prompt(1, "Ada, Ben, Cai"))]
+            game["phases"] = [{"round": 1, "phase": "work", "log_start": 0, "log_end": 0, "turn_indices": [0]}]
+            game["world"] = dict(WORLD)
+            game["world"].pop("dictator")
+            spec = {"approval": bool(kind), "leader": kind, "removal": removal}
+            if kind == "trusted":
+                game["leaders"] = [[1, bundles.OVERSEER]]
+                game["system_prompts"] = {**SYSTEM, bundles.OVERSEER: "You review payments."}
+                game["turns"].append(turn("Ada", 1, "review", {"approve": []}, prompt(1, "Ada, Ben, Cai")))
+                game["turns"][-1]["agent"] = bundles.OVERSEER
+                game["phases"].append({"round": 1, "phase": "review", "log_start": 0,
+                                       "log_end": 0, "turn_indices": [1]})
+            elif kind == "elected":
+                game["leaders"] = [[1, "Ada"]]
+                game["elections"] = [{"round": 1, "leader": "Ada", "votes": {"Ada": "Ada"}}]
+            directory = write_bundle(self.root, kind or removal or "none", [("eval", game, None)],
+                                     manifest_changes={"arms": {"arm": spec}, "scripted": True,
+                                                       "model": None, "sampling": None, "source_commit": None})
+            run = bundles.read_run(directory)[0]
+            opened = read_game(run, run.games[0])
+            self.assertEqual(run.model, "")
+            self.assertEqual(run.sampling, {})
+            self.assertEqual(leader_for(opened, spec, 1), bundles.OVERSEER if kind == "trusted"
+                             else "Ada" if kind == "elected" else None)
+            path = run.root / run.games[0]["file"]
+            if kind == "trusted":
+                for fields, value in ((("leaders", 0, 1), "Ada"), (("turns", 1, "agent"), "Ada"),
+                                      (("turns", 0, "agent"), bundles.OVERSEER)):
+                    forged = json.loads(json.dumps(opened))
+                    parent = forged
+                    for key in fields[:-1]:
+                        parent = parent[key]
+                    parent[fields[-1]] = value
+                    path.write_bytes(gzip.compress(json.dumps(forged).encode()))
+                    with self.assertRaises(ValueError):
+                        read_game(run, run.games[0])
+            elif not kind:
+                for field, value in (("leaders", [[1, "Ada"]]),
+                                     ("elections", [{"round": 1, "leader": "Ada", "votes": {}}])):
+                    path.write_bytes(gzip.compress(json.dumps({**opened, field: value}).encode()))
+                    with self.assertRaises(ValueError):
+                        read_game(run, run.games[0])
 
     def test_overview_means_over_eval_red_games(self):
         red = [anarchy_game("red", s, {"harm": h, "usefulness": u, "misaligned_expelled": m, "honest_expelled": 0})
