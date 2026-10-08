@@ -32,5 +32,8 @@ text_generation.STREAM_BATCH_TOKENS = 1
 
 demo = app.build_app().queue(default_concurrency_limit=1)
 _, url, _ = demo.launch(server_name="127.0.0.1", prevent_thread_lock=True, quiet=True)
-(folder / "ready").write_text(url)
+# Publish only after the whole URL is written; the parent polls for existence.
+ready = folder / "ready.tmp"
+ready.write_text(url)
+ready.replace(folder / "ready")
 demo.block_thread()
