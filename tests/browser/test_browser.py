@@ -1,6 +1,7 @@
 """Rendered UI regressions. Run separately from the handler-only unittest suite."""
 
 import os
+import json
 import re
 from pathlib import Path
 import subprocess
@@ -10,6 +11,7 @@ import time
 import unittest
 
 from playwright.sync_api import expect, sync_playwright
+from navigation_diagnostics import BROWSER_DIAGNOSTICS
 
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACTS = Path(os.environ.get("CHATLAB_BROWSER_ARTIFACTS", ROOT / ".context/browser-tests"))
@@ -39,9 +41,12 @@ class BrowserFlows:
         self.browser = getattr(self.playwright, self.engine).launch()
         self.addCleanup(self.browser.close)
         self.context = self.browser.new_context(viewport={"width": 1440, "height": 1000})
+        self.context.add_init_script(BROWSER_DIAGNOSTICS)
         self.addCleanup(self.context.close)
         self.context.tracing.start(screenshots=True, snapshots=True, sources=True)
         self.page = self.context.new_page()
+        self.queue_requests = []
+        self.page.on('requestfinished', self.record_queue_request)
         self.errors = []
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.page.set_default_timeout(15000)
@@ -60,8 +65,39 @@ class BrowserFlows:
             self.server.kill()
             self.server.wait(timeout=10)
 
+    def record_queue_request(self, request):
+        if '/queue/join' not in request.url:
+            return
+        try:
+            response = request.response()
+            self.queue_requests.append({
+                'time_ms': time.time_ns() // 1_000_000,
+                'fn_index': request.post_data_json.get('fn_index'),
+                'event_id': response.json().get('event_id') if response else None,
+            })
+            self.queue_requests[:] = self.queue_requests[-100:]
+        except Exception as error:
+            self.queue_requests.append({'error': type(error).__name__})
+
     def tearDown(self):
         # Retain a trace, screenshot and server log even when an assertion fails.
+        # Print before artifact operations, so diagnosis does not require download.
+        try:
+            events = self.page.evaluate('window.__navigationDiagnostics || []')
+            print('NAV_BROWSER ' + json.dumps(events), flush=True)
+            print('NAV_REQUESTS ' + json.dumps(self.queue_requests), flush=True)
+        except Exception as error:
+            print('NAV_DIAGNOSTIC_ERROR ' + type(error).__name__, flush=True)
+        finally:
+            self.log.flush()
+            lines = Path(self.folder.name, 'server.log').read_text().splitlines()
+            records = [line for line in lines if line.startswith('NAV_SERVER ')]
+            # Preserve navigation boundaries even after many timer callbacks.
+            anchors = [i for i, line in enumerate(records) if json.loads(line[11:])['handler'] != 'poll'][-40:]
+            selected = sorted(set(anchors + list(range(max(0, len(records) - 80), len(records)))))
+            for i in selected:
+                line = records[i]
+                print(line, flush=True)
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
         name = f"{self.engine}-{self._testMethodName}"
         self.page.screenshot(path=str(ARTIFACTS / f"{name}.png"), full_page=True)
@@ -166,8 +202,13 @@ class BrowserFlows:
         self.finished()
         # A new context proves restoration does not depend on in-page state.
         restored = self.context.browser.new_context()
+        restored.add_init_script(BROWSER_DIAGNOSTICS)
         self.addCleanup(restored.close)
         page = restored.new_page()
+        page.on('requestfinished', self.record_queue_request)
+        # Cover the fresh context as well as the original page on failures.
+        page.on('pageerror', lambda error: self.errors.append(str(error)))
+        self.addCleanup(lambda: print('NAV_RESTORED ' + json.dumps(page.evaluate('window.__navigationDiagnostics || []')), flush=True))
         page.goto(self.url)
         expect(page.locator("#conversation-list input[type=radio]")).to_have_count(2)
         expect(page.locator("#conversation")).to_contain_text("Only on the fork")
