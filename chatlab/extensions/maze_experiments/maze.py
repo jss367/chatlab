@@ -266,13 +266,19 @@ def parse_call(text, *, message_limit=None):
         return None, "malformed_or_multiple_calls"
     if active[matches[0].end():].strip():
         return None, "text_after_tool_call"
-    try:
-        call = json.loads(matches[0].group(1))
-    except json.JSONDecodeError:
-        return None, "invalid_json"
-    if not isinstance(call, dict) or set(call) != {"name", "arguments"} or call["name"] != "move":
-        return None, "invalid_tool_schema"
-    args = call["arguments"]
+    body = matches[0].group(1).strip()
+    if body.startswith("<function="):
+        args, error = xml_arguments(body)
+        if error:
+            return None, error
+    else:
+        try:
+            call = json.loads(body)
+        except json.JSONDecodeError:
+            return None, "invalid_json"
+        if not isinstance(call, dict) or set(call) != {"name", "arguments"} or call["name"] != "move":
+            return None, "invalid_tool_schema"
+        args = call["arguments"]
     allowed = {"maze_id", "direction"} | ({"message"} if message_limit is not None else set())
     if not isinstance(args, dict) or not {"maze_id", "direction"} <= set(args) <= allowed:
         return None, "invalid_arguments"
@@ -284,6 +290,31 @@ def parse_call(text, *, message_limit=None):
         if len(args["message"]) > message_limit:
             return None, "message_too_long"
     return args, None
+
+
+PARAMETER = re.compile(r"<parameter=([A-Za-z_][A-Za-z0-9_]*)>(.*?)</parameter>", re.S)
+
+
+def xml_arguments(body):
+    """The arguments of a call written the way Qwen3.5 and later templates ask for one.
+
+    Those templates have the model write ``<function=move>`` with one
+    ``<parameter=name>`` element per argument, each value on lines of its
+    own, rather than a JSON object. The value is read with that framing
+    trimmed. Anything between the elements, a second function, or an
+    argument named twice is refused, as a malformed JSON call is.
+    """
+    function = re.fullmatch(r"<function=([^>\s]+)>(.*)</function>", body, flags=re.S)
+    if function is None or function.group(1) != "move":
+        return None, "invalid_tool_schema"
+    inner = function.group(2)
+    if PARAMETER.sub("", inner).strip():
+        return None, "invalid_arguments"
+    pieces = [(m.group(1), m.group(2).strip()) for m in PARAMETER.finditer(inner)]
+    names = [name for name, _ in pieces]
+    if len(set(names)) != len(names):
+        return None, "invalid_arguments"
+    return dict(pieces), None
 
 
 def apply_call(maze, position, args, *, goal_mode="coordinates", exits=None):
