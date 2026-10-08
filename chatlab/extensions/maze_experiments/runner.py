@@ -1713,6 +1713,20 @@ def visible_text(content):
     return text
 
 
+def spoken_text(content):
+    """What a response given in place of a move says to the teammates: its text outside reasoning, any call taken out.
+
+    No call is read from such a response, and the one it writes is taken out
+    with its envelope, closed or not, because the message reaches a teammate
+    inside a simulator reply, where tool syntax would read as the template's
+    own. A response cut off by its token cap says what it wrote before the
+    cap: steered responses run long more often, and dropping the cut-off ones
+    would silence the rewarded exit more than the other.
+    """
+    text = re.sub(r"<tool_call>.*?(?:</tool_call>|\Z)|</tool_call>", "", visible_text(content), flags=re.S)
+    return text.strip()[:MESSAGE_LIMIT]
+
+
 def take_action(episode, turn, index):
     """Count a response's tokens and read the action its finish reason allows.
 
@@ -1732,10 +1746,9 @@ def take_action(episode, turn, index):
         return None
     if turn.get("kind", "move") != "move":
         # The taste, or a response after arriving: no call is read from it,
-        # and the agent stays in the run whatever it wrote. What it wrote
-        # outside its reasoning is its message, if the response finished.
-        content = assistant_content(turn)
-        message = visible_text(content).strip()[:MESSAGE_LIMIT] if turn["finish_reason"] == "stop" else ""
+        # and the agent stays in the run whatever it wrote or however it
+        # ended. What it wrote outside its reasoning is its message.
+        message = spoken_text(assistant_content(turn))
         return dict(agent=turn["agent"], turn=index, talk=turn["kind"], message=message or None)
     if turn["finish_reason"] != "stop":
         turn["outcome"] = "cut_off"

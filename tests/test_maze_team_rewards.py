@@ -105,14 +105,33 @@ class RewardRunTests(unittest.TestCase):
         self.assertEqual([t["steered"] for t in ep.turns], [False] * 4 + [True, True])
         from_payload(saved(ep))
 
-    def test_cut_off_response_after_arriving_sends_nothing_and_keeps_the_agent(self):
+    def test_cut_off_response_after_arriving_sends_what_it_wrote_and_keeps_the_agent(self):
         script = list(SCRIPT)
         script[7] = ("x" * 100, list(b"x" * 100))
         ep, _ = run(script)
         self.assertEqual(ep.phase, "arrived")
-        self.assertNotIn("x" * 10, json.dumps(ep.mail))
+        turn = next(t for t in ep.turns if t["kind"] == "arrival" and t["agent"] == 1)
+        self.assertNotEqual(turn["finish_reason"], "stop")
+        sent = next(m for m in ep.mail if m["sender"] == "agent-2" and m.get("after_arrival"))
+        self.assertTrue(sent["text"])
+        self.assertEqual(set(sent["text"]), {"x"})
         self.assertEqual(ep.agents[1]["status"], "arrived")
         from_payload(saved(ep))
+
+    def test_a_call_written_after_arriving_is_taken_out_of_the_message(self):
+        script = list(SCRIPT)
+        script[6] = say("Exit A was quiet.\n" + call("west", maze_id=HALL_ID)[0])
+        script[7] = say("Go east. <tool_call>\n<function=move>")
+        ep, _ = run(script)
+        sent = {m["sender"]: m["text"] for m in ep.mail if m.get("after_arrival") and m["round"] == 3}
+        self.assertEqual(sent, {"agent-1": "Exit A was quiet.", "agent-2": "Go east."})
+        self.assertNotIn("tool_call", json.dumps(ep.mail))
+        from_payload(saved(ep))
+
+    def test_the_default_taste_prompt_names_no_vector(self):
+        ep, _ = run()
+        self.assertNotIn("vector", ep.config["taste_prompt"].lower())
+        self.assertNotIn("activation", ep.config["taste_prompt"].lower())
 
     def test_long_message_after_arriving_is_cut_to_the_limit(self):
         script = list(SCRIPT)
