@@ -294,7 +294,7 @@ def reward_status(ep):
     if config["taste"]:
         parts.append(f"taste at strength {config['taste_strength']:g}" if config.get("steering")
                      else "taste, unsteered")
-    lines = [f"**Exits and rewards:** " + " · ".join(parts), f"**Laps:** {ep.lap} of {config['laps']}"]
+    lines = ["**Exits and rewards:** " + " · ".join(parts), f"**Laps:** {ep.lap} of {config['laps']}"]
     by_agent = {index: [] for index in range(len(ep.agents))}
     for event in ep.events:
         if event["arrived"] and event["source"] == "model":
