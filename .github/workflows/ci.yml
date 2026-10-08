@@ -42,7 +42,7 @@ jobs:
         include:
           - os: ubuntu-latest
             engine: chromium
-          - os: macos-14
+          - os: macos-15
             engine: webkit
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
