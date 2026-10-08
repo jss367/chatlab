@@ -249,8 +249,9 @@ def turn_rows(game, state):
 
 def model_note(context, run):
     recorded = run.model if run else ""
+    basename = recorded.rsplit("/", 1)[-1].strip()
     loaded = context.models.loaded_model_id()
-    if not recorded:
+    if not basename:
         status = f"Loaded: `{loaded}`." if loaded else "No model is loaded."
         detail = ("The bundle does not identify the agents' model." if run else
                   "Select a game to see the recorded model.")
@@ -258,7 +259,7 @@ def model_note(context, run):
     if not loaded:
         return f"No model is loaded. The agents were `{recorded}`. {MLX_NOTE}"
     same = loaded.lower() == recorded.lower()
-    near = loaded.split("/")[-1].lower().startswith(recorded.split("/")[-1].lower())
+    near = loaded.rsplit("/", 1)[-1].lower().startswith(basename.lower())
     if same:
         return f"Loaded: `{loaded}`, the model the agents were."
     if near:

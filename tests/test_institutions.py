@@ -540,6 +540,26 @@ class ReplyTests(unittest.TestCase):
 
 
 class ModelNoteTests(unittest.TestCase):
+    def test_conversion_matching_requires_a_nonempty_normalized_basename(self):
+        cases = [
+            ("org/", "other/model", "does not identify"),
+            ("org///", "other/model", "does not identify"),
+            ("/", "other/model", "does not identify"),
+            ("org/ \t", "other/model", "does not identify"),
+            ("org/model", "org/model", "the model the agents were"),
+            ("/models/org/model", "/models/org/model", "the model the agents were"),
+            ("/models/org/model", "mlx/model-4bit", "a conversion of"),
+            ("model", "mlx/model-4bit", "a conversion of"),
+            ("org//model", "other/another", "another model's"),
+        ]
+        for recorded, loaded, expected in cases:
+            with self.subTest(recorded=recorded, loaded=loaded):
+                context = SimpleNamespace(models=SimpleNamespace(loaded_model_id=lambda: loaded))
+                note = model_note(context, bundles.Run(Path("."), {"model": recorded}, ()))
+                self.assertIn(expected, note)
+                if expected == "does not identify":
+                    self.assertNotIn("conversion", note)
+
     def test_recorded_model_identity_and_unknown_metadata(self):
         cases = [
             ({}, "org/agent-model", "does not identify"),
