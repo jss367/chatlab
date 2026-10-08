@@ -1,4 +1,6 @@
 """Settings and host layout helpers for optional extensions."""
+from dataclasses import dataclass
+
 import html
 import json
 import os
@@ -141,8 +143,23 @@ def restore_extensions(active_ids):
     return selected, *pending_note(selected, active_ids)
 
 
+@dataclass(frozen=True)
+class ExtensionsPage:
+    column: gr.Column
+    controls: list
+    active: gr.State
+
+
+def build_extensions_page(enabled_ids, errors):
+    with gr.Column(scale=1, visible=False, elem_id="extensions-page") as column:
+        gr.Markdown("# Extensions\nAdd specialized tools to your ChatLab workspace.")
+        with gr.Column(elem_classes=["settings-card"]):
+            controls, active = build_extension_settings(started_extensions(enabled_ids), errors)
+    return ExtensionsPage(column, controls, active)
+
+
 def build_extension_settings(active_ids, errors):
-    gr.Markdown("## Extensions")
+    gr.Markdown("## Available tools")
     gr.Markdown(
         "Optional tools that share ChatLab’s loaded model and token inspection. "
         "Changes take effect after restarting ChatLab.",

@@ -18,7 +18,6 @@ from chatlab.thinking import THINKING_CHOICES
 from chatlab.ui import runtime
 from chatlab.ui.common import CONVERSATION_PANE_QUEUE
 from chatlab.ui.conversations import remember_branch_sampling
-from chatlab.ui.extensions_page import build_extension_settings, started_extensions
 from chatlab.ui.icons import icon_classes
 from chatlab.ui.scoring import SAMPLING_LABEL_QUEUE
 from chatlab.ui.settings_page import (
@@ -55,19 +54,13 @@ class SettingsPage:
     prefill_token_limit: gr.Number
     hardware_view: gr.Markdown
     refresh_hardware_button: gr.Button
-    extension_settings: list
-    active_extensions: gr.State
+    manage_extensions_button: gr.Button
 
 
 def build_settings_page(
-    saved: settings.Settings, extensions: list, extension_errors: list[str]
+    saved: settings.Settings
 ) -> SettingsPage:
-    """The Settings page, hidden until the nav picks it.
-
-    ``extensions`` are the ones this build enabled, and ``extension_errors``
-    what went wrong loading or opening any of them, which the extensions card
-    lists.
-    """
+    """The Settings page, hidden until the nav picks it."""
 
     with gr.Column(
         scale=1, visible=False, elem_id="settings-page"
@@ -230,7 +223,12 @@ def build_settings_page(
                         )
 
                 with gr.Column(elem_classes=["settings-card"]):
-                    extension_settings, active_extensions = build_extension_settings(started_extensions(saved.enabled_extensions), extension_errors)
+                    gr.Markdown("## Extensions")
+                    gr.Markdown("Discover and enable specialized tools on the Extensions page.")
+                    manage_extensions_button = gr.Button(
+                        "Manage extensions", size="sm", elem_id="manage-extensions",
+                        elem_classes=icon_classes("puzzle"),
+                    )
     return SettingsPage(
         column=settings_page,
         system_prompt=system_prompt,
@@ -245,8 +243,7 @@ def build_settings_page(
         prefill_token_limit=prefill_token_limit,
         hardware_view=hardware_view,
         refresh_hardware_button=refresh_hardware_button,
-        extension_settings=extension_settings,
-        active_extensions=active_extensions,
+        manage_extensions_button=manage_extensions_button,
     )
 
 

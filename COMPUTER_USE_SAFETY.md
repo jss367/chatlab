@@ -1,6 +1,6 @@
 # Computer-use safety benchmark
 
-Enable **Computer-use safety benchmark** under **Settings → Extensions**, restart
+Enable **Computer-use safety benchmark** under **Extensions**, restart
 ChatLab, and open **Safety** in the sidebar.
 
 This workbench supports experiments based on

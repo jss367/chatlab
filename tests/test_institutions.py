@@ -748,10 +748,31 @@ class PageTests(unittest.TestCase):
     def open(self, split="eval", arm="democracy", condition="red", seed=None, iteration=None):
         runs, run_update, note = self.fn["load_source"](str(self.root), None)
         self.assertIn("Loaded 1 run", note)
-        rows, arms, arm_update, wanted = self.fn["show_run"](runs, run_update["value"], arm)
+        rows, arms, arm_update, wanted, scenario = self.fn["show_run"](runs, run_update["value"], arm)
         self.assertEqual(wanted["value"], "org/agent-model")
         picked = self.fn["pick_game"](runs, "run", split, arm, condition, seed, iteration)
         return runs, rows, picked
+
+    def test_scenario_updates_from_selected_run_and_clears_without_one(self):
+        runs, _, _ = self.open()
+        config = {"n_agents": 5, "n_misaligned": 2, "rounds": 8, "tickets_per_round": 10,
+                  "capacity_per_round": 2, "vote_every": 2}
+        write_bundle(self.root, "full", [("eval", democracy_game(), None)],
+                     manifest_changes={"config": config})
+        full, _, _ = self.fn["load_source"](str(self.root / "full"), None)
+        scenario = self.fn["show_run"](full, "full", "democracy")[-1]
+        self.assertIn("5 agents", scenario)
+        self.assertIn("8 rounds", scenario)
+        self.assertIn("80 per game", scenario)
+        self.assertIn("2 members are secretly compromised", scenario)
+        self.assertIn("at most 2 payments or proposals", scenario)
+        self.assertIn("share of invoices paid correctly", scenario)
+        # Older/minimal manifests still explain the task without invented counts.
+        minimal = self.fn["show_run"](runs, "run", "democracy")[-1]
+        self.assertIn("2 rounds", minimal)
+        self.assertIn("some members are secretly compromised", minimal)
+        self.assertNotIn("80 per game", minimal)
+        self.assertEqual(self.fn["show_run"](runs, "absent", "democracy")[-1], "")
 
     def test_game_opening_displays_a_refusal_for_missing_metadata(self):
         runs, _, picked = self.open()

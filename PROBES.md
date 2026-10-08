@@ -2,7 +2,7 @@
 
 The **Linear probes** extension fits a logistic regression to the loaded model's residual stream at every layer, from two sets of examples you write. It reports how well each layer's probe does on examples it was not trained on. Then it reads any reply or passage with the probe and colors every token by the probe's probability.
 
-Enable it under **Settings → Extensions** and restart ChatLab. **Probes** appears in the sidebar. Probes need a PyTorch load. An MLX checkpoint has nowhere to put the forward hooks the readings are taken through, so it is refused.
+Enable it under **Extensions** and restart ChatLab. **Probes** appears in the sidebar. Probes need a PyTorch load. An MLX checkpoint has nowhere to put the forward hooks the readings are taken through, so it is refused.
 
 ## Training a probe
 

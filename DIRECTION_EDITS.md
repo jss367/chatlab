@@ -7,7 +7,7 @@ The **Direction edits** extension edits the loaded model's residual stream along
 3. Watch whether later blocks rebuild the detector's signal.
 4. Measure whether a target word's lens probability under different instructions changes.
 
-Enable it under **Settings → Extensions** and restart ChatLab. **Edits** appears in the sidebar. The edits are forward hooks on the decoder blocks, so the extension needs a PyTorch load at full precision. An MLX checkpoint has nowhere to put the hooks, and 8-bit and 4-bit loads are refused as well, so load the model's unquantized Transformers version.
+Enable it under **Extensions** and restart ChatLab. **Edits** appears in the sidebar. The edits are forward hooks on the decoder blocks, so the extension needs a PyTorch load at full precision. An MLX checkpoint has nowhere to put the hooks, and 8-bit and 4-bit loads are refused as well, so load the model's unquantized Transformers version.
 
 ## The passage and its conditions
 

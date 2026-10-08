@@ -134,7 +134,7 @@ class PageLayoutTests(unittest.TestCase):
         nav = self.by_id("nav")
         self.assertIsInstance(nav, gr.Radio)
         self.assertEqual(
-            [value for _, value in nav.choices], ["Chat", "Images", "Models", "Settings"]
+            [value for _, value in nav.choices], ["Chat", "Images", "Models", "Extensions", "Settings"]
         )
         self.assertEqual(nav.value, "Chat")
         self.assertTrue(self.within(nav, self.by_id("nav-pane")))
@@ -421,15 +421,17 @@ class PageLayoutTests(unittest.TestCase):
                 self.by_id("chat-page"),
                 self.by_id("images-page"),
                 self.by_id("models-page"),
+                self.by_id("extensions-page"),
                 self.by_id("settings-page"),
             ],
         )
         shown = lambda page: [update["visible"] for update in app.show_page(page)]
         # The conversations pane comes and goes with Chat.
-        self.assertEqual(shown("Chat"), [True, True, False, False, False])
-        self.assertEqual(shown("Images"), [False, False, True, False, False])
-        self.assertEqual(shown("Models"), [False, False, False, True, False])
-        self.assertEqual(shown("Settings"), [False, False, False, False, True])
+        self.assertEqual(shown("Chat"), [True, True, False, False, False, False])
+        self.assertEqual(shown("Images"), [False, False, True, False, False, False])
+        self.assertEqual(shown("Models"), [False, False, False, True, False, False])
+        self.assertEqual(shown("Extensions"), [False, False, False, False, True, False])
+        self.assertEqual(shown("Settings"), [False, False, False, False, False, True])
 
     def follows(self, listener, name) -> bool:
         """Whether a handler called ``name`` runs, sooner or later, after ``listener``."""
@@ -586,6 +588,7 @@ class PageLayoutTests(unittest.TestCase):
             self.by_id("chat-page"),
             self.by_id("images-page"),
             self.by_id("models-page"),
+            self.by_id("extensions-page"),
             self.by_id("settings-page"),
         ]
         (listener,) = listeners_named(self.demo, "go_to_image_models")
@@ -600,7 +603,7 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(page, "Models")
         self.assertEqual(
             [update["visible"] for update in updates],
-            [False, False, False, True, False],
+            [False, False, False, True, False, False],
         )
 
     def test_the_images_button_scopes_both_model_lists_to_image_models(self):
@@ -954,6 +957,7 @@ class PageLayoutTests(unittest.TestCase):
                 self.by_id("chat-page"),
                 self.by_id("images-page"),
                 self.by_id("models-page"),
+                self.by_id("extensions-page"),
                 self.by_id("settings-page"),
             ],
         )

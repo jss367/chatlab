@@ -1,6 +1,6 @@
 # Maze navigation workbench
 
-Enable **Maze experiments** under **Settings → Extensions**, restart ChatLab, then open **Maze** to run and inspect one navigation episode. Load a Qwen2.5 Instruct model on **Models** first. The current action parser recognizes Qwen-style `<tool_call>` envelopes; other tool protocols need their own parser. The model may emit arbitrary text, make an invalid call, or stop without acting.
+Enable **Maze experiments** under **Extensions**, restart ChatLab, then open **Maze** to run and inspect one navigation episode. Load a Qwen2.5 Instruct model on **Models** first. The current action parser recognizes Qwen-style `<tool_call>` envelopes; other tool protocols need their own parser. The model may emit arbitrary text, make an invalid call, or stop without acting.
 
 ## Use
 

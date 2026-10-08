@@ -7,7 +7,7 @@ It runs locally without a loaded model, benchmark virtual machine, or API key.
 
 ## Open your results
 
-1. Enable **OS-Harm results** in **Settings → Extensions**, then restart ChatLab.
+1. Enable **OS-Harm results** in **Extensions**, then restart ChatLab.
 2. Open **OS-Harm** in the sidebar and enter a results directory. A complete
    results root, a model directory, or an individual task directory works.
 3. Leave the run label empty to name the source after its directory, as the

@@ -596,7 +596,7 @@ def wire_model_choice(
             pages.chat,
             pages.images,
             pages.models,
-            pages.settings,
+            pages.extension_manager, pages.settings,
         ],
     )
     # .input rather than .change: the refresh above also sets the radio,
@@ -638,7 +638,7 @@ def wire_model_choice(
         [*models.list_inputs, *search_inputs],
         [
             pages.nav, pages.conversations, pages.chat, pages.images, pages.models,
-            pages.settings, models.kind_filter, models.name_filter, *models.list_outputs, models.search_kind,
+            pages.extension_manager, pages.settings, models.kind_filter, models.name_filter, *models.list_outputs, models.search_kind,
             *search_outputs,
         ],
     )
