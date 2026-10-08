@@ -136,6 +136,25 @@ class RewardRunTests(unittest.TestCase):
         self.assertFalse(any(t["steered"] for t in ep.turns))
         self.assertEqual(manager.checked, [])
 
+    def test_a_vector_with_no_reward_exit_and_no_steered_taste_is_not_checked(self):
+        # The vector steers only after arriving at the reward exit, so with none
+        # and no taste at a strength of its own, a load that refuses it can run.
+        for changes in (dict(taste=False), dict(taste_strength=0.0)):
+            with self.subTest(**changes):
+                script = SCRIPT if changes.get("taste", True) else SCRIPT[2:]
+                ep = team_episode(HALL, REWARD | dict(reward_exit=None) | changes)
+                manager = SteeringManager(list(script), refuse="This load cannot steer.")
+                list(stream_episode(ep, manager))
+                self.assertEqual(ep.phase, "arrived", ep.detail)
+                self.assertEqual(manager.checked, [])
+                self.assertFalse(any(t["steered"] for t in ep.turns))
+                self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        ep = team_episode(HALL, REWARD | dict(reward_exit=None))
+        manager = SteeringManager(list(SCRIPT), refuse="This load cannot steer.")
+        with self.assertRaisesRegex(Exception, "cannot steer"):
+            list(stream_episode(ep, manager))
+        self.assertEqual(ep.turns, [])
+
     def test_run_details_name_the_responses_the_run_steers(self):
         def details(**changes):
             return team_status(run(**changes)[0]).split("**Exits and rewards:** ", 1)[1].split("\n", 1)[0]
@@ -204,6 +223,8 @@ class RewardRunTests(unittest.TestCase):
         self.assertEqual(ep.agent_tokens()[1], budget)
         self.assertEqual(ep.agents[1]["status"], "out_of_tokens")
         self.assertEqual(ep.agents[1]["position"], (0, 4))
+        # It stays at the exit its last lap ended at, and records that exit.
+        self.assertEqual(ep.agents[1]["exit"], "B")
         self.assertFalse(any(t["agent"] == 1 for t in ep.turns[8:]))
         self.assertFalse(any(m["role"] == "user" and m["content"].startswith("Lap 2")
                              for m in ep.agents[1]["messages"]))

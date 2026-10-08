@@ -293,10 +293,17 @@ def steering_active(config):
 
 
 def steering_used(config):
-    """Whether any response of the run can be steered: at the vector's strength, or a taste at its own."""
+    """Whether any response of the run can be steered: at the vector's strength, or a taste at its own.
+
+    A run with exits and rewards steers at the vector's strength only after
+    arriving at its reward exit, so without one the vector steers no more
+    than the taste does. Decided as Episode.steers_next decides each response.
+    """
     vector = config.get("steering")
-    return steering_active(config) or bool(vector and vector.get("enabled", True) and config.get("taste")
-                                           and config.get("taste_strength"))
+    if "agents" not in config or not rewarded(config):
+        return steering_active(config)
+    return bool((config.get("reward_exit") is not None and steering_active(config))
+                or (vector and vector.get("enabled", True) and config.get("taste") and config.get("taste_strength")))
 
 
 def steered_at(config, start, index, position, moves):
@@ -518,7 +525,7 @@ class Episode:
             agent = new_agent(name, position, messages)
             if self.rewarded:
                 # What an agent of a run with exits and rewards also has: the
-                # exit it reached this lap, the responses it still owes in
+                # exit it reached in its last lap, the responses it still owes in
                 # place of a move and why, the messages waiting for its next
                 # reply from the simulator, and the task, held back while it
                 # answers the taste that comes before it.
@@ -1922,7 +1929,8 @@ def start_lap(episode):
     """Bring every agent a limit has not stopped back to the start, telling each that the next lap begins.
 
     An agent that arrived on the last of its tokens or calls has none for the
-    new lap, so it stops there with the limit it reached instead.
+    new lap, so it stops there with the limit it reached instead, keeping the
+    exit its last lap ended at.
     """
     episode.lap_rounds.append(episode.rounds)
     spent = episode.agent_tokens()
@@ -1931,7 +1939,7 @@ def start_lap(episode):
             continue
         limit = spent_limit(episode, index, spent)
         if limit:
-            agent.update(status=limit, exit=None)
+            agent["status"] = limit
             continue
         agent.update(position=tuple(episode.maze.start), status="active", exit=None)
         inbox, agent["inbox"] = agent["inbox"], []
