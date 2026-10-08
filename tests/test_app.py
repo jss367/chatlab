@@ -1893,7 +1893,7 @@ class DefaultModelSelectionTests(unittest.TestCase):
                 self.assertEqual(page, app.MODELS_PAGE)
                 self.assertEqual(
                     [update["visible"] for update in panes],
-                    [False, False, False, True, False],
+                    [False, False, False, True, False, False],
                 )
                 self.assertEqual(manager.model_id, "org/new-choice")
                 self.assertTrue(manager.loaded)

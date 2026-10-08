@@ -45,6 +45,9 @@ class BrowserFlows:
         self.errors = []
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.page.set_default_timeout(15000)
+        # Assertions have a separate timeout; queued restoration on CI can
+        # outlast their five-second default even when page actions succeed.
+        expect.set_options(timeout=15000)
         self.page.goto(self.url)
         expect(self.page.locator("#conversation-list input[type=radio]")).to_have_count(1)
         expect(self.page.get_by_role("button", name="Send", exact=True)).to_be_visible()
