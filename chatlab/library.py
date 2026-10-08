@@ -2,8 +2,11 @@
 
 Every branch in the conversations pane - the main conversation, its forks and
 the chats started beside it - is written to one JSON file as it changes and
-read back when the page next loads, so a browser reload, an app restart or a
-crash loses nothing that was said. The file holds the whole pane: the name of
+read back when the page next loads. Streaming frames are coalesced by
+``library_writer`` every 500 ms, with explicit flushes at completion,
+cancellation and orderly shutdown. An abrupt crash can lose that interval
+plus write/scheduling time of streamed output under healthy storage; failed
+or stalled storage can extend it. The file holds the whole pane: the name of
 the active branch and the turns of every branch, in the order the pane lists
 them, each with when it last changed. It is written whole and swapped into
 place, so a crash mid-write leaves the previous copy rather than half of a

@@ -22,6 +22,9 @@ if args.remote:
     def stop() -> None:
         # Exits from the watching thread without waiting on the others: a
         # generation or a load in flight belongs to a window that is gone.
+        from chatlab import library_writer
+
+        library_writer.shutdown()
         logging.shutdown()
         os._exit(0)
 
@@ -55,4 +58,9 @@ api.attach(demo.app, current_manager)
 if args.remote:
 
     print(f"{remote.READY_MARKER}{local_url}", flush=True)
-demo.block_thread()
+try:
+    demo.block_thread()
+finally:
+    from chatlab import library_writer
+
+    library_writer.shutdown()

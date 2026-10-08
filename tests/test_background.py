@@ -12,6 +12,7 @@ from gradio.state_holder import SessionState
 
 from chatlab import app
 from chatlab import library
+from chatlab import library_writer
 import settings_sandbox
 from chatlab.ui import conversations
 from chatlab.conversation import ARCHIVED_VIEW, MAIN_BRANCH, make_turn, new_forks, put_branch
@@ -590,6 +591,46 @@ class BackgroundConversationTests(unittest.TestCase):
 
 
 class BackgroundSnapshotTests(unittest.TestCase):
+    def test_publish_enqueues_only_owned_branch_without_disk_io(self):
+        job = ConversationJob()
+        job.owner = MAIN_BRANCH
+        job.saved = new_forks()
+        put_branch(job.saved, "Chat 1", [make_turn("user", "unrelated")])
+        with mock.patch.object(library_writer, "submit") as submit, mock.patch.object(
+            library, "write", side_effect=AssertionError("Disk write on generation thread")
+        ):
+            job._publish({"turns": [make_turn("assistant", "partial")]})
+        self.assertEqual(set(submit.call_args.args[1]["branches"]), {MAIN_BRANCH})
+        self.assertEqual(submit.call_args.args[1]["branches"][MAIN_BRANCH][0]["content"], "partial")
+
+    def test_final_flush_runs_outside_job_lock_and_keeps_run_owned_until_saved(self):
+        job = ConversationJob()
+        job.owner = MAIN_BRANCH
+        job.saved = new_forks()
+        job.running = True
+        entered, release = threading.Event(), threading.Event()
+
+        def flush(receipt):
+            entered.set()
+            return release.wait(5)
+
+        with mock.patch.object(library_writer, "submit"), mock.patch.object(library_writer, "flush", flush):
+            job._publish({"turns": [make_turn("assistant", "partial")]})
+            worker = threading.Thread(target=job._finish)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(job.lock.acquire(timeout=1))
+                try:
+                    self.assertTrue(job.running)
+                finally:
+                    job.lock.release()
+            finally:
+                release.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertFalse(job.running)
+
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):
         class ImmutableMetric(dict):
             def __deepcopy__(self, memo):
@@ -607,7 +648,7 @@ class BackgroundSnapshotTests(unittest.TestCase):
         job = ConversationJob()
         job.owner = MAIN_BRANCH
         job.saved = new_forks()
-        with mock.patch.object(library, "write"):
+        with mock.patch.object(library_writer, "submit"):
             job._publish(frame)
         # The producer can reuse its lists without altering a published frame.
         turns[0]["content"] = "changed"
