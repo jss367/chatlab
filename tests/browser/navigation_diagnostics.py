@@ -52,8 +52,25 @@ def instrument(demo, emit=print):
         fn.fn = wrap()
 
 
-# Observe a clone of the fixture's queue stream. The app consumes the original.
-# Bound the number and size of records; do not store session IDs or request data.
+def instrument_queue(demo, emit=print):
+    """Observe messages handed to Gradio without touching browser streams."""
+    original = demo._queue.send_message
+
+    def traced(event, message):
+        result = original(event, message)
+        if event.alive and event.fn.name in WATCHED and message.msg.value in {'process_starts', 'process_completed', 'unexpected_error'}:
+            emit('NAV_QUEUE ' + json.dumps({
+                'event_id': event._id, 'handler': event.fn.name,
+                'time_ns': time.time_ns(), 'msg': message.msg.value,
+                'success': getattr(message, 'success', None),
+                'output': [brief(v) for v in getattr(message, 'output', {}).get('data', [])][:8],
+            }), flush=True)
+        return result
+
+    demo._queue.send_message = traced
+
+
+# DOM observation only: leave fetch, response bodies and cancellation untouched.
 BROWSER_DIAGNOSTICS = r"""
 (() => {
   const events = [];
@@ -62,39 +79,6 @@ BROWSER_DIAGNOSTICS = r"""
     if (events.length > 160) events.shift();
   };
   window.__navigationDiagnostics = events;
-  const realFetch = window.fetch;
-  window.fetch = async (...args) => {
-    const response = await realFetch(...args);
-    const url = String(args[0]?.url || args[0]);
-    if (!url.includes('/queue/data')) return response;
-    const reader = response.clone().body?.getReader();
-    if (!reader) return response;
-    (async () => {
-      const decoder = new TextDecoder();
-      let pending = '';
-      try {
-        while (true) {
-          const {value, done} = await reader.read();
-          if (done) break;
-          pending += decoder.decode(value, {stream: true});
-          let newline;
-          while ((newline = pending.indexOf('\n')) >= 0) {
-            const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
-            if (!line.startsWith('data:')) continue;
-            try {
-              const data = JSON.parse(line.slice(5));
-              if (!['process_completed', 'process_starts', 'unexpected_error'].includes(data.msg)) continue;
-              note('queue', {msg: data.msg, event_id: data.event_id, success: data.success,
-                output: JSON.stringify(data.output?.data ?? []).slice(0, 500)});
-            } catch (_) { /* Ignore unrelated stream lines. */ }
-          }
-          if (pending.length > 65536) { note('parser_overflow'); break; }
-        }
-      } catch (error) { note('queue_read_error', {error: String(error).slice(0, 200)}); }
-      finally { reader.cancel().catch(() => {}); }
-    })();
-    return response;
-  };
   const observe = () => {
     let previous = '';
     const sample = () => {

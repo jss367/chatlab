@@ -48,7 +48,8 @@ class BrowserFlows:
         self.queue_requests = []
         self.page.on('requestfinished', self.record_queue_request)
         self.errors = []
-        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        self.error_events = []
+        self.page.on("pageerror", lambda error: self.record_page_error('original', error))
         self.page.set_default_timeout(15000)
         # Assertions have a separate timeout; queued restoration on CI can
         # outlast their five-second default even when page actions succeed.
@@ -79,6 +80,12 @@ class BrowserFlows:
         except Exception as error:
             self.queue_requests.append({'error': type(error).__name__})
 
+    def record_page_error(self, context, error):
+        # Retain every error in the original assertion; timestamps add evidence.
+        self.errors.append(str(error))
+        self.error_events.append({'context': context, 'time_ms': time.time_ns() // 1_000_000,
+                                  'error': str(error)})
+
     def tearDown(self):
         # Retain a trace, screenshot and server log even when an assertion fails.
         # Print before artifact operations, so diagnosis does not require download.
@@ -86,6 +93,7 @@ class BrowserFlows:
             events = self.page.evaluate('window.__navigationDiagnostics || []')
             print('NAV_BROWSER ' + json.dumps(events), flush=True)
             print('NAV_REQUESTS ' + json.dumps(self.queue_requests), flush=True)
+            print('NAV_ERRORS ' + json.dumps(self.error_events), flush=True)
         except Exception as error:
             print('NAV_DIAGNOSTIC_ERROR ' + type(error).__name__, flush=True)
         finally:
@@ -98,6 +106,11 @@ class BrowserFlows:
             for i in selected:
                 line = records[i]
                 print(line, flush=True)
+            queue_records = [line for line in lines if line.startswith('NAV_QUEUE ')]
+            anchors = [i for i, line in enumerate(queue_records) if json.loads(line[10:])['handler'] != 'poll'][-40:]
+            selected = sorted(set(anchors + list(range(max(0, len(queue_records) - 80), len(queue_records)))))
+            for i in selected:
+                print(queue_records[i], flush=True)
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
         name = f"{self.engine}-{self._testMethodName}"
         self.page.screenshot(path=str(ARTIFACTS / f"{name}.png"), full_page=True)
@@ -207,7 +220,7 @@ class BrowserFlows:
         page = restored.new_page()
         page.on('requestfinished', self.record_queue_request)
         # Cover the fresh context as well as the original page on failures.
-        page.on('pageerror', lambda error: self.errors.append(str(error)))
+        page.on('pageerror', lambda error: self.record_page_error('restored', error))
         self.addCleanup(lambda: print('NAV_RESTORED ' + json.dumps(page.evaluate('window.__navigationDiagnostics || []')), flush=True))
         page.goto(self.url)
         expect(page.locator("#conversation-list input[type=radio]")).to_have_count(2)

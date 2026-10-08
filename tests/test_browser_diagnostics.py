@@ -1,12 +1,15 @@
 """Exercise fixture telemetry without a server, browser, or native inference."""
 import json
+import asyncio
 import shutil
 import subprocess
 import unittest
 from types import SimpleNamespace
 from unittest import mock
+import gradio as gr
+from gradio.server_messages import ProcessCompletedMessage
 
-from browser.navigation_diagnostics import BROWSER_DIAGNOSTICS, brief, instrument
+from browser.navigation_diagnostics import BROWSER_DIAGNOSTICS, brief, instrument, instrument_queue
 
 
 class NavigationDiagnosticsTests(unittest.TestCase):
@@ -39,38 +42,51 @@ class NavigationDiagnosticsTests(unittest.TestCase):
         self.assertEqual(brief({'__type__': 'update'}), {'skip': True})
         self.assertEqual(len(brief(['x' * 1000])['text']), 240)
 
-    def test_queue_parser_handles_chunk_boundaries_and_bounds_dom_history(self):
+    def test_queue_observer_preserves_message_delivery_and_reports_event_id(self):
+        original = mock.Mock(return_value='delivered')
+        queue = SimpleNamespace(send_message=original)
+        emit = mock.Mock()
+        instrument_queue(SimpleNamespace(_queue=queue), emit)
+        event = SimpleNamespace(alive=True, _id='synthetic-event', fn=SimpleNamespace(name='new_conversation'))
+        message = SimpleNamespace(msg=SimpleNamespace(value='process_completed'), success=True, output={'data': [[]]})
+        self.assertEqual(queue.send_message(event, message), 'delivered')
+        original.assert_called_once_with(event, message)
+        record = json.loads(emit.call_args.args[0].removeprefix('NAV_QUEUE '))
+        self.assertEqual(record['event_id'], 'synthetic-event')
+        self.assertEqual(record['output'][0]['count'], 0)
+
+    def test_dom_observer_preserves_fetch_and_bounds_history(self):
         node = shutil.which('node')
         if node is None:
             self.skipTest('Node is unavailable for fixture script verification')
         harness = r"""
 const assert = require('assert');
 let sample, text = 'Original conversation';
-global.window = {};
+const fetch = () => {throw new Error('DOM telemetry must never fetch');};
+global.window = {fetch};
 global.document = {readyState: 'complete', body: {},
   querySelector: () => ({innerText: text}), querySelectorAll: () => [{checked: true}, {checked: false}]};
 global.MutationObserver = class {constructor(fn) {sample = fn;} observe() {}};
-const chunks = ['data: {"msg":"process_sta', 'rts","event_id":"e1"}\n',
- 'data: {"msg":"process_completed","event_id":"e1","success":true,"output":{"data":[[]]}}\n'];
-let offset = 0;
-const original = {clone: () => ({body: {getReader: () => ({
- read: async () => offset < chunks.length ? {value: new TextEncoder().encode(chunks[offset++]), done: false} : {done: true},
- cancel: async () => {}
-})}})};
-window.fetch = async () => original;
 """
         checks = r"""
-(async () => {
- assert.strictEqual(await window.fetch('/gradio_api/queue/data?session_hash=hidden'), original);
- await new Promise(resolve => setImmediate(resolve));
- const queues = window.__navigationDiagnostics.filter(x => x.kind === 'queue');
- assert.strictEqual(queues.length, 2);
- assert.strictEqual(queues[1].event_id, 'e1');
- assert.strictEqual(queues[1].output, '[[]]');
- assert(!JSON.stringify(queues).includes('hidden'));
- for (let i=0; i<200; i++) {text = String(i); sample();}
- assert.strictEqual(window.__navigationDiagnostics.length, 160);
- assert.strictEqual(window.__navigationDiagnostics.at(-1).selected, 0);
-})().catch(error => {console.error(error); process.exitCode = 1;});
+assert.strictEqual(window.fetch, fetch);
+for (let i=0; i<200; i++) {text = String(i); sample();}
+assert.strictEqual(window.__navigationDiagnostics.length, 160);
+assert.strictEqual(window.__navigationDiagnostics.at(-1).selected, 0);
+assert.strictEqual(window.__navigationDiagnostics.at(-1).transcript, '199');
 """
         subprocess.run([node, '-e', harness + BROWSER_DIAGNOSTICS + checks], check=True, capture_output=True, text=True)
+
+    def test_real_gradio_queue_message_is_enqueued_unchanged(self):
+        demo = gr.Blocks().queue()
+        messages = asyncio.Queue()
+        demo._queue.pending_messages_per_session['synthetic'] = messages
+        event = SimpleNamespace(alive=True, _id='synthetic-event', session_hash='synthetic',
+                                fn=SimpleNamespace(name='new_conversation'))
+        message = ProcessCompletedMessage(output={'data': [[]]}, success=True)
+        emit = mock.Mock()
+        instrument_queue(demo, emit)
+        demo._queue.send_message(event, message)
+        self.assertIs(messages.get_nowait(), message)
+        self.assertEqual(message.event_id, 'synthetic-event')
+        self.assertEqual(json.loads(emit.call_args.args[0].removeprefix('NAV_QUEUE '))['success'], True)

@@ -17,7 +17,7 @@ os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 from chatlab import app, text_generation  # noqa: E402
 from chatlab.ui import runtime  # noqa: E402
 from fakes import loaded_manager, FakeModel, PIECES, EOS_ID  # noqa: E402
-from navigation_diagnostics import instrument  # noqa: E402
+from navigation_diagnostics import instrument, instrument_queue  # noqa: E402
 
 
 class SlowModel(FakeModel):
@@ -33,6 +33,7 @@ text_generation.STREAM_BATCH_TOKENS = 1
 
 demo = app.build_app().queue(default_concurrency_limit=1)
 instrument(demo)
+instrument_queue(demo)
 _, url, _ = demo.launch(server_name="127.0.0.1", prevent_thread_lock=True, quiet=True)
 # Publish only after the whole URL is written; the parent polls for existence.
 ready = folder / "ready.tmp"
