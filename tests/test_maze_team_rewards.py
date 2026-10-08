@@ -145,6 +145,28 @@ class RewardRunTests(unittest.TestCase):
         self.assertEqual([a["status"] for a in ep.agents], ["arrived", "arrived"])
         self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
 
+    def test_every_response_joins_the_history_in_the_form_the_run_names(self):
+        # Moves, the taste and the responses after arriving, each with a reasoning block.
+        script = [say("<think>Weighing it.</think>" + text) for text, _ in SCRIPT]
+        for form in ("reasoning_content", "content"):
+            with self.subTest(form):
+                ep, _ = run(script, reasoning_history=form)
+                self.assertEqual(ep.phase, "arrived", ep.detail)
+                responses = [m for m in ep.agents[1]["messages"] if m["role"] == "assistant"]
+                self.assertEqual(len(responses), 7)
+                if form == "reasoning_content":
+                    self.assertEqual(responses[0], {"role": "assistant", "reasoning_content": "Weighing it.",
+                                                    "content": "I feel bright."})
+                    self.assertTrue(responses[1]["content"].startswith("<tool_call>"))
+                    self.assertEqual(responses[3]["content"], "Exit B felt wonderful. Come east.")
+                    self.assertTrue(all(m["reasoning_content"] == "Weighing it." for m in responses))
+                else:
+                    self.assertTrue(all(set(m) == {"role", "content"}
+                                        and m["content"].startswith("<think>Weighing it.</think>") for m in responses))
+                self.assertEqual([m["text"] for m in ep.mail[1:3]],
+                                 ["Exit A was quiet.", "Exit B felt wonderful. Come east."])
+                self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+
     def test_configurations_no_run_could_use_are_refused(self):
         cases = {
             "at least one": dict(arrival_responses=0),
