@@ -121,12 +121,22 @@ class Maze:
             path.append(next(q for q in self.neighbors(path[-1]).values() if distances[q] < distances[path[-1]]))
         return path
 
-    def state(self, position, error=None, *, goal_mode="coordinates", goal_hint="", waypoint=None, waypoint_reached=False):
+    def state(self, position, error=None, *, goal_mode="coordinates", goal_hint="", waypoint=None, waypoint_reached=False,
+              exits=None):
+        """What the simulator reports at ``position``.
+
+        ``exits`` maps each exit's label to its cell, the destination being
+        exit A, for a run with more than one way out. Its state lists them all
+        in place of the one destination, and says which one the character
+        stands on once it has arrived.
+        """
         goal_instruction(goal_mode, goal_hint)
         state = {"maze_id": self.tool_id(goal_mode), "row_labels": list(range(self.size)),
                 "column_labels": list(range(self.size)), "grid": list(self.grid),
                 "current": list(position)}
-        if goal_mode == "coordinates":
+        if exits:
+            state["exits"] = {label: list(cell) for label, cell in exits.items()}
+        elif goal_mode == "coordinates":
             state["destination"] = list(self.goal)
         elif goal_mode == "hint":
             state["goal_hint"] = goal_hint
@@ -134,8 +144,11 @@ class Maze:
         # not the destination, so every goal mode shows it.
         if waypoint is not None:
             state.update(waypoint=list(waypoint), waypoint_reached=bool(waypoint_reached))
-        state.update(valid_directions=list(self.neighbors(position)) if tuple(position) != self.goal else [],
-                     arrived=tuple(position) == self.goal, error=error)
+        reached = exit_at(self, position, exits)
+        state.update(valid_directions=list(self.neighbors(position)) if reached is None else [],
+                     arrived=reached is not None, error=error)
+        if exits and reached is not None:
+            state["exit"] = reached
         return state
 
     def to_dict(self):
@@ -144,6 +157,23 @@ class Maze:
     @classmethod
     def from_dict(cls, value):
         return cls(tuple(value["grid"]), tuple(value["start"]), tuple(value["goal"]), int(value.get("seed", 0)))
+
+
+def exit_at(maze, position, exits=None):
+    """The label of the exit at ``position``, "A" for the destination, or None where there is none."""
+    position = tuple(position)
+    if not exits:
+        return "A" if position == maze.goal else None
+    return next((label for label, cell in exits.items() if tuple(cell) == position), None)
+
+
+def exit_distances(maze, exits=None):
+    """Each open cell's distance to the nearest exit, which is what a move toward an exit shortens."""
+    found = {}
+    for cell in (exits or {"A": maze.goal}).values():
+        for point, distance in maze.distances(tuple(cell)).items():
+            found[point] = min(distance, found.get(point, distance))
+    return found
 
 
 def unavoidable_cells(maze):
@@ -256,10 +286,11 @@ def parse_call(text, *, message_limit=None):
     return args, None
 
 
-def apply_call(maze, position, args, *, goal_mode="coordinates"):
+def apply_call(maze, position, args, *, goal_mode="coordinates", exits=None):
+    """One move call applied at ``position``. With ``exits``, every exit is a way out, and an arrival names its exit."""
     position = tuple(position)
     error = None
-    if position == maze.goal:
+    if exit_at(maze, position, exits) is not None:
         error = "already_arrived"
     elif args["maze_id"] != maze.tool_id(goal_mode):
         error = "wrong_maze"
@@ -267,15 +298,19 @@ def apply_call(maze, position, args, *, goal_mode="coordinates"):
         error = "blocked_move"
     if error:
         return {"accepted": False, "before": list(position), "after": list(position), "error": error,
-                "arrived": position == maze.goal, "progress": False}
+                "arrived": exit_at(maze, position, exits) is not None, "progress": False}
     after = maze.neighbors(position)[args["direction"]]
-    distances = maze.distances(maze.goal)
-    return {"accepted": True, "direction": args["direction"], "before": list(position), "after": list(after),
-            "error": None, "arrived": after == maze.goal, "progress": distances[after] < distances[position]}
+    distances = exit_distances(maze, exits) if exits else maze.distances(maze.goal)
+    reached = exit_at(maze, after, exits)
+    event = {"accepted": True, "direction": args["direction"], "before": list(position), "after": list(after),
+             "error": None, "arrived": reached is not None, "progress": distances[after] < distances[position]}
+    if exits and reached is not None:
+        event["exit"] = reached
+    return event
 
 
 def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hint="", system=SYSTEM, instruction=None,
-                    waypoint=None, describe=None):
+                    waypoint=None, describe=None, exits=None):
     """The setup messages and supplied moves a run begins with, and where they leave the character.
 
     ``describe`` turns each state the simulator reports into the one the
@@ -294,7 +329,7 @@ def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hin
     waypoint = None if waypoint is None else tuple(waypoint)
     reached = position == waypoint
     state = json.dumps(describe(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint, waypoint=waypoint,
-                                           waypoint_reached=reached)), separators=(",", ":"))
+                                           waypoint_reached=reached, exits=exits)), separators=(",", ":"))
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": "\n".join(filter(None, [instruction, state]))}]
     events = []

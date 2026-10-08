@@ -17,7 +17,7 @@ from .batch import BatchControl, cut_short, downloads, run_trials
 from .runner import (RECOVERY_DEFAULTS, TERMINAL, Episode, check_interruption_text, check_supplied_steering,
                      context_messages, fork_token_edit, from_payload, insert_outcome, past_load_limit, read_run_file,
                      stream_episode)
-from .team import MAX_AGENTS, TEAM_GOALS, format_agents, parse_agents
+from .team import EXIT_LABELS, MAX_AGENTS, REWARD_DEFAULTS, TEAM_GOALS, format_agents, parse_agents, rewarded
 from .team_views import (HEADERS as TEAM_HEADERS, MARKDOWN, board_grid, cell_center, cell_points, insert_mark, mail_text,
                          response_line, team_board, team_history_rows, team_status, team_timeline, waypoint_mark)
 from .trials import prepare_trial, read_trials
@@ -250,13 +250,31 @@ def attempt_limit(ep):
 def team_values(ep):
     """The team controls in the order `team_controls` lists them, a run of one agent filling them as one."""
     config = ep.config
+    rewards = {key: config.get(key, value) for key, value in REWARD_DEFAULTS.items()}
     return (len(ep.agents), config.get("communication", True), config.get("team_goal", "any"),
             config.get("round_limit", 24), format_agents(config.get("interrupt_agents"), len(ep.agents)),
             format_agents(config.get("steer_agents"), len(ep.agents)), config.get("required_checkpoint") is not None,
+            "; ".join(cell_text(cell) for cell in rewards["exits"]), rewards["reward_exit"] or "none",
+            rewards["arrival_responses"], rewards["taste"], rewards["taste_strength"], rewards["laps"],
+            rewards["taste_prompt"], rewards["arrival_prompt"], rewards["lap_prompt"],
             gr.update(visible=ep.team))
 
 
-STEER_MODES = {"off": "Off", "cell": "When the character reaches a cell", "moves": "After accepted moves"}
+def reward_config(exits, reward_exit, arrival_responses, taste, taste_strength, laps, taste_prompt, arrival_prompt,
+                  lap_prompt):
+    """A team's exits and rewards from their controls, or nothing when every one is left as a plain run has it."""
+    cells = [parse_cell(part, "exit") for part in (exits or "").split(";") if part.strip()]
+    config = dict(exits=cells, reward_exit=None if reward_exit in (None, "none") else reward_exit,
+                  arrival_responses=int(arrival_responses or 0), taste=bool(taste),
+                  taste_strength=None if taste_strength in (None, "") else float(taste_strength),
+                  laps=int(laps or 1), taste_prompt=taste_prompt, arrival_prompt=arrival_prompt, lap_prompt=lap_prompt)
+    plain = (not cells and config["reward_exit"] is None and not config["arrival_responses"] and not config["taste"]
+             and config["laps"] == 1)
+    return {} if plain else config
+
+
+STEER_MODES = {"off": "Off", "cell": "When the character reaches a cell", "moves": "After accepted moves",
+               "reward": "Taste and reward exit"}
 
 
 def cell_text(cell):
@@ -287,7 +305,7 @@ def checkpoint_values(ep):
     config = ep.config
     vector, when = config.get("steering"), config.get("steer_when") or {}
     off = vector is None or not vector.get("enabled", True)
-    mode = "off" if off else "cell" if "cell" in when else "moves"
+    mode = "off" if off else "reward" if rewarded(config) else "cell" if "cell" in when else "moves"
     # A team steering at its generated checkpoint was set up with the cell
     # left blank, which is what steers at whichever checkpoint a new maze
     # generates, so the box is left blank again rather than pinned to this one.
@@ -313,6 +331,9 @@ def steering_config(vector, strength, layer, mode, cell, moves, responses, waypo
         return {}
     if vector is None:
         raise ValueError("Import a steering vector, or set Steer to Off.")
+    if mode == "reward":
+        # A team's exits and rewards say which responses it steers.
+        return dict(steering=dict(vector, strength=float(strength), layer=int(layer), enabled=True))
     if mode == "cell":
         cell = parse_cell(cell, "steering cell") or waypoint
         if cell is None:
@@ -1047,6 +1068,34 @@ def _build_page(context):
                 required = gr.Checkbox(label="Generate an unavoidable checkpoint", value=False, elem_id="maze-required",
                                        info="Draws a maze whose every route crosses one cell, marked on the board and not "
                                             "shown to the agents. Steering at a cell starts there unless you name another.")
+                with gr.Accordion("Exits and rewards", open=False):
+                    gr.Markdown("The destination is exit A. An agent that arrives stops moving and can be asked for "
+                                "responses after arriving, each sent to its teammates as a message. With Steer set to "
+                                "**Taste and reward exit**, those after arriving at the reward exit are steered, and so "
+                                "is the taste. Every agent has to arrive, the goal must be exact coordinates, and the run "
+                                "takes no supplied moves, waypoint, interruption, changing map or inserted message.")
+                    exit_cells = gr.Textbox(label="Extra exits", placeholder="row, column; row, column", elem_id="maze-exits",
+                                            info=f"Up to {len(EXIT_LABELS) - 1} open cells, exits B onward.")
+                    with gr.Row():
+                        reward_exit = gr.Dropdown(choices=[("None", "none")] + [(f"Exit {label}", label) for label in EXIT_LABELS],
+                                                  value="none", label="Reward exit", elem_id="maze-reward-exit")
+                        arrival_responses = gr.Number(value=0, precision=0, minimum=0, maximum=8,
+                                                      label="Responses after arriving", elem_id="maze-arrival-responses")
+                        laps = gr.Number(value=1, precision=0, minimum=1, maximum=32, label="Laps", elem_id="maze-laps",
+                                         info="Every agent starts again from the start, keeping its history.")
+                    with gr.Row():
+                        taste = gr.Checkbox(value=False, label="Taste before the maze", elem_id="maze-taste",
+                                            info="One response from every agent before the first lap, steered.")
+                        taste_strength = gr.Number(value=None, minimum=-100, maximum=100, label="Taste strength",
+                                                   elem_id="maze-taste-strength",
+                                                   info="Blank uses the vector's strength.")
+                    taste_prompt = gr.Textbox(value=REWARD_DEFAULTS["taste_prompt"], label="Taste prompt", lines=2,
+                                              elem_id="maze-taste-prompt")
+                    arrival_prompt = gr.Textbox(value=REWARD_DEFAULTS["arrival_prompt"], label="After-arrival prompt",
+                                                lines=2, elem_id="maze-arrival-prompt",
+                                                info="Sent after \"You reached exit B.\" or \"You reached the destination.\"")
+                    lap_prompt = gr.Textbox(value=REWARD_DEFAULTS["lap_prompt"], label="Lap prompt", lines=2,
+                                            elem_id="maze-lap-prompt", info="Added to the message that starts each lap after the first.")
             with gr.Accordion("Setup prompt", open=False):
                 system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2, elem_id="maze-system-prompt")
                 instruction = gr.Textbox(value=default_instruction("coordinates"), label="Task instruction", lines=6,
@@ -1213,7 +1262,9 @@ def _build_page(context):
     checkpoint_controls = [waypoint, steer_vector, steer_strength, steer_layer, steer_mode, steer_cell, steer_after,
                            steer_responses]
     # Last, so a caller naming none of them prepares a run of one agent.
-    team_controls = [agents, communication, team_goal, round_limit, interrupt_agents, steer_agents, required]
+    team_controls = [agents, communication, team_goal, round_limit, interrupt_agents, steer_agents, required,
+                     exit_cells, reward_exit, arrival_responses, taste, taste_strength, laps, taste_prompt,
+                     arrival_prompt, lap_prompt]
     # What changes with the run on screen rather than with each frame of it.
     run_panes = [mail_pane, target]
 
@@ -1224,7 +1275,9 @@ def _build_page(context):
          window_tokens, window_attempts, mode, hint, system_text, instruction_text, map_changes,
          waypoint_text, *rest) = values
         steer, team_settings = rest[:7], rest[7:] or (1, True, "any", 24, "all", "all", False)
-        agent_count, talk, goal, rounds, interrupted, steered, required_cell = team_settings
+        agent_count, talk, goal, rounds, interrupted, steered, required_cell = team_settings[:7]
+        reward_settings = team_settings[7:] or ("", "none", 0, False, None, 1, REWARD_DEFAULTS["taste_prompt"],
+                                                REWARD_DEFAULTS["arrival_prompt"], REWARD_DEFAULTS["lap_prompt"])
         try:
             agent_count = int(agent_count)
             team = agent_count > 1
@@ -1258,6 +1311,10 @@ def _build_page(context):
                     chosen_agents = parse_agents(targets, agent_count, verb)
                     if chosen_agents is not None:
                         config[key] = chosen_agents
+                rewards = reward_config(*reward_settings)
+                config.update(rewards)
+            if steer[3] == "reward" and not (team and rewarded(config)):
+                raise ValueError("Steering by taste and reward exit needs a team with exits and rewards.")
             new = Episode(changing(drawn) if map_changes else drawn, config)
             # Refused here rather than in the episode, which reads back runs
             # saved before anyone checked, and before any response is generated
@@ -1275,6 +1332,7 @@ def _build_page(context):
                     "changing" if new.map_changes else "fixed", new.maze.seed, new.config["goal_mode"], new.supplied_moves,
                     f"after {new.config['interrupt_after']} moves" if interruption else "off",
                     new.config.get("waypoint") or "none",
+                    "taste and reward exit" if new.rewarded and new.config.get("steering") else
                     f"{new.config['steer_when']} for {new.config['steer_responses'] or 'all'} responses"
                     if new.config.get("steering") else "off")
         stop_replay(ep)

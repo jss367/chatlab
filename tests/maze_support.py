@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from chatlab.extension_api import ModelService, SteeringError
 from chatlab.extensions.maze_experiments.maze import Maze
+from chatlab.extensions.maze_experiments.team import REWARD_DEFAULTS
 from chatlab.model_loading import LoadedModel
 from chatlab.model_runtime import GENERATING
 from chatlab.token_metrics import unscored_metric
@@ -170,7 +171,10 @@ SCENARIO = dict(size=5, seed=7, distance=8, openness=.7, supplied=0, interrupt_a
                 system_prompt="Be brief.", instruction="Deliver the solution.", changing=False,
                 waypoint="", vector=None, strength=1.0, layer=0, steer="off", steer_cell="", steer_after=3,
                 steer_responses=1, agents=1, communication=True, team_goal="any", round_limit=24,
-                interrupt_agents="all", steer_agents="all", required=False)
+                interrupt_agents="all", steer_agents="all", required=False, exits="", reward_exit="none",
+                arrival_responses=0, taste=False, taste_strength=None, laps=1,
+                taste_prompt=REWARD_DEFAULTS["taste_prompt"], arrival_prompt=REWARD_DEFAULTS["arrival_prompt"],
+                lap_prompt="")
 
 
 def scenario(**changes):

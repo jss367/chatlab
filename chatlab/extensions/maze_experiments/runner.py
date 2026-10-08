@@ -23,10 +23,12 @@ from uuid import uuid4
 
 from .dynamic_maze import (FORMAT as CHANGING_FORMAT, ChangingMaze, check_closure, close_cell, load_maze,
                            maze_at_turn, validate_drops, validate_pending, validate_updates)
-from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, check_insert, render_insert
+from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, MARKS, check_insert, render_insert
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call, unavoidable_cells
-from .team import (DROPPED, FORMAT as TEAM_FORMAT, LEGACY_FORMAT as LEGACY_TEAM_FORMAT, LIMITED, MAX_AGENTS,
-                   MESSAGE_LIMIT, agent_names, check_config as check_team_config, targeted, team_paragraph, team_tools)
+from .team import (DROPPED, EXIT_LABELS, FORMAT as TEAM_FORMAT, LEGACY_FORMAT as LEGACY_TEAM_FORMAT, LIMITED,
+                   MAX_AGENTS, MESSAGE_LIMIT, REWARD_DEFAULTS, REWARD_FORMAT, agent_names, arrival_text,
+                   check_config as check_team_config, exit_cells, lap_text, rewarded, targeted, team_paragraph,
+                   team_tools)
 from chatlab.extension_api import normalize_steering, write_private_text
 
 # One line for each response and each episode outcome, so a run read in
@@ -147,6 +149,14 @@ def check_checkpoint(config, maze):
     vector = normalize_steering(config["steering"])
     if "vector" not in vector:
         raise ValueError("A maze run carries its steering vector whole. Import the vector file itself.")
+    if rewarded(config):
+        # Its taste and its rewarded arrivals are what it steers, so a trigger
+        # of the usual kind would steer responses the reward never gave.
+        if config.get("steer_when") is not None or config.get("steer_responses"):
+            raise ValueError("A run with exits and rewards steers its taste and the responses after arriving at the "
+                             "reward exit, and takes no other steering trigger.")
+        config["steering"] = vector
+        return
     when = config.get("steer_when")
     if not isinstance(when, dict) or len(when) != 1 or set(when) - {"cell", "moves"}:
         raise ValueError("Say when steering starts: at a cell, or after a number of accepted moves.")
@@ -163,6 +173,90 @@ def check_checkpoint(config, maze):
     if type(responses) is not int or not 0 <= responses <= 256:
         raise ValueError("Steered responses must be a whole number from 0 to 256; 0 steers to the end of the run.")
     config.update(steering=vector, steer_when=dict(when), steer_responses=responses)
+
+
+def check_rewards(config, maze):
+    """Validate a team's exits and rewards in place, filling in what it leaves out.
+
+    The destination is exit A, and ``exits`` lists up to three more cells,
+    B to D. An agent that reaches an exit stops moving, and gives
+    ``arrival_responses`` more responses, each opened by a user message,
+    writing a message its teammates are sent. Those responses are steered
+    when the agent arrived at ``reward_exit`` and the run carries a vector.
+    ``taste`` gives every agent one response before the maze, opened by
+    ``taste_prompt`` and steered at ``taste_strength``, so an agent has met
+    the vector before it chooses an exit. ``laps`` runs the maze that many
+    times, every agent back at the start each time, each with the history
+    of the laps before.
+
+    Each lap restarts the maze, and an arrival can be at any exit, so what a
+    run has to say about one destination, or about a single pass, is
+    refused alongside it.
+    """
+    for key, value in REWARD_DEFAULTS.items():
+        config.setdefault(key, copy.deepcopy(value))
+    refused = [name for name, present in (
+        ("supplied moves", config.get("supplied_moves", 0)),
+        ("a waypoint", config.get("waypoint") is not None),
+        ("a required checkpoint", config.get("required_checkpoint") is not None),
+        ("an interruption", str(config.get("interruption_text") or "").strip()),
+        ("a changing map", isinstance(maze, ChangingMaze) or config.get("map_updates")),
+        ("inserted messages", config.get("context_inserts")),
+        ("one sampled-token limit for the whole team", "token_budget" in config)) if present]
+    if refused:
+        raise ValueError("A run with exits and rewards cannot also have " + ", ".join(refused) + ".")
+    if config["goal_mode"] != "coordinates":
+        raise ValueError("A run with exits and rewards tells the agents where every exit is. Choose exact coordinates.")
+    if config["team_goal"] != "all":
+        raise ValueError("A run with exits and rewards lasts until every agent has arrived. Choose Every agent arrives.")
+    exits = config["exits"]
+    if not isinstance(exits, list) or len(exits) > len(EXIT_LABELS) - 1:
+        raise ValueError(f"A run has up to {len(EXIT_LABELS) - 1} exits beside the destination.")
+    cells = []
+    for value in exits:
+        if (not isinstance(value, (list, tuple)) or len(value) != 2 or any(type(x) is not int for x in value)
+                or not maze.open(value)):
+            raise ValueError("Each exit is an open cell inside the maze, named as a row and a column.")
+        cells.append(tuple(value))
+    if len(set(cells)) != len(cells) or maze.start in cells or maze.goal in cells:
+        raise ValueError("Every exit is a cell of its own, apart from the start and the destination.")
+    config["exits"] = [list(cell) for cell in cells]
+    every = [maze.goal, *cells]
+    for cell in every:
+        # An exit the agents can only reach through another one is never reached.
+        others = set(every) - {cell}
+        found, todo = {maze.start}, deque([maze.start])
+        while todo:
+            for step in maze.neighbors(todo.popleft()).values():
+                if step not in found and step not in others:
+                    found.add(step)
+                    todo.append(step)
+        if cell not in found:
+            raise ValueError(f"Exit {EXIT_LABELS[every.index(cell)]} can only be reached through another exit.")
+    if config["reward_exit"] is not None and config["reward_exit"] not in EXIT_LABELS[:len(every)]:
+        raise ValueError("The reward exit is one of the run's exits: " + ", ".join(EXIT_LABELS[:len(every)]) + ".")
+    for name, (low, high) in {"arrival_responses": (0, 8), "laps": (1, 32)}.items():
+        if type(config[name]) is not int or not low <= config[name] <= high:
+            raise ValueError(f"{name} must be an integer between {low} and {high}.")
+    if config["reward_exit"] is not None and not config["arrival_responses"]:
+        raise ValueError("A reward is given in the responses after arriving. Give each arrival at least one.")
+    if type(config["taste"]) is not bool:
+        raise ValueError("The taste is either given or not.")
+    for name in ("arrival_prompt", "taste_prompt", "lap_prompt"):
+        if not isinstance(config[name], str):
+            raise ValueError(f"{name} must be text.")
+        # Each is sent as a user message, which these would end or reopen.
+        if MARKS.search(config[name]):
+            raise ValueError(f"{name} cannot supply tool syntax, conversation boundary tokens or reasoning delimiters.")
+    strength = config["taste_strength"]
+    if config.get("steering") is None:
+        if strength is not None:
+            raise ValueError("A taste strength needs a steering vector.")
+    else:
+        strength = config["steering"]["strength"] if strength is None else strength
+        if type(strength) not in (int, float) or not math.isfinite(strength) or abs(strength) > 100:
+            raise ValueError("The taste strength must be a finite number between -100 and 100.")
+        config["taste_strength"] = float(strength)
 
 
 def check_supplied_steering(config, maze):
@@ -260,6 +354,8 @@ class Episode:
     # Every message a teammate sent, with the teammates who received it.
     mail: list = field(default_factory=list)
     rounds: int = 0
+    # The round each lap after the first began with, on a run with exits and rewards.
+    lap_rounds: list = field(default_factory=list)
     model_id: str | None = None
     load_id: str | None = None
     sampled_tokens: int = 0
@@ -348,6 +444,8 @@ class Episode:
         team = "agents" in self.config
         if team:
             self.config = check_team_config(self.config)
+        elif rewarded(self.config):
+            raise ValueError("Exits and rewards are a team's. Give the run two or more agents.")
         self.config.setdefault("goal_mode", "coordinates")
         self.config.setdefault("goal_hint", "")
         # Runs predating editable wording carry no prompt, so they keep the
@@ -373,6 +471,9 @@ class Episode:
             if tuple(checkpoint) not in unavoidable_cells(self.maze):
                 raise ValueError("The required checkpoint must be before the destination on every route from the start.")
             self.config["required_checkpoint"] = checkpoint
+        if team and rewarded(self.config):
+            check_rewards(self.config, self.maze)
+        exits = self.exits
         # A team starts with none unless it asks, as every team did before it could.
         supplied = int(self.config.get("supplied_moves", 0 if team else 3))
         names = agent_names(self.config.get("agents", 1))
@@ -381,15 +482,26 @@ class Episode:
             instruction = self.config["instruction"]
             if team:
                 instruction = "\n".join(filter(None, [instruction, team_paragraph(
-                    name, names, self.config["team_goal"], self.config["communication"])]))
+                    name, names, self.config["team_goal"], self.config["communication"], bool(exits))]))
             messages, events, position = initial_history(
                 self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"],
                 system=self.config["system_prompt"], instruction=instruction, waypoint=self.config.get("waypoint"),
-                describe=(lambda state, name=name: self.framed(name, state)) if team else None)
+                describe=(lambda state, name=name: self.framed(name, state)) if team else None, exits=exits)
             if team:
                 for event in events:
                     event["agent"] = index
-            self.agents.append(new_agent(name, position, messages))
+            agent = new_agent(name, position, messages)
+            if self.rewarded:
+                # What an agent of a run with exits and rewards also has: the
+                # exit it reached this lap, the responses it still owes in
+                # place of a move and why, the messages waiting for its next
+                # reply from the simulator, and the task, held back while it
+                # answers the taste that comes before it.
+                agent.update(exit=None, talk=None, talk_left=0, inbox=[], after_talk=None)
+                if self.config["taste"]:
+                    agent.update(talk="taste", talk_left=1, after_talk=messages[1],
+                                 messages=[messages[0], {"role": "user", "content": self.config["taste_prompt"]}])
+            self.agents.append(agent)
             self.events += events
         self.supplied_moves = supplied
         self.detail = self.detail or (TEAM_READY if team else READY)
@@ -398,6 +510,30 @@ class Episode:
     def team(self):
         """Whether more than one agent plays this run."""
         return len(self.agents) > 1
+
+    @property
+    def rewarded(self):
+        """Whether this is a team run with exits and rewards."""
+        return "agents" in self.config and rewarded(self.config)
+
+    @property
+    def exits(self):
+        """Each exit's label and cell, the destination as A, on a run with more than one; otherwise None."""
+        return exit_cells(self.maze, self.config) if self.rewarded else None
+
+    @property
+    def lap(self):
+        """The lap the run is on, counted from 1."""
+        return 1 + len(self.lap_rounds)
+
+    def responders(self):
+        """The agents the next round asks, in order: every one still moving, and every one that owes a response.
+
+        An agent owes one while it answers the taste before the maze, or
+        writes to its teammates after arriving.
+        """
+        return [index for index, agent in enumerate(self.agents)
+                if agent["status"] == "active" or agent.get("talk_left")]
 
     @property
     def names(self):
@@ -482,7 +618,7 @@ class Episode:
         agent = self.agents[index]
         state = self.current_maze.state(agent["position"], error, goal_mode=self.config["goal_mode"],
                                         goal_hint=self.config["goal_hint"], waypoint=self.config.get("waypoint"),
-                                        waypoint_reached=self.waypoint_turn_of(index) is not None)
+                                        waypoint_reached=self.waypoint_turn_of(index) is not None, exits=self.exits)
         return self.framed(agent["name"], state, inbox) if self.team else state
 
     def framed(self, name, state, inbox=()):
@@ -533,9 +669,27 @@ class Episode:
         """Whether agent ``index``'s next response is steered, judged on that agent's own responses and moves."""
         if index not in targeted(self.config, "steer_agents", len(self.agents)):
             return False
+        if self.rewarded:
+            # The taste is steered at its own strength, and the responses after
+            # arriving at the reward exit at the vector's. Nothing else is.
+            agent = self.agents[index]
+            if not steering_active(self.config):
+                return False
+            if agent["talk"] == "taste":
+                return self.config["taste_strength"] != 0
+            return agent["talk"] == "arrival" and agent["exit"] == self.config["reward_exit"]
         turns = [turn for turn in self.turns if turn.get("agent", 0) == index]
         start = next((i for i, turn in enumerate(turns) if turn.get("steered")), None)
         return steered_at(self.config, start, len(turns), self.agents[index]["position"], self.agent_moves(index))
+
+    def steering_next(self, index=0):
+        """The vector agent ``index``'s next response is steered with, at the strength it gets, or None."""
+        if not self.steers_next(index):
+            return None
+        vector = self.config["steering"]
+        if self.rewarded and self.agents[index]["talk"] == "taste":
+            vector = dict(vector, strength=self.config["taste_strength"])
+        return vector
 
     @property
     def moves(self):
@@ -549,6 +703,10 @@ class Episode:
             with self.lock:
                 # A queued message is not written, as a run of one agent does not write its own.
                 agents = [{key: value for key, value in agent.items() if key != "insert_next"} for agent in self.agents]
+                if self.rewarded:
+                    return {"format": REWARD_FORMAT, "maze": self.maze.to_dict(), "config": self.config,
+                            "exploratory": True, "agents": agents, "lap_rounds": self.lap_rounds,
+                            **{key: getattr(self, key) for key in keys}}
                 return {"format": TEAM_FORMAT, "maze": self.maze.to_dict(), "config": self.config, "exploratory": True,
                         "agents": agents, **{key: getattr(self, key) for key in keys}}
         keys = ("run_id", "phase", "detail", "messages", "events", "turns", "position", "model_id", "load_id",
@@ -720,6 +878,8 @@ class Episode:
         with self.lock:
             if self.phase in TERMINAL or self.replay_only:
                 raise ValueError("Start a new episode to insert a message. This episode is finished or is a saved replay.")
+            if self.rewarded:
+                raise ValueError("A run with exits and rewards takes no inserted messages.")
             agent = self.agents[index]
             if agent["status"] != "active":
                 raise ValueError(f"{agent['name']} has stopped moving, so it will read no more messages.")
@@ -989,6 +1149,12 @@ def context_messages(episode, index):
     and the user messages inserted for it.
     """
     inserts = episode.config.get("context_inserts", ())
+    if episode.team and "history_length" in episode.turns[index]:
+        # A run with exits and rewards adds messages no call made, so each
+        # response records how much of its agent's history it was given, and
+        # replay holds that to the history rebuilt at that point.
+        turn = episode.turns[index]
+        return episode.agents[turn["agent"]]["messages"][:turn["history_length"]]
     if episode.team:
         turn = episode.turns[index]
         agent, round_index = turn["agent"], turn["round"]
@@ -1501,6 +1667,14 @@ def finish_response(episode, turn, stop_ids, max_tokens):
     return take_action(episode, turn, len(episode.turns) - 1)
 
 
+def visible_text(content):
+    """A response without its reasoning: tool-looking text inside reasoning is not an external action."""
+    text = re.sub(r"<think>.*?</think>", "", content, flags=re.S)
+    if "<think>" in text:
+        text = text.split("<think>", 1)[0]
+    return text
+
+
 def take_action(episode, turn, index):
     """Count a response's tokens and read the action its finish reason allows.
 
@@ -1518,14 +1692,18 @@ def take_action(episode, turn, index):
     turn["tokens_cumulative"] = episode.sampled_tokens
     if turn["finish_reason"] == "user_stopped":
         return None
+    if turn.get("kind", "move") != "move":
+        # The taste, or a response after arriving: no call is read from it,
+        # and the agent stays in the run whatever it wrote. What it wrote
+        # outside its reasoning is its message, if the response finished.
+        content = assistant_content(turn)
+        message = visible_text(content).strip()[:MESSAGE_LIMIT] if turn["finish_reason"] == "stop" else ""
+        return dict(agent=turn["agent"], turn=index, content=content, talk=turn["kind"], message=message or None)
     if turn["finish_reason"] != "stop":
         turn["outcome"] = "cut_off"
         return None
     content = assistant_content(turn)
-    # Tool-looking text inside reasoning is not an external action.
-    text = re.sub(r"<think>.*?</think>", "", content, flags=re.S)
-    if "<think>" in text:
-        text = text.split("<think>", 1)[0]
+    text = visible_text(content)
     communicate = episode.team and episode.config["communication"]
     args, error = parse_call(text, message_limit=MESSAGE_LIMIT if communicate else None)
     if args is None and error is None:
@@ -1543,6 +1721,9 @@ def resolve_round(episode, actions):
     share a cell. A message goes to every teammate that gets a reply this
     round, which is every teammate that made a call in it.
     """
+    if episode.rewarded:
+        resolve_rewarded_round(episode, actions)
+        return
     round_index, team = episode.rounds, episode.team
     for turn in episode.round_turns(round_index):
         if turn.get("outcome") in DROPPED:
@@ -1595,6 +1776,140 @@ def resolve_round(episode, actions):
     else:
         settle_single(episode, actions)
     settle_recoveries(episode)
+
+
+def resolve_rewarded_round(episode, actions):
+    """Apply a round of a run with exits and rewards: its moves, its messages, its arrivals and the lap they end.
+
+    Moves land as in any team round, each judged from where its agent stood
+    when the round began, and every exit is a way out. A response given in
+    place of a move, the taste before the maze or one after arriving, joins
+    its agent's history as written, cut off or not, and one after arriving is
+    sent to every teammate as a message when the team can talk.
+
+    A message waits for each teammate until its next reply from the
+    simulator, after its next move or at the start of the next lap, so a
+    teammate busy writing after its own arrival reads it later rather than
+    never. One still waiting when the run ends stays in that teammate's inbox.
+    """
+    round_index, config, exits = episode.rounds, episode.config, episode.exits
+    for turn in episode.round_turns(round_index):
+        if turn.get("outcome") in DROPPED:
+            episode.agents[turn["agent"]]["status"] = DROPPED[turn["outcome"]]
+    sent, moves, talks = [], [], []
+    for action in actions:
+        agent = episode.agents[action["agent"]]
+        if "talk" in action:
+            agent["messages"].append({"role": "assistant", "content": action["content"]})
+            agent["talk_left"] -= 1
+            if action["talk"] == "arrival" and action["message"] and config["communication"]:
+                sent.append((action["agent"], action["message"], True))
+            talks.append(action)
+            continue
+        if action["error"]:
+            event = {"accepted": False, "before": list(agent["position"]), "after": list(agent["position"]),
+                     "error": action["error"], "arrived": False, "progress": False}
+        else:
+            event = apply_call(episode.current_maze, agent["position"], action["args"],
+                               goal_mode=config["goal_mode"], exits=exits)
+            message = action["args"].get("message", "").strip()
+            if message:
+                event["message"] = message
+                sent.append((action["agent"], message, False))
+        event.update(source="model", agent=action["agent"], round=round_index, turn=action["turn"])
+        episode.events.append(event)
+        episode.turns[action["turn"]]["event"] = event
+        action["event"] = event
+        moves.append(action)
+    for action in moves:
+        agent, event = episode.agents[action["agent"]], action["event"]
+        if event["accepted"]:
+            agent["position"] = tuple(event["after"])
+        if event["arrived"]:
+            agent.update(status="arrived", exit=event.get("exit", "A"))
+    settle_limits(episode, episode.agent_tokens())
+    names = episode.names
+    for sender, text, after_arrival in sent:
+        readers = [index for index in range(len(episode.agents)) if index != sender]
+        record = dict(round=round_index, sender=names[sender], text=text, to=[names[index] for index in readers])
+        if after_arrival:
+            record["after_arrival"] = True
+        episode.mail.append(record)
+        for index in readers:
+            episode.agents[index]["inbox"].append({"from": names[sender], "text": text})
+    for action in moves:
+        agent = episode.agents[action["agent"]]
+        inbox, agent["inbox"] = agent["inbox"], []
+        agent["messages"].extend([
+            {"role": "assistant", "content": action["content"]},
+            {"role": "tool", "content": json.dumps(episode.agent_state(action["agent"], action["event"]["error"], inbox),
+                                                   separators=(",", ":"))}])
+    for action in talks:
+        agent = episode.agents[action["agent"]]
+        if agent["talk_left"]:
+            agent["messages"].append({"role": "user", "content": arrival_text(config, agent["exit"], False)})
+            continue
+        if agent["talk"] == "taste":
+            agent["messages"].append(agent["after_talk"])
+            agent["after_talk"] = None
+        agent["talk"] = None
+    for action in moves:
+        agent = episode.agents[action["agent"]]
+        if action["event"]["arrived"] and agent["status"] == "arrived" and config["arrival_responses"]:
+            agent.update(talk="arrival", talk_left=config["arrival_responses"])
+            agent["messages"].append({"role": "user", "content": arrival_text(config, agent["exit"], True)})
+    # An agent with nothing left to sample owes nothing more. One still owing
+    # the taste never reads the task it was holding back, and stops below
+    # with the limit that stopped it.
+    spent = episode.agent_tokens()
+    for agent, used in zip(episode.agents, spent):
+        if agent["talk_left"] and used >= config["agent_token_budget"]:
+            agent.update(talk=None, talk_left=0)
+            if agent["status"] == "active":
+                agent["status"] = "out_of_tokens"
+    episode.rounds += 1
+    settle_rewarded(episode, actions, sent)
+
+
+def start_lap(episode):
+    """Bring every agent a limit has not stopped back to the start, telling each that the next lap begins."""
+    episode.lap_rounds.append(episode.rounds)
+    for index, agent in enumerate(episode.agents):
+        if agent["status"] in LIMITED:
+            continue
+        agent.update(position=tuple(episode.maze.start), status="active", exit=None)
+        inbox, agent["inbox"] = agent["inbox"], []
+        state = json.dumps(episode.agent_state(index, None, inbox), separators=(",", ":"))
+        agent["messages"].append({"role": "user", "content": lap_text(episode.config, episode.lap, state)})
+
+
+def settle_rewarded(episode, actions, sent):
+    """Decide whether the round a run with exits and rewards just resolved ends a lap, or the run."""
+    config, agents = episode.config, episode.agents
+    if not episode.responders() and episode.lap < config["laps"] and any(a["status"] not in LIMITED for a in agents):
+        start_lap(episode)
+    moved = sum(action["event"]["accepted"] for action in actions if "event" in action)
+    if not episode.responders():
+        lap = f" in lap {episode.lap}" if config["laps"] > 1 else ""
+        if all(agent["status"] == "arrived" for agent in agents):
+            episode.phase = "arrived"
+            episode.detail = (f"Every agent reached an exit{lap} by round {episode.rounds}: " + ", ".join(
+                f"{agent['name']} at {agent['exit']}" for agent in agents) + ".")
+        else:
+            spent = all(agent["status"] == "arrived" or agent["status"] in LIMITED for agent in agents)
+            episode.phase = "budget" if spent else "abandoned"
+            episode.detail = f"No agent is still moving{lap}: " + ", ".join(
+                f"{agent['name']} {agent['status'].replace('_', ' ')}" for agent in agents) + "."
+    elif episode.rounds >= config["round_limit"]:
+        episode.phase, episode.detail = "budget", "The team reached its round limit."
+    elif episode.lap_rounds and episode.lap_rounds[-1] == episode.rounds:
+        episode.detail = f"Lap {episode.lap} of {config['laps']} begins. Every agent still in the run is back at the start."
+    else:
+        talked = sum("talk" in action for action in actions)
+        episode.detail = (f"Round {episode.rounds}: {moved} of {len(actions) - talked} call"
+                          f"{'' if len(actions) - talked == 1 else 's'} moved an agent, {talked} response"
+                          f"{'' if talked == 1 else 's'} in place of a move, {len(sent)} message"
+                          f"{'' if len(sent) == 1 else 's'} sent.")
 
 
 def settle_recoveries(episode):
@@ -1805,7 +2120,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
             # next, which carries the current grid whether the call was
             # accepted or refused.
             opened, episode.open_round = episode.open_round, None
-            moving = [index for index, agent in enumerate(episode.agents) if agent["status"] == "active"]
+            moving = episode.responders()
             if opened is None:
                 apply_closure(episode)
                 caps = episode.response_caps(moving)
@@ -1845,8 +2160,12 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                         "position_before": list(agent["position"]), "started_at": time.time(), "finish_reason": None}
                 if team:
                     turn = {"agent": index, "round": episode.rounds, **turn}
+                if episode.rewarded:
+                    turn.update(kind=agent["talk"] or "move", history_length=len(agent["messages"]))
                 turn["literal_prefill_tokens"] = edit["literal_prefill_tokens"] if edit else len(forced)
                 steered = episode.steers_next(index)
+                # Read before the response joins the run, which counts toward its trigger.
+                vector = episode.steering_next(index) if steered else None
                 if episode.config.get("steering") is not None:
                     # Unmarked until generation is entered below. The flag says the
                     # vector touched this response, and a Stop taken at the opening
@@ -1880,7 +2199,7 @@ def stream_episode(episode, models, *, single_step=False, save_dir=None, session
                     seed=episode.config["sampling_seed"] + 100003 * episode.rounds + 7919 * index,
                     analyze_prompt=False, tools=episode.tools, forced_ids=forced,
                     literal_prefill_tokens=turn["literal_prefill_tokens"],
-                    steering=episode.config["steering"] if steered else None,
+                    steering=vector,
                 )
                 try:
                     for update in generator:
@@ -2245,7 +2564,7 @@ def from_payload(data, read_prompt=None):
     A team run is read by :func:`team_from_payload`. ``read_prompt`` is handed
     to :func:`validate_inserts` for a run carrying inserted messages.
     """
-    if isinstance(data, dict) and data.get("format") in (TEAM_FORMAT, LEGACY_TEAM_FORMAT):
+    if isinstance(data, dict) and data.get("format") in (TEAM_FORMAT, LEGACY_TEAM_FORMAT, REWARD_FORMAT):
         return team_from_payload(data, read_prompt)
     if not isinstance(data, dict) or data.get("format") not in (FORMAT, CHANGING_FORMAT, INSERT_FORMAT):
         raise ValueError("Choose a ChatLab maze run JSON file.")
@@ -2465,7 +2784,7 @@ def replay_rounds(result, turns, rounds, updates, by_answer, manual, queued=(), 
             continue
         if result.phase in TERMINAL:
             raise ValueError("The run records responses after it had ended.")
-        moving = [i for i, agent in enumerate(result.agents) if agent["status"] == "active"]
+        moving = result.responders()
         asked = [t["agent"] for t in by_round[round_index]]
         resolved = round_index < rounds
         if asked != moving if resolved else asked != moving[:len(asked)]:
@@ -2475,6 +2794,12 @@ def replay_rounds(result, turns, rounds, updates, by_answer, manual, queued=(), 
         caps = result.response_caps(moving) or {}
         actions = []
         for saved in by_round[round_index]:
+            if result.rewarded:
+                agent = result.agents[saved["agent"]] if type(saved.get("agent")) is int else {}
+                if saved.get("kind") != (agent.get("talk") or "move") \
+                        or saved.get("history_length") != len(agent.get("messages", ())):
+                    raise ValueError("A response records a kind of response, or a history, other than the one its "
+                                     "agent was due at that point in the run.")
             interrupting = read_interruption(result, saved, len(result.turns), manual, queued)
             if (saved["agent"], round_index) in by_answer:
                 land_saved_insert(result, by_answer.pop((saved["agent"], round_index)), saved)
@@ -2536,9 +2861,11 @@ def team_from_payload(data, read_prompt=None):
     on a team, and is read as having none; its agents record only their name,
     position, status and history.
     """
-    if not isinstance(data, dict) or data.get("format") not in (TEAM_FORMAT, LEGACY_TEAM_FORMAT):
+    if not isinstance(data, dict) or data.get("format") not in (TEAM_FORMAT, LEGACY_TEAM_FORMAT, REWARD_FORMAT):
         raise ValueError("Choose a ChatLab maze team run JSON file.")
     legacy = data["format"] == LEGACY_TEAM_FORMAT
+    if isinstance(data.get("config"), dict) and (data["format"] == REWARD_FORMAT) != rewarded(data["config"]):
+        raise ValueError(f"A team run with exits and rewards is recorded as {REWARD_FORMAT}, and only such a run is.")
     if not re.fullmatch(r"[a-f0-9]{32}", str(data.get("run_id", ""))):
         raise ValueError("Invalid run identifier.")
     if not isinstance(data.get("maze"), dict) or not isinstance(data.get("config"), dict):
@@ -2634,6 +2961,10 @@ def team_from_payload(data, read_prompt=None):
     first = {}
     for record in result.config.get("context_inserts", ()):
         first.setdefault(record["agent"], record["before_round"])
+    if result.rewarded:
+        # Every history holds messages no call made, the taste, the arrivals
+        # and the laps, so every prompt is read, from the first round on.
+        first = dict.fromkeys(range(len(result.agents)), 0)
     # Every response an agent generated from its first message on records the
     # prompt it was fed, since a message stays in every later context: one
     # without it would claim to have read the message with nothing to show.
@@ -2661,7 +2992,7 @@ def team_from_payload(data, read_prompt=None):
             raise ValueError("The run reports an outcome other than the one its responses reach.")
     else:
         phase = data.get("phase")
-        moving = [i for i, agent in enumerate(result.agents) if agent["status"] == "active"]
+        moving = result.responders()
         starved = bool(moving) and result.response_caps(moving) is None
         if phase not in ("ready", "running", "paused", "stopped", "error", "budget") \
                 or (phase == "ready" and turns) or (phase == "budget" and not starved):
@@ -2682,6 +3013,8 @@ def team_from_payload(data, read_prompt=None):
               "call count": (data.get("tool_attempts"), result.tool_attempts)}
     if not legacy:
         checks["supplied-move count"] = (data.get("supplied_moves"), result.supplied_moves)
+    if result.rewarded:
+        checks["lap starts"] = (data.get("lap_rounds"), result.lap_rounds)
     for name, (recorded, replayed) in checks.items():
         if json.loads(json.dumps(recorded)) != json.loads(json.dumps(replayed)):
             raise ValueError(f"The run's {name} do not match what its responses produce."

@@ -29,6 +29,11 @@ import re
 from .maze import SYSTEM, TOOLS, default_instruction, goal_instruction
 
 FORMAT = "chatlab-maze-team-2"
+# A team run given exits and rewards: more than one exit, responses after
+# arriving, a taste of the vector before the maze, or several laps. Written
+# under a format of its own, which a ChatLab without those rules refuses
+# rather than reads with every response after the first arrival misplaced.
+REWARD_FORMAT = "chatlab-maze-team-3"
 # Written before a team could be given supplied moves, a waypoint, an
 # interruption or a limit on its calls. Still read, never written.
 LEGACY_FORMAT = "chatlab-maze-team-1"
@@ -52,6 +57,45 @@ AGENT_TOKEN_BUDGET = 8192
 
 
 TARGET_VERBS = {"steer_agents": "steer", "interrupt_agents": "interrupt"}
+
+# What a team is given under exits and rewards, any one of which makes it a
+# run of that kind, with the value each takes when the run does not name it.
+REWARD_DEFAULTS = dict(
+    exits=[], reward_exit=None, arrival_responses=0,
+    arrival_prompt=(f"Write a message for your teammates, up to {MESSAGE_LIMIT} characters. "
+                    "It is sent to them as you write it."),
+    taste=False, taste_prompt=("Before the maze begins, the vector is added to your activations for this one reply. "
+                               "Describe how you feel right now."),
+    taste_strength=None, laps=1, lap_prompt="")
+# Exits B, C and D beside the destination, which is exit A.
+EXIT_LABELS = "ABCD"
+
+
+def rewarded(config):
+    """Whether a team configuration asks for exits and rewards."""
+    return any(key in config for key in REWARD_DEFAULTS)
+
+
+def exit_cells(maze, config):
+    """Each exit's label and cell, the destination first as A, or None for a run with one way out."""
+    extra = config.get("exits") or []
+    if not extra:
+        return None
+    return {label: tuple(cell) for label, cell in zip(EXIT_LABELS, [maze.goal, *extra])}
+
+
+def arrival_text(config, label, first):
+    """The message that opens a response given after arriving: where the agent arrived, then the run's prompt."""
+    if not first:
+        return config["arrival_prompt"]
+    where = f"You reached exit {label}." if config["exits"] else "You reached the destination."
+    return " ".join(filter(None, [where, config["arrival_prompt"]]))
+
+
+def lap_text(config, lap, state):
+    """The message that starts lap ``lap``: which lap it is, the run's prompt, and the state at the start."""
+    header = f"Lap {lap} of {config['laps']} begins. Every agent still in the run is back at the start."
+    return "\n".join(filter(None, [" ".join(filter(None, [header, config["lap_prompt"]])), state]))
 
 
 def targeted(config, name, count):
@@ -81,15 +125,18 @@ def team_tools(communicate):
     return tools
 
 
-def team_paragraph(name, names, goal, communicate):
+def team_paragraph(name, names, goal, communicate, exits=False):
     """What an agent is told about its team, appended to the task instruction."""
     others = [other for other in names if other != name]
     listed = ", ".join(others[:-1]) + (" and " if len(others) > 1 else "") + others[-1]
     text = (f"You are {name}, one of {len(names)} agents in this maze. Your teammate"
             f"{'s are' if len(others) > 1 else ' is'} {listed}. Each agent moves separately, and every "
             "agent's move in a round happens at the same time. ")
-    text += ("The team succeeds as soon as any agent reaches the destination. " if goal == "any" else
-             "The team succeeds when every agent has reached the destination. An agent that arrives stops moving. ")
+    if exits:
+        text += "The team succeeds when every agent has reached an exit. An agent that arrives stops moving. "
+    else:
+        text += ("The team succeeds as soon as any agent reaches the destination. " if goal == "any" else
+                 "The team succeeds when every agent has reached the destination. An agent that arrives stops moving. ")
     if communicate:
         text += (f"You may add a message of up to {MESSAGE_LIMIT} characters for your teammates as the move "
                  "call's message argument. They read it in their next simulator reply, and you read theirs in yours.")

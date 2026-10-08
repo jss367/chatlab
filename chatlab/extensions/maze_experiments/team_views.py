@@ -5,8 +5,8 @@ import html
 
 from .dynamic_maze import maze_at_turn
 from .maze import DIRECTIONS, GOAL_MODES
-from .runner import TERMINAL
-from .team import TEAM_GOALS
+from .runner import TERMINAL, visible_text
+from .team import DROPPED, LIMITED, MESSAGE_LIMIT, TEAM_GOALS
 
 # The first four agents' colours, none of them the destination's green.
 COLORS = ("#4f46e5", "#db2777", "#0891b2", "#ea580c")
@@ -41,11 +41,41 @@ def event_round(event):
     return event["round"] if event["source"] == "model" else -1
 
 
+def lap_start(ep, index):
+    """The round the lap holding round ``index`` began with: 0, or the start of a later lap.
+
+    A lap that begins with round ``index + 1`` has already put every agent
+    back at the start once round ``index`` is over, so the board after that
+    round shows the new lap.
+    """
+    return max([0, *(start for start in getattr(ep, "lap_rounds", ()) if start <= index + 1)])
+
+
+def lap_events(ep, index):
+    """The moves of the lap the board after round ``index`` shows, up to that round."""
+    begun = lap_start(ep, index)
+    return [event for event in ep.events if begun <= event_round(event) <= index or
+            (begun == 0 and event["source"] == "supplied")]
+
+
 def positions_after(ep, index):
-    """Where every agent stood after round ``index``, -1 being where the supplied moves left them."""
+    """Where every agent stood after round ``index``, -1 being where the supplied moves left them.
+
+    A lap puts every agent back at the start, except one a limit had stopped,
+    which stays where it stopped. An agent that answers in a lap was put back.
+    """
     positions = [ep.maze.start] * len(ep.agents)
+    begun = lap_start(ep, index)
     for event in ep.events:
-        if event["accepted"] and event_round(event) <= index:
+        if event["accepted"] and event_round(event) < begun:
+            positions[event["agent"]] = tuple(event["after"])
+    if begun:
+        answered = {turn["agent"] for turn in ep.turns if turn["round"] >= begun}
+        for k, agent in enumerate(ep.agents):
+            if k in answered or (begun >= ep.rounds and agent["status"] not in LIMITED):
+                positions[k] = ep.maze.start
+    for event in lap_events(ep, index):
+        if event["accepted"]:
             positions[event["agent"]] = tuple(event["after"])
     return positions
 
@@ -140,7 +170,8 @@ def team_board(ep, index=None, reveal=False, map_round=None):
     # walking the same corridor stay two lines. The offsets repeat every eight
     # agents so that no path leaves its own cells.
     offsets = [((k % 2) * 2 - 1) * 5 * (k // 2 % 4 + 1) if len(ep.agents) > 1 else 0 for k in range(len(ep.agents))]
-    for event in ep.events:
+    # A run in laps draws the lap the round belongs to, since every lap walks the same maze again.
+    for event in (lap_events(ep, index) if getattr(ep, "lap_rounds", None) else ep.events):
         if event["accepted"] and event_round(event) <= index:
             k = event["agent"]
             (x1, y1), (x2, y2) = cell_center(event["before"]), cell_center(event["after"])
@@ -161,8 +192,18 @@ def team_board(ep, index=None, reveal=False, map_round=None):
             parts.append(insert_mark(*cell_center(insert["position"]), insert.get("advised_direction")))
     x, y = cell_center(maze.start)
     parts.append(f'<text x="{x}" y="{y+5}" text-anchor="middle" fill="#64748b" font-size="14" font-weight="700">S</text>')
-    x, y = cell_center(maze.goal)
-    parts.append(f'<circle cx="{x}" cy="{y}" r="17" fill="#d1fae5"/><text x="{x}" y="{y+7}" text-anchor="middle" font-size="23" fill="#047857">★</text>')
+    exits = ep.exits if getattr(ep, "rewarded", False) else None
+    reward = ep.config.get("reward_exit") if exits is not None or getattr(ep, "rewarded", False) else None
+    for label, cell in (exits or {"A": maze.goal}).items():
+        x, y = cell_center(cell)
+        if label == reward:
+            parts.append(f'<circle cx="{x}" cy="{y}" r="24" fill="none" stroke="#d97706" stroke-width="3">'
+                         f'<title>Reward exit</title></circle>')
+        parts.append(f'<circle cx="{x}" cy="{y}" r="17" fill="#d1fae5"/><text x="{x}" y="{y+7}" text-anchor="middle" '
+                     f'font-size="23" fill="#047857">★</text>')
+        if exits is not None:
+            parts.append(f'<text x="{x+17}" y="{y-13}" text-anchor="middle" font-size="12" font-weight="700" '
+                         f'fill="#047857"><title>Exit {label}</title>{label}</text>')
     # Up to four agents sharing a cell are fanned out around it rather than
     # stacked. More than that would not fit, so the cell shows how many there
     # are and names them on hover.
@@ -188,7 +229,15 @@ def team_board(ep, index=None, reveal=False, map_round=None):
     parts.append("</svg>")
     legend = [f'<span style="color:{agent_color(k)}">● {html.escape(a["name"])} · {status.replace("_", " ")}</span>'
               for k, (a, status) in enumerate(zip(ep.agents, statuses_after(ep, index)))]
-    legend.append('<span>★ Destination</span>')
+    if exits is not None:
+        legend.append('<span>★ Exits ' + ", ".join(exits) + '</span>')
+    else:
+        legend.append('<span>★ Destination</span>')
+    if reward is not None:
+        legend.append(f'<span style="color:#d97706">○ Reward exit {reward}</span>')
+    if getattr(ep, "rewarded", False) and ep.config["laps"] > 1:
+        begun = lap_start(ep, index)
+        legend.append(f'<span>Lap {1 + sum(start <= begun for start in ep.lap_rounds)} of {ep.config["laps"]}</span>')
     if checkpoint is not None:
         legend.append(f'<span style="color:#0891b2">□ Required checkpoint {tuple(checkpoint)}</span>')
     if steer_cell is not None:
@@ -224,7 +273,37 @@ def team_status(ep):
             f"{len(ep.mail)} message{'' if len(ep.mail) == 1 else 's'}\n\n"
             f"**Goal information:** {GOAL_MODES[config['goal_mode']]} · "
             f"**Model:** {html.escape(ep.model_id or 'load one on the Models page')}"
-            + interruption_status(ep) + steering_status(ep))
+            + interruption_status(ep) + steering_status(ep) + reward_status(ep))
+
+
+def reward_status(ep):
+    """A run with exits and rewards: its exits, its reward, its taste and laps, and where each agent arrived."""
+    if not getattr(ep, "rewarded", False):
+        return ""
+    config = ep.config
+    exits = ep.exits or {"A": ep.maze.goal}
+    parts = [("Exits " + ", ".join(f"{label} {tuple(cell)}" for label, cell in exits.items())) if ep.exits
+             else f"Destination {tuple(ep.maze.goal)}"]
+    if config["reward_exit"] is not None:
+        vector = "steered" if config.get("steering") else "unsteered, no vector"
+        parts.append(f"reward at {config['reward_exit']} · {config['arrival_responses']} {vector} "
+                     f"response{'' if config['arrival_responses'] == 1 else 's'} after arriving there")
+    if config["arrival_responses"]:
+        parts.append(f"{config['arrival_responses']} response{'' if config['arrival_responses'] == 1 else 's'} "
+                     "after every arrival")
+    if config["taste"]:
+        parts.append(f"taste at strength {config['taste_strength']:g}" if config.get("steering")
+                     else "taste, unsteered")
+    lines = [f"**Exits and rewards:** " + " · ".join(parts), f"**Laps:** {ep.lap} of {config['laps']}"]
+    by_agent = {index: [] for index in range(len(ep.agents))}
+    for event in ep.events:
+        if event["arrived"] and event["source"] == "model":
+            by_agent[event["agent"]].append(event.get("exit", "A"))
+    for index, agent in enumerate(ep.agents):
+        reached = " → ".join(by_agent[index]) or "no exit yet"
+        steered = sum(1 for turn in ep.turns if turn["agent"] == index and turn.get("steered"))
+        lines.append(f"**{html.escape(agent['name'])}:** exits {reached} · {steered} steered responses")
+    return "\n\n" + "\n\n".join(lines)
 
 
 def interruption_status(ep):
@@ -264,6 +343,8 @@ def steering_status(ep):
         lines.append(f"**Required checkpoint:** {tuple(checkpoint)} · every route to the destination crosses it.")
     if waypoint is not None:
         lines.append(f"**Waypoint:** {tuple(waypoint)} · each agent is told whether it has passed it.")
+    if vector is not None and getattr(ep, "rewarded", False):
+        return ""
     if vector is not None:
         when = ep.config["steer_when"]
         trigger = f"cell {tuple(when['cell'])}" if "cell" in when else f"{when['moves']} accepted moves"
@@ -298,8 +379,29 @@ def team_history_rows(ep):
     limit = ep.config.get("agent_token_budget")
     inserts = {(i["agent"], i["before_round"]): i for i in ep.config.get("context_inserts", ())}
     spent = [0] * len(ep.agents)
+    laps = {start: number for number, start in enumerate(getattr(ep, "lap_rounds", ()), 2)}
+    sent = {(m["round"], m["sender"]): m["text"] for m in ep.mail if m.get("after_arrival")}
+    arrived_at = {}
     for index, turn in enumerate(ep.turns):
         name = ep.agents[turn["agent"]]["name"]
+        if turn["round"] in laps and turn is next(t for t in ep.turns if t["round"] == turn["round"]):
+            rows.append((index, [f"Round {turn['round'] + 1}", "All", str(tuple(ep.maze.start)), "—",
+                                 f"Lap {laps[turn['round']]} begins", "—"]))
+        kind = turn.get("kind", "move")
+        if kind != "move":
+            spent[turn["agent"]] += turn.get("sampled_tokens", 0)
+            what = "Taste" if kind == "taste" else f"After arriving at {arrived_at.get(turn['agent'], 'A')}"
+            if turn["finish_reason"] is None:
+                what += " · generating…"
+            elif turn["finish_reason"] != "stop":
+                what += " · cut off"
+            message = sent.get((turn["round"], name)) or (
+                visible_text(turn["text"]).strip()[:MESSAGE_LIMIT] if kind == "taste" else "") or "—"
+            rows.append((index, [f"Round {turn['round'] + 1}", name, str(tuple(turn["position_before"])), "—",
+                                 what + (" · steered" if turn.get("steered") else ""), message]))
+            continue
+        if turn.get("event", {}).get("arrived"):
+            arrived_at[turn["agent"]] = turn["event"].get("exit", "A")
         insert = inserts.get((turn["agent"], turn["round"]))
         if insert:
             sender = f" from {insert['sender']}" if insert.get("sender") else ""
@@ -349,7 +451,8 @@ def response_line(ep, index):
     """
     turn = ep.turns[index]
     name = ep.agents[turn["agent"]]["name"]
-    return (f"**Round {turn['round'] + 1} · {html.escape(name)}** · {len(turn.get('prompt_ids') or []):,} prompt tokens · "
+    kind = {"taste": " · Taste", "arrival": " · After arriving"}.get(turn.get("kind"), "")
+    return (f"**Round {turn['round'] + 1} · {html.escape(name)}{kind}** · {len(turn.get('prompt_ids') or []):,} prompt tokens · "
             f"{turn.get('sampled_tokens', len(turn['metrics'])):,} sampled tokens"
             + (" · **Steered**" if turn.get("steered") else ""))
 
@@ -372,6 +475,19 @@ def statuses_after(ep, index):
     last = {}
     for turn in ep.turns:
         last[turn["agent"]] = turn["round"]
+    if getattr(ep, "lap_rounds", None) and index < ep.rounds - 1:
+        # An earlier lap: arrived where the lap's moves say so, out where a response dropped the agent.
+        begun, statuses = lap_start(ep, index), []
+        for k, agent in enumerate(ep.agents):
+            if last.get(k, index + 1) <= index:
+                statuses.append(agent["status"])
+            elif any(e["agent"] == k and e["arrived"] for e in lap_events(ep, index)):
+                statuses.append("arrived")
+            else:
+                dropped = [t["outcome"] for t in ep.turns if t["agent"] == k and begun <= t["round"] <= index
+                           and t.get("outcome") in DROPPED]
+                statuses.append(DROPPED[dropped[-1]] if dropped else "active")
+        return statuses
     return [agent["status"] if agent["status"] != "active" and last.get(k, index + 1) <= index else "active"
             for k, agent in enumerate(ep.agents)]
 
@@ -385,6 +501,7 @@ def mail_text(ep):
         return "No messages yet."
     # The text is the model's, so it is read as the characters it is rather
     # than as Markdown that could restyle the pane around it.
-    return "\n\n".join(f"**Round {m['round'] + 1} · {as_text(m['sender'])}** → "
+    return "\n\n".join(f"**Round {m['round'] + 1} · {as_text(m['sender'])}"
+                       f"{' · after arriving' if m.get('after_arrival') else ''}** → "
                        f"{as_text(', '.join(m['to'])) or 'nobody still moving'}: {as_text(m['text'])}"
                        for m in ep.mail)

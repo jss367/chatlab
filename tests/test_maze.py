@@ -1424,7 +1424,7 @@ class MazeTests(unittest.TestCase):
                 # The pane describes the run on screen, so every control follows
                 # it, ahead of the trial note, the model button and the ID it
                 # hands over.
-                filled = loaded[-34:-13]
+                filled = loaded[-43:-22]
                 self.assertEqual(filled[:16], values[:16])
                 self.assertEqual((filled[16]['value'], filled[16]['visible']), ('', False))
                 self.assertEqual(filled[17:], ('Be brief.', 'Reach the star.', False, 'Custom'))
@@ -1462,8 +1462,8 @@ class MazeTests(unittest.TestCase):
                 # whole rather than starting where it has nothing left to show.
                 self.assertEqual(loaded[0].viewing, -1)
                 self.assertEqual(loaded[9]['value'], -1)
-                self.assertEqual(loaded[-12]['value'], 'Load test/model')
-                self.assertEqual(loaded[-11], 'test/model')
+                self.assertEqual(loaded[-21]['value'], 'Load test/model')
+                self.assertEqual(loaded[-20], 'test/model')
                 values = (3, 1, 2, .9, 0, 0, 'Distracted', 2, .7, 99, 100, 300, 10, 700, 5,
                           'coordinates', '', 'Be brief.', 'Reach the star.', False, *NO_CHECKPOINT)
                 fresh = callbacks['prepare_episode'](loaded[0], False, session, None, *values)
