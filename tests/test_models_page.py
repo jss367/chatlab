@@ -401,6 +401,24 @@ class CachedModelListTests(unittest.TestCase):
 class RemoveCachedModelTests(unittest.TestCase):
     """Removing a model deletes its folder and nothing else."""
 
+    def test_shared_blobs_remain_and_are_not_reported_as_freed(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x"})
+            shared = Path(root) / "blobs" / "weights"
+            shared.parent.mkdir()
+            shared.write_bytes(b"x" * 1000)
+            blob = folder / "blobs" / "blob1"
+            blob.unlink()
+            blob.symlink_to(shared)
+
+            entry, = list_cached_models(Path(root))
+            self.assertEqual(entry.size_bytes, 2 + 1000 + len(COMMIT))
+            freed = remove_cached_model(OLMO, Path(root))
+
+            self.assertEqual(freed, 2 + len(COMMIT))
+            self.assertFalse(folder.exists())
+            self.assertEqual(shared.read_bytes(), b"x" * 1000)
+
     def test_the_folder_is_removed_and_the_size_reported(self):
         with tempfile.TemporaryDirectory() as root:
             folder = lay_out(root, OLMO, {"config.json": b"{}", "model.safetensors": b"x" * 99})
