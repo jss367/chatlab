@@ -1709,6 +1709,28 @@ class ManageMyModelsTests(unittest.TestCase):
         self.assertIn("Model removed", status)
         self.assertEqual(self.removed, ["org/partial"])
 
+    def test_a_row_removal_announces_success_where_the_reader_clicked(self):
+        press = json.dumps({"name": "org/partial", "action": "remove"})
+        with mock.patch.object(gr, "Info") as info:
+            (card,) = list(app.act_on_my_model(press, ""))
+        info.assert_called_once_with(card.detail, title="Model removed")
+
+    def test_a_refused_row_removal_announces_the_reason(self):
+        self.manager.model_id = OLMO
+        press = json.dumps({"name": OLMO, "action": "remove"})
+        with mock.patch.object(models_page, "alarm") as alarm:
+            (card,) = list(app.act_on_my_model(press, ""))
+        alarm.assert_called_once_with("Model in use", card.detail)
+        self.assertIn("Unload", card.detail)
+        self.assertEqual(self.removed, [])
+
+    def test_a_failed_row_removal_is_announced_only_once(self):
+        model_cache.remove_cached_model = mock.Mock(side_effect=PermissionError("Denied"))
+        press = json.dumps({"name": "org/partial", "action": "remove"})
+        with mock.patch.object(gr, "Warning") as warning:
+            (card,) = list(app.act_on_my_model(press, ""))
+        warning.assert_called_once_with(card.detail, title="Could not remove model", duration=None)
+
     def test_a_press_the_server_cannot_read_does_nothing(self):
         for payload in (None, "", "not json", "[]", json.dumps({"action": "remove"}),
                         json.dumps({"name": "org/partial", "action": "format"})):
