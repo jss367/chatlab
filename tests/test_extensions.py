@@ -634,6 +634,64 @@ assert 'chatlab.extensions.probes.page' not in sys.modules
         with self.assertRaisesRegex(ValueError, "cannot hand"):
             NavigationService(lambda *args: None).steer_chat(object(), lambda: None)
 
+    def test_a_host_without_chat_opening_refuses_the_button(self):
+        with self.assertRaisesRegex(ValueError, "cannot open conversations"):
+            NavigationService(lambda *args: None).open_chat(object(), lambda: None)
+
+    def test_extension_chat_button_opens_a_new_conversation_and_shows_chat(self):
+        from chatlab.conversation import MAIN_BRANCH, new_forks
+        from chatlab.conversation import make_turn
+
+        buttons = []
+        def build(context):
+            button = gr.Button("Open in Chat")
+            reply = gr.State(True)
+            def conversation(include):
+                if include is None:
+                    raise ValueError("Select a turn first.")
+                turns = [{"role": "user", "content": "Pay the invoice."}]
+                if include:
+                    turns.append({"role": "assistant", "content": '{"payments": []}'})
+                return {"format": "chatlab-conversation-1", "system_prompt": "You are Ada.", "turns": turns}
+            context.navigation.open_chat(button, conversation, [reply])
+            buttons.append(button)
+        extension = LoadedExtension(ExtensionSpec("example", "Example", "", "Example", "example"), build, "")
+        with mock.patch('chatlab.ui.layout.load_enabled', return_value=([extension], [])):
+            demo = app.build_app()
+        try:
+            click = next(fn for fn in demo.fns.values() if fn.targets == [(buttons[0]._id, 'click')])
+            payload = click.fn(True)
+            with self.assertRaisesRegex(gr.Error, "Select a turn"):
+                click.fn(None)
+            opening = listener_named(demo, "open_conversation")
+            self.assertEqual(opening.concurrency_id, 'conversation-pane')
+            forks = new_forks()
+            earlier = [make_turn("user", "hello"), make_turn("assistant", "hi")]
+            forks["branches"][MAIN_BRANCH] = earlier
+            values = [payload, earlier, forks, *(b.value for b in opening.inputs[3:])]
+            updates = dict(zip(opening.outputs, opening.fn(*values), strict=True))
+            names = demo.conversation_outputs
+            turns, forks = updates[names["turns"]], updates[names["forks"]]
+            self.assertEqual([(t["role"], t["content"]) for t in turns],
+                             [("user", "Pay the invoice."), ("assistant", '{"payments": []}')])
+            self.assertEqual(updates[names["system_prompt"]], "You are Ada.")
+            self.assertNotEqual(forks["active"], MAIN_BRANCH)
+            self.assertEqual([t["content"] for t in forks["branches"][MAIN_BRANCH]], ["hello", "hi"])
+            self.assertIn("Opened", updates[names["status"]])
+            # Then Chat is shown and the extension's page hidden.
+            show = listener_named(demo, "show_chat")
+            labelled = dict(zip(show.outputs, show.fn(), strict=True))
+            nav = next(b for b in labelled if getattr(b, 'elem_id', None) == 'nav')
+            self.assertEqual(labelled[nav], 'Chat')
+            chat = next(b for b in labelled if getattr(b, 'elem_id', None) == 'chat-page')
+            self.assertTrue(labelled[chat]['visible'])
+            self.assertFalse(labelled[show.outputs[-1]]['visible'])
+            # A conversation the load refuses changes nothing.
+            with self.assertRaisesRegex(gr.Error, "Could not open"):
+                opening.fn('{"format": "something-else"}', *values[1:])
+        finally:
+            demo.close()
+
     def test_extension_tiles_sit_under_the_built_in_pages_behind_a_rule(self):
         specs = [
             ExtensionSpec('one', 'One', '', 'One', 'one_module'),
@@ -729,7 +787,7 @@ class ExtensionSettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             # Background imports may add modules while the predicate runs.
             result = subprocess.run([sys.executable, '-c',
-                "from chatlab import app; import sys; demo=app.build_app(); assert not any(n.startswith(('chatlab.extensions.maze_experiments', 'chatlab.extensions.osguard', 'chatlab.extensions.os_harm', 'chatlab.extensions.hangman')) for n in tuple(sys.modules)); demo.close()"],
+                "from chatlab import app; import sys; demo=app.build_app(); assert not any(n.startswith(('chatlab.extensions.maze_experiments', 'chatlab.extensions.osguard', 'chatlab.extensions.os_harm', 'chatlab.extensions.hangman', 'chatlab.extensions.institutions')) for n in tuple(sys.modules)); demo.close()"],
                 env=os.environ | {settings.SETTINGS_PATH_ENV: str(Path(temp)/'settings.json'), 'GRADIO_ANALYTICS_ENABLED':'False'},
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)

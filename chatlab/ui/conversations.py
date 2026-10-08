@@ -51,6 +51,7 @@ from chatlab.ui.outputs import (
     FORK_OUTPUT_NAMES,
     LOAD_OUTPUT_NAMES,
     NEW_CONVERSATION_OUTPUT_NAMES,
+    OPEN_CHAT_OUTPUT_NAMES,
     RESTORE_OUTPUT_NAMES,
     Frame,
 )
@@ -632,6 +633,46 @@ def new_conversation(
         **send_stop_values(False),
         **panel_reset([], scale_name),
         branch_text="",  # Replacement text belongs to the previous conversation's token.
+    )
+
+
+def open_conversation(
+    payload: str,
+    turns: list[dict] | None,
+    forks: dict | None,
+    scale_name: str = DEFAULT_COLOR_SCALE,
+    *sampling,
+    preserve_source: bool = False,
+):
+    """Put the conversation on screen away and open a saved one as a new conversation.
+
+    ``payload`` is a saved conversation's text, as an extension hands it to
+    Chat. The new conversation is started as New conversation starts one, and
+    filled as a loaded file fills the screen, system prompt included. A
+    payload the load refuses raises ``gr.Error`` and changes nothing.
+    """
+
+    try:
+        loaded, system_prompt = from_json(payload)
+    except ValueError as error:
+        raise gr.Error(f"Could not open that conversation: {error}") from error
+    started = new_conversation(turns, forks, scale_name, *sampling, preserve_source=preserve_source)
+    forks = started["forks"]
+    name = forks["active"]
+    put_branch(forks, name, loaded)
+    messages, _ = display_messages(loaded)
+    answered = bool(loaded) and loaded[-1]["role"] == "assistant"
+    return Frame(
+        OPEN_CHAT_OUTPUT_NAMES,
+        started,
+        chatbot=messages,
+        turns=loaded,
+        forks=forks,
+        system_prompt=system_prompt,
+        conversation_list=conversation_list_update(forks, loaded),
+        status=f"Opened {name} with {len(loaded)} message{'s' if len(loaded) != 1 else ''}."
+        + ("" if answered or not loaded else " Press Retry to answer its last message."),
+        **panel_reset(loaded, scale_name),
     )
 
 
