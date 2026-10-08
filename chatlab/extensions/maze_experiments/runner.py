@@ -1721,9 +1721,12 @@ def spoken_text(content):
     inside a simulator reply, where tool syntax would read as the template's
     own. A response cut off by its token cap says what it wrote before the
     cap: steered responses run long more often, and dropping the cut-off ones
-    would silence the rewarded exit more than the other.
+    would silence the rewarded exit more than the other. A cap can land inside
+    a tag, so an opener or closer missing its end is taken out as well, and so
+    is the start of one left at the very end.
     """
-    text = re.sub(r"<tool_call>.*?(?:</tool_call>|\Z)|</tool_call>", "", visible_text(content), flags=re.S)
+    text = re.sub(r"<tool_call.*?(?:</tool_call>|\Z)|</tool_call>?", "", visible_text(content), flags=re.S)
+    text = re.sub(r"</?(?:t(?:o(?:o(?:l(?:_(?:c(?:a(?:l)?)?)?)?)?)?)?)?\Z", "", text)
     return text.strip()[:MESSAGE_LIMIT]
 
 

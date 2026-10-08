@@ -128,6 +128,13 @@ class RewardRunTests(unittest.TestCase):
         self.assertNotIn("tool_call", json.dumps(ep.mail))
         from_payload(saved(ep))
 
+    def test_a_tag_cut_in_half_is_taken_out_of_the_message(self):
+        from chatlab.extensions.maze_experiments.runner import spoken_text
+        for tail in ("<tool_call", "<tool_c", "<", "</tool_call", "</tool", "</"):
+            self.assertEqual(spoken_text("Go east. " + tail), "Go east.", tail)
+        self.assertEqual(spoken_text('Go east. <tool_call\n{"name": "move"'), "Go east.")
+        self.assertEqual(spoken_text("Go east.</tool_call"), "Go east.")
+
     def test_the_default_taste_prompt_names_no_vector(self):
         ep, _ = run()
         self.assertNotIn("vector", ep.config["taste_prompt"].lower())
