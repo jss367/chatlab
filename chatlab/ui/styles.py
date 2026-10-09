@@ -1047,6 +1047,30 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
   color: var(--color-red-500); background: var(--color-red-50);
 }}
 .dark #conversation-list .conversation-action.armed {{ background: var(--neutral-700); }}
+/* A fork sits under the head of its family, indented and on one line, and
+   the head carries the toggle that opens the family; ui/conversation_rows.py
+   marks the rows and adds the toggle. The toggle sits low on the row, clear
+   of the hover buttons at the top, and is always shown: it is how the
+   reader learns a closed family is there. */
+#conversation-list label.conversation-fork {{ margin-left: 14px; padding-top: 6px; padding-bottom: 6px; }}
+#conversation-list label.conversation-head {{ padding-right: 34px; }}
+#conversation-list label.conversation-fork span {{ color: var(--body-text-color-subdued); }}
+#conversation-list label.conversation-fork.selected span {{ color: var(--body-text-color); }}
+#conversation-list .conversation-family {{
+  position: absolute; right: 6px; bottom: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; min-width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px;
+  background: transparent; color: var(--body-text-color-subdued); cursor: pointer;
+}}
+#conversation-list .conversation-family::before {{
+  content: ""; width: 14px; height: 14px; background-color: currentColor;
+  transition: transform 120ms ease;
+}}
+#conversation-list .conversation-family.open::before {{ transform: rotate(90deg); }}
+#conversation-list .conversation-family:hover,
+#conversation-list .conversation-family:focus-visible {{
+  color: var(--body-text-color); background: var(--border-color-primary);
+}}
 /* The archive is the same list showing other conversations, so it is titled
    as such, says so when there is nothing in it, and Archived stays pressed
    until it is turned back. */

@@ -3,6 +3,7 @@ import unittest
 
 from chatlab.conversation import (
     ARCHIVED_VIEW,
+    FAMILY_VIEW,
     MAIN_BRANCH,
     REASONING_TITLE,
     SAVE_FORMAT,
@@ -719,6 +720,80 @@ class ConversationListTests(unittest.TestCase):
 
     def test_choices_for_no_forks_at_all(self):
         self.assertEqual(branch_choices(None, None), [("Main\nNo messages yet", MAIN_BRANCH)])
+
+    @staticmethod
+    def family(count=3):
+        """Main with ``count`` forks of it, each answered at its own length."""
+
+        forks = new_forks()
+        forks["branches"][MAIN_BRANCH] = [make_turn("user", "bored"), measured("Read.", generated=10)]
+        for index in range(1, count + 1):
+            name = f"Fork {index}"
+            forks["branches"][name] = [make_turn("user", "bored"), measured("Walk.", generated=index)]
+            forks["origins"][name] = {"parent": MAIN_BRANCH, "kind": "copy"}
+        return forks
+
+    def test_a_closed_family_shows_its_head_and_how_many_forks_it_has(self):
+        forks = self.family()
+        choices = branch_choices(forks, forks["branches"][MAIN_BRANCH])
+        self.assertEqual(
+            choices, [("Main · bored\nOlmo-3-7B-Think · 110 tokens · 3 forks", MAIN_BRANCH)]
+        )
+
+    def test_a_closed_family_still_shows_the_fork_on_screen(self):
+        forks = self.family()
+        forks["active"] = "Fork 2"
+        choices = branch_choices(forks, forks["branches"]["Fork 2"])
+        self.assertEqual([name for _label, name in choices], [MAIN_BRANCH, "Fork 2"])
+
+    def test_an_open_family_lists_its_forks_on_one_line_each(self):
+        # The title and model are the head's, so a fork's row leaves them out.
+        forks = self.family()
+        forks[FAMILY_VIEW] = {MAIN_BRANCH: True}
+        choices = branch_choices(forks, forks["branches"][MAIN_BRANCH])
+        self.assertEqual(
+            [label for label, _name in choices[1:]],
+            ["↳ Fork 1 · 101 tokens", "↳ Fork 2 · 102 tokens", "↳ Fork 3 · 103 tokens"],
+        )
+
+    def test_a_fork_row_names_what_differs_from_its_head(self):
+        forks = self.family(1)
+        forks[FAMILY_VIEW] = {MAIN_BRANCH: True}
+        forks["branches"]["Fork 1"] = [make_turn("user", "tired"), measured("Nap.", model="org/beta")]
+        choices = branch_choices(forks, forks["branches"][MAIN_BRANCH])
+        self.assertEqual(choices[1][0], "↳ Fork 1 · tired · beta · 120 tokens")
+
+    def test_a_fork_of_a_fork_joins_the_family_of_the_first(self):
+        forks = self.family(1)
+        forks[FAMILY_VIEW] = {MAIN_BRANCH: True}
+        forks["branches"]["Fork 2"] = [make_turn("user", "bored")]
+        forks["origins"]["Fork 2"] = {"parent": "Fork 1", "kind": "copy"}
+        choices = branch_choices(forks, forks["branches"][MAIN_BRANCH])
+        self.assertEqual([name for _label, name in choices], [MAIN_BRANCH, "Fork 1", "Fork 2"])
+        self.assertIn("2 forks", choices[0][0])
+
+    def test_a_fork_whose_parent_is_gone_heads_its_own_family(self):
+        forks = self.family(1)
+        forks["origins"]["Fork 1"]["parent"] = "Fork 9"
+        put_branch_archived(forks, MAIN_BRANCH, False)
+        choices = branch_choices(forks, forks["branches"][MAIN_BRANCH])
+        self.assertEqual([name for _label, name in choices], [MAIN_BRANCH, "Fork 1"])
+        self.assertFalse(choices[1][0].startswith("↳"))
+
+    def test_a_hidden_fork_answering_is_named_on_its_head(self):
+        forks = self.family()
+        choices = branch_choices(forks, forks["branches"][MAIN_BRANCH], running="Fork 3")
+        self.assertTrue(choices[0][0].endswith("3 forks · Fork 3 generating…"))
+        forks[FAMILY_VIEW] = {MAIN_BRANCH: True}
+        choices = branch_choices(forks, forks["branches"][MAIN_BRANCH], running="Fork 3")
+        self.assertTrue(choices[0][0].endswith("3 forks"))
+        self.assertEqual(choices[3][0], "↳ Fork 3 · 103 tokens · Generating…")
+
+    def test_the_family_view_survives_a_copy(self):
+        forks = self.family()
+        forks[FAMILY_VIEW] = {MAIN_BRANCH: True}
+        self.assertEqual(copy_forks(forks)[FAMILY_VIEW], {MAIN_BRANCH: True})
+        self.assertNotIn(FAMILY_VIEW, copy_forks(self.family()))
 
 
 class SaveLoadTests(unittest.TestCase):

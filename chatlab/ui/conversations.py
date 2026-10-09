@@ -17,6 +17,7 @@ from chatlab import settings
 from chatlab.steering import from_controls as steering_from_controls, compact as compact_steering
 from chatlab.conversation import (
     ARCHIVED_VIEW,
+    FAMILY_VIEW,
     branch_archived,
     CHAT_PREFIX,
     FORK_PREFIX,
@@ -80,10 +81,7 @@ def conversation_list_update(forks: dict, turns: list[dict] | None, running: str
     list of those in use.
     """
 
-    choices = [
-        (f"{label} · Generating…" if name == running else label, name)
-        for label, name in branch_choices(forks, turns)
-    ]
+    choices = branch_choices(forks, turns, running)
     listed = forks["active"] in {name for _label, name in choices}
     return gr.update(
         choices=choices,
@@ -497,6 +495,23 @@ def show_archive(forks: dict | None, shown: bool) -> dict:
         forks[ARCHIVED_VIEW] = True
     else:
         forks.pop(ARCHIVED_VIEW, None)
+    return forks
+
+
+def open_family(forks: dict | None, action: str | None) -> dict:
+    """``forks`` with the family a row's toggle named opened or closed in the list."""
+
+    forks = copy_forks(forks)
+    request = conversation_request(action)
+    if request is None:
+        return forks
+    opened = forks.setdefault(FAMILY_VIEW, {})
+    if request.get("open"):
+        opened[request["name"]] = True
+    else:
+        opened.pop(request["name"], None)
+    if not opened:
+        forks.pop(FAMILY_VIEW)
     return forks
 
 
