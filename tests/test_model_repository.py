@@ -14,6 +14,15 @@ from chatlab.model_cache import CacheStatus, cache_status, list_cached_models
 from chatlab.ui import model_repository as repository, models_page
 
 
+def view(model_id, result, token=None, selected=None):
+    """The detail pane's words for ``model_id``, its precision control, and its check button."""
+
+    head, precision, body, check = models_page.model_pane(
+        model_id, selected, result, token, None, None, "full"
+    )
+    return head + body, precision, check
+
+
 class RepositoryTests(unittest.TestCase):
     def check(self, info=None, error=None, model_id="org/model", token="", config=None, config_error=None):
         with tempfile.TemporaryDirectory() as directory, mock.patch(
@@ -54,7 +63,7 @@ class RepositoryTests(unittest.TestCase):
             "org/model-4bit", "config.json", revision="a" * 40, token="secret", etag_timeout=10,
             cache_dir=mock.ANY,
         )
-        detail, precision = repository.repository_view("org/model-4bit", result, "secret")
+        detail, precision, _ = view("org/model-4bit", result, "secret")
         self.assertIn("Repository found", detail)
         self.assertIn("4-bit", detail)
         self.assertFalse(precision["visible"])
@@ -100,7 +109,7 @@ class RepositoryTests(unittest.TestCase):
                     self.info(library_name=library, tags=tags), model_id="org/model-4bit",
                     config={"model_type": "qwen3_5", "torch_dtype": "bfloat16"},
                 )
-                detail, precision = repository.repository_view("org/model-4bit", states[-1])
+                detail, precision, _ = view("org/model-4bit", states[-1])
                 self.assertTrue(precision["visible"])
                 self.assertEqual(states[-1]["format"], "Transformers")
                 self.assertIsNone(states[-1]["bits"])
@@ -115,7 +124,7 @@ class RepositoryTests(unittest.TestCase):
                 result = states[-1]
                 self.assertEqual(result["architecture_unavailable"], not supported)
                 self.assertFalse(result["unsupported"])
-                detail, _ = repository.repository_view("org/model", result)
+                detail, _, _ = view("org/model", result)
                 self.assertEqual("architecture is unavailable" in detail, not supported)
                 self.assertNotIn("No supported weight files", detail)
                 for status in (CacheStatus(), CacheStatus(cached_bytes=100)):
@@ -142,7 +151,7 @@ class RepositoryTests(unittest.TestCase):
                 self.assertEqual(result["status"], "found")
                 self.assertFalse(result["config_verified"])
                 self.assertFalse(result["access_restricted"])
-                detail, precision = repository.repository_view("org/model", result)
+                detail, precision, _ = view("org/model", result)
                 self.assertIn(wording, detail)
                 self.assertTrue(precision["visible"])
 
@@ -162,7 +171,7 @@ class RepositoryTests(unittest.TestCase):
         states, _ = self.check(self.info(tags=[], library_name="transformers"), config={
             "model_type": "qwen3_5", "quantization_config": {"bits": 8, "group_size": 64},
         })
-        detail, precision = repository.repository_view("org/model", states[-1])
+        detail, precision, _ = view("org/model", states[-1])
         self.assertIn("MLX · 8-bit weights", detail)
         self.assertFalse(precision["visible"])
 
@@ -178,7 +187,7 @@ class RepositoryTests(unittest.TestCase):
                 states, _ = self.check(self.info(gated="auto"), config_error=error)
                 self.assertEqual(states[-1]["status"], "found")
                 self.assertEqual(states[-1]["access_restricted"], denied)
-                detail, precision = repository.repository_view("org/model", states[-1])
+                detail, precision, _ = view("org/model", states[-1])
                 self.assertTrue(precision["visible"])
                 self.assertIn("Repository found", detail)
                 self.assertEqual("Access required" in detail, denied)
@@ -195,7 +204,7 @@ class RepositoryTests(unittest.TestCase):
     def test_gated_repository_with_configuration_access_allows_download(self):
         with mock.patch("chatlab.mlx_runtime.mlx_supports", return_value=True):
             states, _ = self.check(self.info(gated="auto"))
-        detail, _ = repository.repository_view("org/model", states[-1])
+        detail, _, _ = view("org/model", states[-1])
         self.assertIn("Access to the configuration was verified", detail)
         self.assertNotIn("Access required", detail)
         with mock.patch.object(models_page, "cache_status", return_value=CacheStatus()):
@@ -227,17 +236,16 @@ class RepositoryTests(unittest.TestCase):
                 {"model_id": "org/quantized", "token_scope": repository.token_scope(None), "status": "error", "detail": "Offline"},
             ):
                 with self.subTest(result=result):
-                    detail, precision = repository.repository_view(
+                    detail, precision, _ = view(
                         "org/unquantized", result, selected="org/quantized"
                     )
                     self.assertFalse(precision["visible"])
-                    self.assertIn("Cached checkpoint", detail)
-                    self.assertIn("4-bit weights", detail)
+                    self.assertIn("as packed (4-bit)", detail)
                     self.assertNotIn("Repository found", detail)
             for selected in ("org/unquantized", "org/missing"):
-                detail, precision = repository.repository_view("org/quantized", None, selected=selected)
+                detail, precision, _ = view("org/quantized", None, selected=selected)
                 self.assertTrue(precision["visible"])
-                self.assertNotIn("Cached checkpoint", detail)
+                self.assertNotIn("as packed", detail)
             online_check.assert_not_called()
 
     def test_a_late_old_token_response_cannot_restore_the_result_for_the_same_id(self):
@@ -248,8 +256,9 @@ class RepositoryTests(unittest.TestCase):
                 old_states, _ = self.check(self.info(), token="old-token", error=error)
                 old = old_states[-1]
                 # The old request finishes after the user has changed credentials.
-                detail, precision = repository.repository_view("org/model", old, "new-token")
-                self.assertEqual(detail, repository.UNCHECKED)
+                detail, precision, check = view("org/model", old, "new-token")
+                self.assertNotIn("Hugging Face check", detail)
+                self.assertTrue(check["visible"])
                 self.assertTrue(precision["visible"])
                 with mock.patch.object(models_page, "cache_status", return_value=CacheStatus()):
                     _, load, download, _ = models_page.refresh_model_actions(
@@ -258,15 +267,16 @@ class RepositoryTests(unittest.TestCase):
                 self.assertTrue(load["interactive"])
                 self.assertTrue(download["interactive"])
         states, _ = self.check(self.info(), token="new-token")
-        detail, precision = repository.repository_view("org/model", states[-1], " new-token ")
+        detail, precision, _ = view("org/model", states[-1], " new-token ")
         self.assertIn("Repository found", detail)
         self.assertFalse(precision["visible"])
         self.assertNotIn("new-token", str(states))
 
     def test_a_late_response_cannot_verify_or_disable_an_edited_id(self):
         old = {"model_id": "org/old", "token_scope": repository.token_scope(None), "status": "missing", "detail": "Repository not found"}
-        detail, precision = repository.repository_view("org/new", old)
-        self.assertEqual(detail, repository.UNCHECKED)
+        detail, precision, check = view("org/new", old)
+        self.assertNotIn("Hugging Face check", detail)
+        self.assertTrue(check["visible"])
         self.assertTrue(precision["visible"])
         with mock.patch.object(models_page, "cache_status", return_value=CacheStatus()):
             _, download, _, _ = models_page.refresh_model_actions("org/new", None, old)
@@ -312,8 +322,8 @@ class RepositoryTests(unittest.TestCase):
             tags=[], library_name="transformers",
             siblings=[SimpleNamespace(rfilename="model.safetensors", size=None)],
         ))
-        detail, _ = repository.repository_view("org/model", states[-1])
-        self.assertIn("Download size unavailable", detail)
+        detail, _, _ = view("org/model", states[-1])
+        self.assertIn("did not list every file", detail)
 
     def test_gguf_repository_exists_but_is_not_loadable(self):
         states, _ = self.check(self.info(

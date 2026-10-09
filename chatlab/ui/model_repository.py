@@ -3,24 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import gradio as gr
-
 from chatlab import mlx_runtime
 from chatlab.model_cache import (
-    cache_folder,
-    format_bytes,
-    mlx_snapshot_bits,
-    snapshot_folder,
     validate_model_id,
 )
 
 
-UNCHECKED = "**Repository not checked** · Choose **Check model** to verify this ID on Hugging Face."
 CONFIG_PROBE_MAX_BYTES = 1024 * 1024
 
 
@@ -161,49 +153,3 @@ def matching_repository(model_id: str, result: dict | None, hf_token: str | None
     ):
         return result
     return {}
-
-
-def repository_view(
-    model_id: str, result: dict | None, hf_token: str | None = None,
-    selected: str | None = None,
-):
-    """Render results only for the current model ID and credentials."""
-
-    # Match the load actions: a cached row takes precedence while its ID is
-    # still being copied into the textbox. Local evidence needs no Hub access.
-    chosen = (selected or model_id or "").strip()
-    result = matching_repository(chosen, result, hf_token)
-    try:
-        snapshot = snapshot_folder(cache_folder(chosen)) if chosen else None
-        local_bits = mlx_snapshot_bits(snapshot) if snapshot is not None else None
-    except (OSError, ValueError):
-        local_bits = None
-    local_note = (
-        f"\n\n**Cached checkpoint:** MLX · {local_bits}-bit weights. Precision is fixed by the cached checkpoint."
-        if local_bits is not None else ""
-    )
-    precision = gr.update(visible=not (local_bits is not None or result.get("mlx", False)))
-    if not result:
-        return UNCHECKED + local_note, precision
-    status = result["status"]
-    if status != "found":
-        return html.escape(result["detail"]) + local_note, precision
-    name = html.escape(result["model_id"])
-    lines = [f"**Repository found** · [View on Hugging Face](https://huggingface.co/{name})"]
-    size = result.get("download_bytes")
-    lines.append(f"**{result['format']}** · " + (
-        f"{format_bytes(size)} of repository files" if size is not None else "Download size unavailable"
-    ))
-    lines.append(result["compatibility"])
-    if result.get("mlx") and result.get("bits"):
-        lines.append("Precision is fixed by this checkpoint; no extra quantization is needed.")
-    if result.get("access_restricted"):
-        lines.append("**Access required:** accept the model's terms on Hugging Face and provide an authorized token under **Access token**.")
-    elif result.get("gated"):
-        lines.append(
-            "Gated repository · Access to the configuration was verified."
-            if result.get("config_verified") else "Gated repository · File access has not been verified."
-        )
-    elif result.get("private"):
-        lines.append("Private repository · Your saved or entered token provided access.")
-    return "\n\n".join(lines) + local_note, precision

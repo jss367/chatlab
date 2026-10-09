@@ -1,3 +1,4 @@
+import datetime
 import importlib.util
 import json
 import re
@@ -4448,6 +4449,142 @@ class MlxHubSearchTests(unittest.TestCase):
 
         self.assertEqual([result.model_id for result in found], ["meta-llama/Llama-3.2-3B-Instruct"])
         self.assertEqual(found[0].kind, model_cache.TEXT_KIND)
+
+
+class HubSearchAccountTests(unittest.TestCase):
+    """What a search says it left out, how two searches merge, and the MLX versions of a model."""
+
+    def setUp(self):
+        self.calls = []
+        self.found = []
+
+        def list_models(**kwargs):
+            self.calls.append(kwargs)
+            found = self.found(kwargs) if callable(self.found) else self.found
+            return list(found)
+
+        api = mock.Mock()
+        api.list_models.side_effect = list_models
+        patched = mock.patch("huggingface_hub.HfApi", return_value=api)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def test_every_result_left_out_is_counted_under_its_reason(self):
+        self.found = [
+            hub_result("org/embedder", "feature-extraction"),
+            hub_result("org/untagged", None),
+            hub_result("org/model-GGUF", "text-generation", tags=["gguf"]),
+            hub_result("org/other-GGUF", "text-generation", tags=["gguf"]),
+            hub_result("mlx-community/model-4bit", "text-generation", tags=["mlx"]),
+            hub_result("org/vision", "image-text-to-text", config={"model_type": "llava"}),
+            hub_result("org/bare", "text-generation", config=None),
+            hub_result("org/kept", "text-generation"),
+        ]
+
+        search = hub_search.search_hub("x")
+
+        self.assertEqual([result.model_id for result in search.results], ["org/kept"])
+        self.assertEqual(search.scanned, 8)
+        self.assertFalse(search.stopped_early)
+        self.assertEqual(
+            {exclusion.reason: (exclusion.count, exclusion.example) for exclusion in search.exclusions},
+            {
+                hub_search.EXCLUDED_TASK: (1, "org/embedder"),
+                hub_search.EXCLUDED_UNTAGGED: (1, "org/untagged"),
+                hub_search.EXCLUDED_FORMAT: (2, "org/model-GGUF"),
+                hub_search.EXCLUDED_MLX: (1, "mlx-community/model-4bit"),
+                hub_search.EXCLUDED_ARCHITECTURE: (1, "org/vision"),
+                hub_search.EXCLUDED_NO_CONFIG: (1, "org/bare"),
+            },
+        )
+
+    def test_a_search_that_stops_reading_says_so(self):
+        self.found = [hub_result(f"org/e{i}", "feature-extraction") for i in range(SEARCH_SCAN_LIMIT + 5)]
+
+        search = hub_search.search_hub("x")
+
+        self.assertEqual(search.scanned, SEARCH_SCAN_LIMIT)
+        self.assertTrue(search.stopped_early)
+
+    def test_a_result_keeps_what_merging_and_the_pane_need(self):
+        created = datetime.datetime(2026, 1, 2, tzinfo=datetime.timezone.utc)
+        self.found = [hub_result(
+            "mlx-community/m-4bit", "text-generation", trending_score=42, created_at=created,
+            tags=["mlx", "base_model:org/m", "base_model:quantized:org/m"],
+            config={"model_type": "llama"},
+        )]
+
+        with (
+            mock.patch("chatlab.model_cache.mlx_available", return_value=True),
+            mock.patch("chatlab.mlx_runtime.mlx_supports", return_value=True),
+        ):
+            (result,) = hub_search.search_hub("m", kind=model_cache.MLX_KIND).results
+
+        self.assertEqual(result.trending_score, 42)
+        self.assertEqual(result.created_at, created.isoformat())
+        self.assertEqual(result.base_model, "org/m")
+        self.assertIn("trendingScore", self.calls[-1]["expand"])
+
+    def test_text_and_mlx_merge_in_the_order_asked_for(self):
+        def by_library(kwargs):
+            if kwargs["filter"] == "mlx":
+                return [
+                    hub_result("mlx-community/b-4bit", "text-generation", downloads=500, tags=["mlx"]),
+                    hub_result("mlx-community/d-4bit", "text-generation", downloads=5, tags=["mlx"]),
+                ]
+            return [
+                hub_result("org/a", "text-generation", downloads=900),
+                hub_result("org/c", "text-generation", downloads=50),
+                hub_result("mlx-community/b-4bit", "text-generation", downloads=500, tags=["mlx"]),
+            ]
+
+        self.found = by_library
+        with (
+            mock.patch("chatlab.model_cache.mlx_available", return_value=True),
+            mock.patch("chatlab.mlx_runtime.mlx_supports", return_value=True),
+        ):
+            search = hub_search.search_hub_kinds(
+                "x", None, (model_cache.TEXT_KIND, model_cache.MLX_KIND), "Popular", limit=3
+            )
+
+        self.assertEqual(
+            [result.model_id for result in search.results],
+            ["org/a", "mlx-community/b-4bit", "org/c"],
+        )
+        self.assertEqual(search.scanned, 5)
+        # The text search left the conversion out, but the MLX search found
+        # it, so it is not reported as missing.
+        self.assertNotIn(
+            hub_search.EXCLUDED_MLX, [exclusion.reason for exclusion in search.exclusions]
+        )
+
+    def test_mlx_versions_come_from_the_publishers_that_convert_models_as_published(self):
+        self.found = [
+            hub_result("mlx-community/m-4bit", "text-generation", tags=["mlx"], config={"model_type": "llama"}),
+            hub_result("someone/m-finetune-4bit", "text-generation", tags=["mlx"], config={"model_type": "llama"}),
+            hub_result("lmstudio-community/m-MLX-8bit", "text-generation", tags=["mlx"], config={"model_type": "llama"}),
+            hub_result("mlx-community/m-odd", "text-generation", tags=["mlx"], config={"model_type": "exotic"}),
+        ]
+
+        with (
+            mock.patch("chatlab.model_cache.mlx_available", return_value=True),
+            mock.patch("chatlab.mlx_runtime.mlx_supports", side_effect=lambda kind: kind == "llama"),
+        ):
+            versions = hub_search.mlx_versions("org/m", "tok")
+
+        self.assertEqual(
+            [version.model_id for version in versions],
+            ["mlx-community/m-4bit", "lmstudio-community/m-MLX-8bit"],
+        )
+        self.assertTrue(all(version.kind == model_cache.MLX_KIND for version in versions))
+        self.assertEqual(self.calls[-1]["filter"], ["base_model:quantized:org/m", "mlx"])
+        self.assertEqual(self.calls[-1]["token"], "tok")
+
+    def test_no_mlx_versions_are_looked_for_where_mlx_cannot_run(self):
+        with mock.patch("chatlab.model_cache.mlx_available", return_value=False):
+            self.assertEqual(hub_search.mlx_versions("org/m"), [])
+
+        self.assertEqual(self.calls, [])
 
 
 def logged(caught, opening: str) -> str:

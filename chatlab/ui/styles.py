@@ -240,9 +240,63 @@ body.column-dragging {{ user-select: none; }}
 #models-page, #settings-page, #extensions-page {{
   background: var(--background-fill-secondary);
 }}
-#models-columns {{ align-items: flex-start; gap: 24px; }}
-#model-controls {{ gap: 24px; }}
-#models-page .model-card, #settings-page .settings-card, #extensions-page .settings-card {{
+#models-page {{ gap: 14px; }}
+/* The title, the two tabs and the loaded model share one line. */
+#models-topbar {{ align-items: center; gap: 18px; flex-wrap: wrap; }}
+#models-topbar > #models-hero {{ flex: 0 0 auto; width: auto; padding: 0; }}
+#models-topbar > #models-hero h1 {{ margin: 0; }}
+#models-topbar > #current-model-row {{
+  flex: 1 1 320px; justify-content: flex-end; min-width: 0;
+}}
+#models-tabs, #search-kind {{ padding: 0; border: 0; background: transparent; }}
+#models-tabs {{ min-width: max-content !important; }}
+#models-tabs .wrap {{
+  display: flex; flex-wrap: nowrap; width: fit-content; gap: 2px; padding: 3px;
+  border-radius: 10px; background: var(--border-color-primary);
+}}
+#models-tabs label {{
+  margin: 0; padding: 6px 16px; border: 0; border-radius: 8px; background: transparent;
+}}
+#models-tabs label.selected {{ background: var(--block-background-fill); box-shadow: 0 1px 2px rgb(0 0 0 / 8%); }}
+#models-tabs label.selected span {{ font-weight: 600; }}
+#models-tabs input, #search-kind input {{ position: absolute; width: 1px; height: 1px; opacity: 0; }}
+#models-tabs label:has(input:focus-visible), #search-kind label:has(input:focus-visible) {{
+  outline: 2px solid var(--color-accent); outline-offset: 2px;
+}}
+/* The search box is the page's main control, so it is the widest and tallest. */
+#model-find-controls, #model-downloaded-controls {{ gap: 10px; flex: none !important; }}
+#models-topbar {{ flex: none !important; }}
+#model-search-query {{ padding: 0; border: 0; box-shadow: none; background: transparent; }}
+#model-search-query input {{
+  min-height: 46px; padding: 0 14px; font-size: 15px; border-radius: 12px;
+}}
+#model-search-filters {{ align-items: center; gap: 10px; flex-wrap: wrap; }}
+#model-search-filters > * {{ flex: 0 0 auto; width: auto; min-width: 0; }}
+/* Kind and fit read as chips: a choice shown filled, the rest outlined. */
+#search-kind .wrap {{ display: flex; gap: 8px; }}
+#search-kind label, #model-fits-only label {{
+  margin: 0; padding: 5px 14px; border: 1px solid var(--border-color-primary);
+  border-radius: 999px; background: var(--block-background-fill); cursor: pointer;
+}}
+#search-kind label.selected, #model-fits-only label:has(input:checked) {{
+  border-color: var(--color-accent); background: var(--color-accent);
+}}
+#search-kind label.selected span, #model-fits-only label:has(input:checked) span {{
+  color: white; font-weight: 600;
+}}
+#model-fits-only {{ padding: 0; border: 0; background: transparent; }}
+#model-fits-only input {{ position: absolute; width: 1px; height: 1px; opacity: 0; }}
+#model-search-order {{ margin-left: auto; padding: 0; border: 0; background: transparent; }}
+#models-page .form {{ border: 0; box-shadow: none; background: transparent; }}
+
+#models-columns {{ align-items: stretch; gap: 16px; }}
+#models-page .model-card {{
+  min-width: 0; padding: 0; gap: 0; overflow: hidden;
+  border: 1px solid transparent; border-radius: 14px;
+  background: var(--block-background-fill);
+  box-shadow: var(--card-shadow);
+}}
+#settings-page .settings-card, #extensions-page .settings-card {{
   min-width: 0; padding: 20px; gap: 16px;
   border: 1px solid transparent; border-radius: 14px;
   background: var(--block-background-fill);
@@ -252,7 +306,7 @@ body.column-dragging {{ user-select: none; }}
   border-color: var(--border-color-primary); box-shadow: none;
 }}
 #models-page .model-card > *, #settings-page .settings-card > *, #extensions-page .settings-card > * {{ flex-shrink: 0; }}
-#models-page .model-card h2, #settings-page .settings-card h2, #extensions-page .settings-card h2 {{
+#settings-page .settings-card h2, #extensions-page .settings-card h2 {{
   margin: 0; padding-bottom: 12px;
   border-bottom: 1px solid var(--border-color-primary);
   font-size: 17px; line-height: 24px; font-weight: 600;
@@ -272,49 +326,115 @@ body.column-dragging {{ user-select: none; }}
   border-color: var(--color-accent);
   outline: 2px solid var(--color-accent); outline-offset: 2px;
 }}
-#search-kind {{ padding: 0; border: 0; background: transparent; }}
-#search-kind .wrap {{
-  display: flex; width: fit-content; max-width: 100%; gap: 4px; padding: 4px;
-  border: 1px solid var(--border-color-primary); border-radius: 10px;
+/* Fit is tinted the same way in both lists: tight in the theme's warning
+   colour, too large greyed rather than reddened, since it is not an error
+   and the reader may be looking at it to find that out. */
+:root {{ --fit-tight: #b45309; --fit-ok: #1d7a46; }}
+.dark {{ --fit-tight: #fbbf24; --fit-ok: #4ade80; }}
+
+/* The results list. */
+#model-find-list, #model-downloaded-list {{ gap: 0; }}
+.model-results-head {{
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  padding: 14px 18px 10px; border-bottom: 1px solid var(--border-color-primary);
+}}
+.model-results-title {{ font-weight: 600; font-size: 15px; }}
+.model-results-note, .model-results-count {{ font-size: 12px; color: var(--body-text-color-subdued); }}
+.model-results-message {{ margin: 0; padding: 14px 18px; color: var(--body-text-color-subdued); }}
+.model-result {{
+  display: flex; width: 100%; align-items: center; gap: 12px; padding: 11px 18px;
+  border: 0 !important; border-bottom: 1px solid var(--border-color-primary) !important;
+  border-radius: 0; background: transparent; text-align: left; cursor: pointer;
+  font: inherit; color: inherit;
+}}
+.model-result:hover {{ background: var(--background-fill-secondary); }}
+.model-result.selected {{
+  background: color-mix(in srgb, var(--color-accent) 9%, transparent);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}}
+.model-result:focus-visible {{ outline: 2px solid var(--color-accent); outline-offset: -2px; }}
+.model-result.unfit .model-result-main {{ opacity: 0.55; }}
+.model-result-main {{ flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }}
+.model-result-id {{ font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.model-org {{ color: var(--body-text-color-subdued); font-weight: 400; }}
+.model-result-summary {{ font-size: 12.5px; color: var(--body-text-color-subdued); }}
+.model-result-badges {{ display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }}
+.model-result-numbers {{
+  flex: none; text-align: right; font-size: 12px; line-height: 1.5;
+  color: var(--body-text-color-subdued);
+}}
+.model-badge-chip {{
+  display: inline-block; padding: 0 6px; font-size: 11px; line-height: 18px; font-weight: 500;
+  border: 1px solid var(--border-color-primary); border-radius: 5px;
+  color: var(--body-text-color-subdued); background: var(--background-fill-secondary);
+  white-space: nowrap;
+}}
+.model-badge-chip.fits {{ color: var(--fit-ok); border-color: color-mix(in srgb, var(--fit-ok) 35%, transparent); }}
+.model-badge-chip.tight {{ color: var(--fit-tight); border-color: color-mix(in srgb, var(--fit-tight) 40%, transparent); }}
+.model-badge-chip.mlx {{ color: #0b6f86; border-color: rgb(11 111 134 / 30%); }}
+.model-badge-chip.gated {{ color: #8a4bd0; border-color: rgb(138 75 208 / 30%); }}
+.model-badge-chip.downloaded, .model-badge-chip.loaded, .model-badge-chip.pick {{
+  color: var(--color-accent); border-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
+}}
+.dark .model-badge-chip.mlx {{ color: #67d4ea; }}
+.dark .model-badge-chip.gated {{ color: #c4a5f5; }}
+.model-results-foot {{
+  padding: 12px 18px; font-size: 12.5px; color: var(--body-text-color-subdued);
   background: var(--background-fill-secondary);
 }}
-#search-kind label {{
-  flex: 1 1 auto; justify-content: center; margin: 0; padding: 8px 14px;
-  border: 1px solid transparent; border-radius: 7px; background: transparent;
+.model-results-foot p {{ margin: 6px 0 0; }}
+.model-results-foot summary {{ cursor: pointer; font-weight: 600; color: var(--body-text-color); }}
+.model-results-foot ul {{ margin: 8px 0 0; padding-left: 18px; }}
+
+/* The detail pane. */
+#models-page #model-pane {{ padding: 18px 20px; gap: 14px; }}
+.pane-empty {{ color: var(--body-text-color-subdued); padding: 8px 0; }}
+.pane-id {{ display: flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 600; }}
+.pane-id .model-org {{ font-weight: 400; }}
+.pane-links {{ margin-top: 3px; font-size: 12.5px; color: var(--body-text-color-subdued); }}
+.pane-links a {{ color: var(--color-accent); text-decoration: none; }}
+.pane-summary {{ margin: 8px 0 0; }}
+.pane-gated {{
+  margin-top: 10px; padding: 10px 12px; font-size: 13px; border-radius: 10px;
+  border: 1px solid rgb(138 75 208 / 30%); background: rgb(138 75 208 / 7%);
 }}
-#search-kind label.selected {{
-  border-color: var(--border-color-primary);
-  background: var(--block-background-fill);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+.pane-facts {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+.pane-fact {{ padding: 10px 12px; border: 1px solid var(--border-color-primary); border-radius: 10px; }}
+.pane-fact-label {{ font-size: 12px; color: var(--body-text-color-subdued); }}
+.pane-fact-value {{ margin-top: 1px; font-size: 17px; font-weight: 600; }}
+.pane-fact-note {{ margin-top: 3px; font-size: 12px; color: var(--body-text-color-subdued); }}
+.pane-fact.ok .pane-fact-value {{ color: var(--fit-ok); }}
+.pane-fact.warn .pane-fact-value {{ color: var(--fit-tight); }}
+.pane-fact.bad .pane-fact-value {{ color: var(--body-text-color-subdued); }}
+.pane-section {{ margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-color-primary); }}
+.pane-label {{
+  margin-bottom: 8px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--body-text-color-subdued);
 }}
-#search-kind label.selected span {{ color: var(--color-accent); font-weight: 600; }}
-#search-kind input {{
-  position: absolute; width: 1px; height: 1px; opacity: 0;
+.pane-capabilities {{
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px;
+  margin: 0; padding: 0; list-style: none; font-size: 13px;
 }}
-#search-kind label:has(input:focus-visible) {{
-  outline: 2px solid var(--color-accent); outline-offset: 2px;
+.pane-capabilities li::before {{ font-weight: 700; margin-right: 6px; }}
+.pane-capabilities li.yes::before {{ content: "✓"; color: var(--fit-ok); }}
+.pane-capabilities li.no {{ color: var(--body-text-color-subdued); }}
+.pane-capabilities li.no::before {{ content: "✕"; color: #c0453a; }}
+.pane-versions {{ display: flex; flex-direction: column; gap: 6px; }}
+.model-version {{
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 12px;
+  border: 1px solid var(--border-color-primary); border-radius: 10px;
+  background: transparent; text-align: left; cursor: pointer; font: inherit; color: inherit;
 }}
-#model-search-row {{ align-items: flex-end; gap: 12px; }}
-#models-page .form, #model-search-query {{
-  border: 0; box-shadow: none; background: transparent;
+.model-version:hover {{ background: var(--background-fill-secondary); }}
+.model-version-main {{ display: flex; flex-direction: column; min-width: 0; }}
+.model-version-id {{ color: var(--color-accent); font-weight: 500; font-size: 13px; }}
+.model-version-note {{ font-size: 12px; color: var(--body-text-color-subdued); }}
+.pane-note {{ margin: 0 0 6px; font-size: 13px; color: var(--body-text-color-subdued); }}
+#model-actions {{
+  gap: 10px; flex-wrap: wrap; padding-top: 14px;
+  border-top: 1px solid var(--border-color-primary);
 }}
-#model-search-query {{ padding: 0; }}
-#model-search-query input {{ min-height: 42px; }}
-#model-search-button {{ min-height: 42px; }}
-/* The search results table. Its rows are picked by clicking, and its cells
-   are tinted by fit from Python (see FIT_STYLES), which reads the tight
-   colour from this variable because the two themes disagree on it. */
-:root {{ --fit-tight: #b45309; }}
-.dark {{ --fit-tight: #fbbf24; }}
-#model-search-results table {{ font-family: var(--font); font-size: 0.82rem; }}
-#model-search-results tbody td {{ cursor: pointer; }}
-/* A starter's note sits under its name in the first cell; see search_row. */
-#model-search-results tbody td:first-child .text {{ white-space: pre-line; }}
-/* Counts, sizes, verdicts and dates read as one token each. */
-#model-search-results tbody td:not(:first-child) .text {{ white-space: nowrap; }}
-/* The page's own button border (above) would box every column heading. */
-#model-search-results button {{ border-width: 0; }}
-#models-page .model-list {{ padding: 0; border: 0; }}
+#models-page .model-list {{ padding: 8px; border: 0; }}
 #models-page .model-list label {{ padding: 12px 12px 12px 18px; border-width: 1px; border-radius: 8px; }}
 #models-page .block.model-detail, #settings-page .block.model-detail {{
   padding: 12px 14px; border: 1px solid var(--border-color-primary);
@@ -325,8 +445,8 @@ body.column-dragging {{ user-select: none; }}
 #models-page .block.model-detail:not(:has(.md > *)) {{ display: none; }}
 @media (max-width: 800px) {{
   #models-page, #settings-page, #extensions-page {{ padding: 20px 16px; }}
-  #models-page .model-card, #settings-page .settings-card, #extensions-page .settings-card {{ padding: 16px; }}
-  #model-controls {{ min-width: min(360px, 100%) !important; }}
+  #settings-page .settings-card, #extensions-page .settings-card {{ padding: 16px; }}
+  .pane-facts, .pane-capabilities {{ grid-template-columns: 1fr; }}
 }}
 
 /* Settings. The two columns each hold a stack of cards: the boxes that are
@@ -391,7 +511,7 @@ body.column-dragging {{ user-select: none; }}
    against another figure needs. */
 #generation-status, #token-budget, .token-budget, #image-status,
 #models-page .model-detail, #settings-page .model-detail,
-#settings-page .hardware-panel, #model-search-results table,
+#settings-page .hardware-panel, #model-search-results, #model-pane,
 #token-alternatives table, #my-models-summary, .model-badge {{
   font-variant-numeric: tabular-nums;
 }}
@@ -399,8 +519,6 @@ body.column-dragging {{ user-select: none; }}
 #images-hero h1 {{ font-size: 18px; line-height: 26px; font-weight: 600; margin: 0; }}
 #images-hero p {{ font-size: 12px; color: var(--body-text-color-subdued); margin: 2px 0 0; }}
 #model-status {{ min-height: 0; }}
-#model-id-row {{ align-items: flex-end; gap: 8px; }}
-#model-id-row > button {{ margin-bottom: 12px; min-height: 40px; }}
 #current-model-row {{ align-items: center; gap: 12px; }}
 #currently-loaded-model {{ flex: 1; min-width: 0; }}
 #models-page .model-access > button {{ border: 0; }}
@@ -408,9 +526,6 @@ body.column-dragging {{ user-select: none; }}
   padding: 16px 20px; border: 1px solid var(--border-color-primary); border-radius: 12px;
   background: var(--block-background-fill);
 }}
-#model-repository {{ padding: 12px; border-radius: 8px; background: var(--background-fill-secondary); }}
-#model-repository p {{ margin: 0 0 8px; }}
-#model-repository p:last-child {{ margin-bottom: 0; }}
 
 /* The model badge stays small and wraps with its actions in narrow columns. */
 #model-bar, #image-model-bar {{ flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }}
