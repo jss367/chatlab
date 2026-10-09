@@ -205,6 +205,37 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertIn("Generating", choices["choices"][0][0])
         self.assertEqual(choices["choices"][0][1], MAIN_BRANCH)
 
+    def labels(self):
+        choices = self.job.choices(self.state[self.forks._id], self.state[self.turns._id])
+        return dict((name, label) for label, name in choices["choices"])
+
+    def test_reply_finished_while_away_is_marked_until_opened(self):
+        self.start()
+        self.switch("Chat 1")
+        self.finish()
+        self.call("poll")
+        self.assertTrue(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+        self.assertFalse(self.labels()["Chat 1"].startswith(conversations.UNREAD_MARK))
+        self.switch(MAIN_BRANCH)
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+        self.switch("Chat 1")
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
+    def test_reply_finished_in_view_is_not_marked(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        self.switch("Chat 1")
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
+    def test_reply_stopped_while_away_is_not_marked(self):
+        self.start()
+        self.switch("Chat 1")
+        self.call("stop_generation")
+        self.finish()
+        self.call("poll")
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
     def test_state_is_independent_between_browser_sessions(self):
         other = SessionState(self.demo)[self.job_state._id]
         self.start()

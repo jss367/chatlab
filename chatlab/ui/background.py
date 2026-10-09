@@ -80,6 +80,9 @@ class ConversationJob:
         self.new_branch = None
         self.save_receipt = None
         self.save_names = set()
+        # Conversations whose reply finished and the reader has not opened
+        # since. Outlives a run, so starting another keeps the earlier dots.
+        self.unread = set()
         with _JOBS_LOCK:
             _JOBS.add(self)
 
@@ -209,6 +212,10 @@ class ConversationJob:
             logger.warning("Final conversation save failed for %s", self.owner)
         with self.lock:
             self.running = False
+            # A run the reader stopped is one they already know about.
+            # choices() takes the mark off if they are looking at it.
+            if not self.cancel.is_set():
+                self.unread.add(self.owner)
 
     def stop(self):
         with self.lock:
@@ -261,7 +268,9 @@ class ConversationJob:
     def choices(self, forks, turns):
         with self.lock:
             running = self.owner if self.running else None
-        return conversation_list_update(forks, turns, running)
+            self.unread.discard(forks["active"])
+            unread = frozenset(self.unread)
+        return conversation_list_update(forks, turns, running, unread)
 
     def render(self, forks, turns, scale):
         with self.lock:
