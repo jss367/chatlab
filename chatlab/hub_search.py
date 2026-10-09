@@ -9,7 +9,8 @@ every result in the table is one a download would make usable.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from concurrent.futures import Executor, ThreadPoolExecutor
+from dataclasses import dataclass, replace
 
 from chatlab import adapters
 from chatlab import mlx_runtime
@@ -75,9 +76,15 @@ SEARCH_SCAN_LIMIT = 400
 # organisms. A text search asks for both, and tells an adapter by its files.
 ADAPTER_LIBRARY = "peft"
 
-# The tag the hub gives an adapter for the model it was trained on, where the
-# card names one: "base_model:adapter:Qwen/Qwen2.5-7B-Instruct".
-ADAPTER_BASE_TAG = "base_model:adapter:"
+# How many adapters are checked at once. What the hub lists says nothing of
+# an adapter's type or base: a peft repository's config carries the base and
+# the task but not the type, and one filed under "transformers" carries
+# neither. So each adapter's own adapter_config.json is read, and its base's
+# metadata after it, a request apiece; a search of the full discovery list
+# can hold a hundred adapters, and one at a time that is half a minute.
+ADAPTER_CHECK_WORKERS = 16
+# How long one of those requests may take before its adapter is left out.
+ADAPTER_CHECK_TIMEOUT = 10
 
 # A root checkpoint beside adapter_config.json makes the repository the model
 # it holds, the way model_cache.is_adapter_snapshot reads it once on disk.
@@ -101,13 +108,106 @@ def is_adapter_repo(filenames: Iterable[str]) -> bool:
     )
 
 
-def adapter_base_from_tags(tags: Iterable[str]) -> str | None:
-    """The base model the hub's tags say an adapter was trained on, if they say."""
+def fetch_adapter_config(model_id: str, token: str | None) -> dict | None:
+    """The ``adapter_config.json`` at the root of ``model_id`` on the hub, or ``None``.
 
-    for tag in tags:
-        if tag.startswith(ADAPTER_BASE_TAG):
-            return tag[len(ADAPTER_BASE_TAG) :] or None
-    return None
+    Read off the hub directly rather than through ``hf_hub_download``: a file
+    in the hub cache would put the adapter in the local inventory as a
+    download begun, which is why model_repository keeps its config probe out
+    of the cache too. ``None`` for any failure, a gated repository included -
+    a search leaves out what it cannot read rather than guess at it.
+    """
+
+    import httpx
+    from huggingface_hub import hf_hub_url
+    from huggingface_hub.utils import build_hf_headers, get_session
+
+    try:
+        response = get_session().get(
+            hf_hub_url(model_id, adapters.ADAPTER_CONFIG),
+            headers=build_hf_headers(token=token),
+            timeout=ADAPTER_CHECK_TIMEOUT,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+        config = response.json()
+    except (httpx.HTTPError, OSError, ValueError):
+        return None
+    return config if isinstance(config, dict) else None
+
+
+def base_loads(
+    api, base: str, revision: str | None, token: str | None, model_types: Mapping[str, str]
+) -> bool:
+    """Whether the base an adapter names would load here as a model of its own.
+
+    The same two checks a text result gets, made on the base's metadata: an
+    adapter merges into whatever ``AutoModelForCausalLM`` builds from the
+    base, so a base that would not be listed itself cannot carry one. A gated
+    base still answers this, since the hub shows anyone a gated repository's
+    metadata, and the download asks for the token when it gets there.
+    """
+
+    from huggingface_hub.errors import HfHubHTTPError
+    import httpx
+
+    try:
+        info = api.model_info(
+            base, revision=revision, expand=["config", "tags"], token=token,
+            timeout=ADAPTER_CHECK_TIMEOUT,
+        )
+    except (HfHubHTTPError, httpx.HTTPError, OSError, ValueError):
+        return False
+    if foreign_to_transformers(getattr(info, "tags", None) or []):
+        return False
+    return loads_as_a_causal_lm(getattr(info, "config", None), model_types)
+
+
+def confirm_adapters(
+    batch: dict[str, tuple[tuple, HubModel]],
+    api,
+    token: str | None,
+    model_types: Mapping[str, str],
+    bases: dict[tuple[str, str | None], bool],
+    pool: Executor,
+) -> dict[str, tuple[tuple, HubModel]]:
+    """``batch`` less the adapters ChatLab would turn away once they were down.
+
+    An adapter is kept when its config passes :func:`adapters.adapter_problem`
+    - a LoRA, for generating text, on a base named by Hub ID - and that base
+    passes :func:`base_loads`; those are the checks the Models page makes
+    after the download, and making them here is what keeps an IA3 adapter or
+    one trained on a local path from being offered as one to download and
+    load. A kept adapter carries the base its config names, the Unsloth swap
+    made, which is the one the download fetches. ``bases`` remembers each
+    base's verdict for the rest of the search, so twenty organisms trained on
+    one model ask about it once.
+    """
+
+    found = [result for _, result in batch.values() if result.adapter]
+    if not found:
+        return batch
+    configs = pool.map(lambda result: fetch_adapter_config(result.model_id, token), found)
+    targets = {}
+    for result, config in zip(found, configs):
+        if config is not None and adapters.adapter_problem(config, result.model_id) is None:
+            targets[result.model_id] = (
+                adapters.base_model_id(config), adapters.base_revision(config)
+            )
+    unasked = list(dict.fromkeys(t for t in targets.values() if t not in bases))
+    verdicts = pool.map(
+        lambda target: base_loads(api, *target, token, model_types), unasked
+    )
+    bases.update(zip(unasked, verdicts))
+    confirmed = {}
+    for model_id, (key, result) in batch.items():
+        if result.adapter:
+            target = targets.get(model_id)
+            if target is None or not bases[target]:
+                continue
+            result = replace(result, base_model=target[0])
+        confirmed[model_id] = (key, result)
+    return confirmed
 
 
 def foreign_to_transformers(tags: Iterable[str]) -> bool:
@@ -175,9 +275,8 @@ class HubModel:
     # Which kind the search that found it was scoped to, so the list that
     # holds it can be judged and described as that kind.
     kind: str = TEXT_KIND
-    # A LoRA adapter, and the base the hub's tags name for it. The base is
-    # None where the tags are silent; the adapter's own config names it once
-    # the adapter is downloaded, and the download fetches it then.
+    # A LoRA adapter, and the base its config names, which is the one the
+    # download fetches beside it (see confirm_adapters).
     adapter: bool = False
     base_model: str | None = None
 
@@ -217,8 +316,8 @@ def search_hub_models(
     exception, told by its files (:func:`is_adapter_repo`) rather than its
     tags: the hub is asked for :data:`ADAPTER_LIBRARY` as well, and an
     adapter under either library is kept unless it names a pipeline that
-    writes no text. Its base is checked once the adapter's config is down,
-    which costs a few megabytes rather than a model.
+    writes no text, and then only once :func:`confirm_adapters` has read its
+    config and its base's metadata and found both loadable.
 
     For an image model the tag is :data:`SEARCH_IMAGE_PIPELINE_TAGS` and the
     runtime check is the same one, which asks about the weight format rather
@@ -258,11 +357,48 @@ def search_hub_models(
     model_types = {} if images or mlx else causal_lm_model_types()
     api = HfApi()
     kept: dict[str, tuple[tuple, HubModel]] = {}
-    for library in libraries:
-        # No limit: the generator pages through the results, and the loop
-        # below stops it once the list is full or SEARCH_SCAN_LIMIT have been
-        # read.
-        found = api.list_models(
+    bases: dict[tuple[str, str | None], bool] = {}
+    with ThreadPoolExecutor(max_workers=ADAPTER_CHECK_WORKERS) as pool:
+        for library in libraries:
+            read_library(
+                library, api, cleaned, sort, token, kind, model_types, limit,
+                kept, bases, pool,
+            )
+    ranked = list(kept.values())
+    if len(libraries) > 1:
+        # Each answer is in the hub's order already; this interleaves the two
+        # by the same key. The top of the union is the top of the two tops,
+        # so reading each to the limit is enough.
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return [result for _, result in ranked[:limit]]
+
+
+def read_library(
+    library: str,
+    api,
+    cleaned: str,
+    sort: str,
+    token: str | None,
+    kind: str,
+    model_types: Mapping[str, str],
+    limit: int,
+    kept: dict[str, tuple[tuple, HubModel]],
+    bases: dict[tuple[str, str | None], bool],
+    pool: Executor,
+) -> None:
+    """Add up to ``limit`` of the hub's answers under ``library`` to ``kept``.
+
+    Read in batches, each as long as the list still has room for: what the
+    files and tags pass goes into a batch, :func:`confirm_adapters` checks the
+    batch's adapters all at once, and whatever it drops is made up from the
+    next batch, until the list is full, the answer runs out, or
+    :data:`SEARCH_SCAN_LIMIT` have been read.
+    """
+
+    # No limit: the generator pages through the results, and the loop below
+    # stops it.
+    found = iter(
+        api.list_models(
             search=cleaned or None,
             filter=library,
             sort=sort,
@@ -282,26 +418,29 @@ def search_hub_models(
             ],
             token=token,
         )
-        added = 0
-        for scanned, info in enumerate(found, start=1):
-            if scanned > SEARCH_SCAN_LIMIT:
-                break
+    )
+    added = scanned = 0
+    last = False
+    while added < limit and not last:
+        batch: dict[str, tuple[tuple, HubModel]] = {}
+        for info in found:
+            scanned += 1
             result = loadable_result(info, kind, model_types)
             # A repository filed under one library can carry the other's tag,
             # and the hub's filter matches tags, so both answers can hold it.
-            if result is None or result.model_id in kept:
-                continue
-            kept[result.model_id] = (sort_value(info, sort), result)
-            added += 1
-            if added == limit:
+            if result is not None and result.model_id not in kept:
+                batch[result.model_id] = (sort_value(info, sort), result)
+            if scanned == SEARCH_SCAN_LIMIT:
+                last = True
                 break
-    ranked = list(kept.values())
-    if len(libraries) > 1:
-        # Each answer is in the hub's order already; this interleaves the two
-        # by the same key. The top of the union is the top of the two tops,
-        # so reading each to the limit is enough.
-        ranked.sort(key=lambda pair: pair[0], reverse=True)
-    return [result for _, result in ranked[:limit]]
+            if added + len(batch) == limit:
+                break
+        else:
+            # The answer ran out.
+            last = True
+        confirmed = confirm_adapters(batch, api, token, model_types, bases, pool)
+        kept.update(confirmed)
+        added += len(confirmed)
 
 
 def sort_value(info, sort: str) -> tuple:
@@ -334,8 +473,9 @@ def loadable_result(info, kind: str, model_types: Mapping[str, str]) -> HubModel
     adapter = kind == TEXT_KIND and is_adapter_repo(filenames)
     # An adapter's card often names no pipeline, and its config is the
     # tokenizer's alone: the model it changes is the base's to describe, and
-    # the adapter's own config is judged once it is down (adapter_problem).
-    # A pipeline it does name still has to be one that writes text.
+    # the adapter's own config is read and judged after this, a batch at a
+    # time (confirm_adapters). A pipeline it does name still has to be one
+    # that writes text.
     if pipeline_tag not in wanted_tags and not (adapter and pipeline_tag is None):
         return None
     if mlx:
@@ -373,5 +513,4 @@ def loadable_result(info, kind: str, model_types: Mapping[str, str]) -> HubModel
         license=licenses[0] if licenses else None,
         kind=kind,
         adapter=adapter,
-        base_model=adapter_base_from_tags(tags) if adapter else None,
     )
