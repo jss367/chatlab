@@ -328,6 +328,21 @@ def copy_turns(turns: list[dict] | None) -> list[dict]:
     return copied
 
 
+def recorded_profile_note(turns: list[dict] | None) -> str:
+    """Display recorded replay lineage without adding anything to model messages."""
+    provenance = next((t.get("institutions_provenance") for t in turns or []
+                       if isinstance(t.get("institutions_provenance"), dict)), None)
+    profile = (provenance or {}).get("model_profile")
+    if not isinstance(profile, dict) or not isinstance(profile.get("parent"), dict):
+        return ""
+    def identity(repository):
+        return html.escape(str(repository.get("repo", "unknown"))) + " @ " + html.escape(str(repository.get("revision", "unknown")))
+    note = " Recorded parent: " + identity(profile["parent"]) + "."
+    if isinstance(profile.get("adapter"), dict):
+        note += " Recorded adapter: " + identity(profile["adapter"]) + "."
+    return note + " Recorded weights are not loaded automatically; loaded weight identity is unverified."
+
+
 def display_messages(
     turns: list[dict] | None,
 ) -> tuple[list[dict], list[tuple[int, str]]]:
@@ -894,6 +909,8 @@ def turn_entries(turns: list[dict] | None) -> list[dict]:
             entry["steering"] = compact_steering(turn["steering"])
         if isinstance(turn.get("generation_settings"), dict):
             entry["generation_settings"] = copy.deepcopy(turn["generation_settings"])
+        if isinstance(turn.get("institutions_provenance"), dict):
+            entry["institutions_provenance"] = copy.deepcopy(turn["institutions_provenance"])
         entries.append(entry)
     return entries
 
@@ -943,6 +960,10 @@ def turns_from_entries(raw_turns) -> list[dict]:
             turn["steering"] = compact_steering(entry["steering"])
         if isinstance(entry.get("generation_settings"), dict):
             turn["generation_settings"] = copy.deepcopy(entry["generation_settings"])
+        if "institutions_provenance" in entry:
+            if not isinstance(entry["institutions_provenance"], dict):
+                raise ValueError("Turn institutions_provenance must be an object.")
+            turn["institutions_provenance"] = copy.deepcopy(entry["institutions_provenance"])
         turns.append(turn)
     return turns
 

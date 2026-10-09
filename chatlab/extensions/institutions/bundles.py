@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import gzip
+import hashlib
+import io
 import json
 import math
 from pathlib import Path
@@ -41,6 +43,13 @@ class Run:
     games: tuple
 
     @property
+    def scenario(self):
+        return self.manifest.get("scenario", "invoice_payments")
+
+    def read_game(self, entry):
+        return read_game(self, entry)
+
+    @property
     def run_id(self):
         return self.manifest["run_id"]
 
@@ -50,7 +59,7 @@ class Run:
 
     @property
     def arms(self):
-        return self.manifest["arms"]
+        return self.manifest.get("arms", {})
 
     @property
     def model(self):
@@ -149,6 +158,20 @@ def read_run(directory):
         raise ValueError(f"cannot read {path}: {exc.strerror or exc}") from exc
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError(f"{path} is not valid JSON: {exc}") from exc
+    if isinstance(manifest, dict) and manifest.get("format") == "chatlab-institutions-run-2":
+        from .adapters import adapter
+        adapter(manifest.get("scenario")).validate_manifest(manifest)
+        # Version 2 is atomic: a damaged index cannot become a zero-violation subset.
+        for entry in manifest["games"]:
+            game_path = _inside(directory, entry["file"])
+            try:
+                with game_path.open("rb") as stream:
+                    magic = stream.read(2)
+            except OSError as exc:
+                raise ValueError(f"{entry['file']} cannot be read: {exc}") from exc
+            if magic != GZIP_MAGIC:
+                raise ValueError(f"{entry['file']} is not a gzipped game")
+        return Run(directory, manifest, tuple(manifest["games"])), []
     if not isinstance(manifest, dict) or manifest.get("format") != RUN_FORMAT:
         raise ValueError(f"{path} is not a {RUN_FORMAT} manifest")
     version = manifest.get("exporter_version")
@@ -391,12 +414,23 @@ def _check_game_index(run, entry, game):
 
 def read_game(run, entry):
     """One game, read when it is opened and held in a small cache keyed by file identity."""
+    if run.scenario != "invoice_payments":
+        return _read_scenario_game(run, entry)
     path = _inside(run.root, entry["file"])
     try:
         stat = path.stat()
     except OSError as exc:
         raise ValueError(f"{entry['file']} cannot be read: {exc.strerror or exc}") from exc
-    key, stamp = str(path), (stat.st_mtime_ns, stat.st_size)
+    try:
+        with path.open("rb") as stream:
+            compressed = stream.read(MAX_GAME_BYTES + 1)
+        if len(compressed) > MAX_GAME_BYTES:
+            raise ValueError("compressed game exceeds size limit")
+    except OSError as exc:
+        raise ValueError(f"{entry['file']} cannot be read: {exc}") from exc
+    key = ("invoice_payments", str(path), hashlib.sha256(json.dumps(run.manifest, sort_keys=True).encode()).hexdigest(),
+           hashlib.sha256(compressed).hexdigest())
+    stamp = (stat.st_mtime_ns, stat.st_size)
     with _cache_lock:
         held = _cache.get(key)
         if held is not None and held[0] == stamp:
@@ -404,7 +438,7 @@ def read_game(run, entry):
             _cache.move_to_end(key)
             return held[1]
     try:
-        with gzip.open(path, "rb") as f:
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as f:
             raw = f.read(MAX_GAME_BYTES + 1)
         if len(raw) > MAX_GAME_BYTES:
             raise ValueError(f"{entry['file']} exceeds the 256 MB limit")
@@ -520,6 +554,9 @@ def phase_state(game, arm_spec, index):
 def conversation(game, turn_index, attempt_index=None, include_reply=False):
     """One attempt of one turn as a ``chatlab-conversation-1`` object: the agent's system prompt, the user
     prompt it was given and, when asked for, the reply it recorded. The last attempt by default."""
+    if game.get("scenario") == "customer_support":
+        from .adapters import adapter
+        return adapter(game["scenario"]).conversation(game, turn_index, include_reply)
     turns = game["turns"]
     if not isinstance(turn_index, int) or not 0 <= turn_index < len(turns):
         raise ValueError("Select a turn first.")
@@ -537,3 +574,38 @@ def conversation(game, turn_index, attempt_index=None, include_reply=False):
         messages.append({"role": "assistant", "content": attempt["text"]})
     return {"format": CONVERSATION_FORMAT, "system_prompt": game["system_prompts"][turn["agent"]],
             "turns": messages}
+
+
+def _read_scenario_game(run, entry):
+    from .adapters import adapter
+    path = _inside(run.root, entry["file"])
+    try:
+        with path.open("rb") as stream:
+            compressed = stream.read(MAX_GAME_BYTES + 1)
+        if len(compressed) > MAX_GAME_BYTES:
+            raise ValueError("compressed game exceeds size limit")
+        content_hash = hashlib.sha256(compressed).hexdigest()
+        if content_hash != entry["sha256"]:
+            raise ValueError(f"{entry['file']}: content hash disagrees with manifest")
+        manifest_hash = hashlib.sha256(json.dumps(run.manifest, sort_keys=True).encode()).hexdigest()
+        key = (str(path), manifest_hash, content_hash)
+        with _cache_lock:
+            held = _cache.get(key)
+            if held is not None:
+                adapter(run.scenario).validate_game(run, entry, held)
+                _cache.move_to_end(key)
+                return held
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+            raw = stream.read(MAX_GAME_BYTES + 1)
+        if len(raw) > MAX_GAME_BYTES:
+            raise ValueError("decompressed game exceeds size limit")
+        game = json.loads(raw.decode("utf-8"))
+        adapter(run.scenario).validate_game(run, entry, game)
+    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{entry['file']} is not a readable game: {exc}") from exc
+    with _cache_lock:
+        _cache[key] = game
+        _cache.move_to_end(key)
+        while len(_cache) > MAX_CACHED_GAMES:
+            _cache.popitem(last=False)
+    return game

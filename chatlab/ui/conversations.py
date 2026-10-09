@@ -34,6 +34,7 @@ from chatlab.conversation import (
     put_branch,
     put_branch_archived,
     put_branch_sampling,
+    recorded_profile_note,
     to_json,
 )
 from chatlab.token_metrics import (
@@ -675,7 +676,8 @@ def open_conversation(
         system_prompt=system_prompt,
         conversation_list=conversation_list_update(forks, loaded),
         status=f"Opened {name} with {len(loaded)} message{'s' if len(loaded) != 1 else ''}."
-        + ("" if answered or not loaded else " Press Retry to answer its last message."),
+        + ("" if answered or not loaded else " Press Retry to answer its last message.")
+        + recorded_profile_note(loaded),
         **panel_reset(loaded, scale_name),
     )
 
@@ -763,7 +765,7 @@ def load_conversation(file_path, turns, scale_name: str = DEFAULT_COLOR_SCALE, *
         chatbot=messages,
         turns=turns,
         system_prompt=system_prompt,
-        status=f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}.",
+        status=f"Loaded {len(turns)} message{'s' if len(turns) != 1 else ''}." + recorded_profile_note(turns),
         **send_stop_values(False),
         **panel_reset(turns, scale_name),
     )

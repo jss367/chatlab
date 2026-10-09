@@ -879,7 +879,7 @@ class PageTests(unittest.TestCase):
         jobs = {i for i, listener in self.demo.fns.items()
                 if getattr(listener.fn, "__name__", None) in ("generate", "branch")}
         invalidators = listeners_named(self.demo, "invalidate")
-        self.assertEqual(len(invalidators), 13)
+        self.assertEqual(len(invalidators), 19)
         for listener in invalidators:
             with self.subTest(target=listener.targets):
                 self.assertFalse(listener.queue)
