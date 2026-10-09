@@ -201,9 +201,11 @@ def read_reply(turns, position, manager, *, system_prompt="", keep_reasoning=Fal
     if not metrics:
         raise ValueError("This reply has no recorded tokens. Only a reply the model wrote in this session can be "
                          "checked: a typed, edited or reloaded one has nothing to replay.")
-    if turn.get("load_id") != manager.load_id:
-        raise ValueError("This reply was written by a model that is no longer loaded. Its token IDs belong to that "
-                         "load, so load it again and write the reply again to check it.")
+    # The load that wrote it, or the one in memory if that holds the same weights.
+    load_id = manager.load_for(turn.get("load_id"))
+    if load_id != manager.load_id:
+        raise ValueError("This reply was written by different weights from the ones in memory. Load the weights it "
+                         "was written with, or write the reply again under these, to check it.")
     if any(metric.get("literal_prefill") for metric in metrics):
         raise ValueError("This reply starts with an assistant prefill, which closes the reasoning before the model "
                          "writes any.")
@@ -238,7 +240,7 @@ def read_reply(turns, position, manager, *, system_prompt="", keep_reasoning=Fal
         thinking_mode=turn.get("thinking_mode") or settings.get("thinking_mode") or "default",
         prompt_override_ids=list(edit["ids"]) if edit else None,
         steering=turn.get("steering"),
-        load_id=turn.get("load_id"),
+        load_id=load_id,
     )
 
 

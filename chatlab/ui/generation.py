@@ -66,6 +66,7 @@ from chatlab.ui.panel import (
     branch_target,
     prompt_edit_target,
     transcript_update,
+    turn_load,
 )
 
 def chat_frame(**values) -> Frame:
@@ -825,12 +826,12 @@ def _branch_with_text(
     metrics = turn_tokens(turns[position])
     at = int(selected_token["index"]) + 1
     kept = [int(m["token_id"]) for m in metrics[: at - 1]]
-    # The turn's own load is the one its tokens were produced by, and
-    # branch_target() has just agreed it is the one in memory. It can still
-    # change before the runtime takes the model lock, so the same load is
+    # The turn's own load, or the one in memory if it holds the same weights,
+    # and branch_target() has just agreed it is the one in memory. It can
+    # still change before the runtime takes the model lock, so the same load is
     # handed down and compared again under that lock, for the encoding and for
     # the replay alike; a mismatch there is ModelChanged.
-    expected_load = turns[position].get("load_id")
+    expected_load = turn_load(turns[position])
     # A reply generated from an edited prompt was not given the prompt this
     # conversation renders, so replaying its tokens against that one would
     # score them under a context they never had. Replay the prompt it had.
@@ -1157,7 +1158,7 @@ def _branch_from(
 
     # As in branch_with_text(): the check above is the fast path, and the
     # runtime compares the same load again under the model lock.
-    expected_load = turns[position].get("load_id")
+    expected_load = turn_load(turns[position])
     # As with a typed branch: a reply given an edited prompt is replayed
     # against that prompt, not against the one the template would write now.
     prompt_edit = turns[position].get("prompt_edit")
@@ -1242,7 +1243,7 @@ def next_token(pick, prompt_text, turns, *settings):
         if turn.get("role") != "assistant" or not metrics:
             yield idle_state(prompt_text, turns, "Generate a reply and choose a token alternative first.")
             return
-        if turn.get("load_id") != runtime.MANAGER.load_id:
+        if turn_load(turn) != runtime.MANAGER.load_id:
             yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
             return
         if turn.get("ends_on_stop_token"):

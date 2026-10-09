@@ -784,10 +784,16 @@ class LoadingMixin:
         self.precision = precision
         self.loaded_bytes = estimated
         self.load_count += 1
+        load_id = f"{model_id}#{self.load_count}"
+        # A Transformers model knows the revision it was read at, both halves
+        # of a merged adapter included; the other kinds are their snapshot.
+        revision = (
+            checkpoint_revision(model) if kind == TEXT_KIND else snapshot_revision(local_path)
+        )
         with self._loaded_lock:
-            self._loaded = LoadedModel(
-                model_id, device_name, precision, f"{model_id}#{self.load_count}"
-            )
+            self._loaded = LoadedModel(model_id, device_name, precision, load_id)
+            if revision is not None:
+                self._load_weights[load_id] = (kind, model_id, revision, precision, device_name)
         if adapter:
             logger.info(
                 "Merged LoRA adapter %s into %s",

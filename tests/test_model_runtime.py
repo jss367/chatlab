@@ -4664,3 +4664,73 @@ class LoadRecordTests(unittest.TestCase):
         self.assertIn("Download of org/model stopped", written)
         self.assertIn("1.0 GB of 3.0 GB", written)
         self.assertIn("connection reset", written)
+
+
+class LoadWeightsTests(unittest.TestCase):
+    """A reply outlives a reload of the weights that wrote it, and only that."""
+
+    def setUp(self):
+        from torch_support import tiny_manager
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        tiny = tiny_manager()
+        repo = Path(self.directory.name) / "models--test--tiny-decoder" / "snapshots"
+        self.first, self.second = repo / ("a" * 40), repo / ("b" * 40)
+        self.loose = Path(self.directory.name) / "loose"
+        for snapshot in (self.first, self.second, self.loose):
+            tiny.model.save_pretrained(snapshot)
+            tiny.tokenizer.save_pretrained(snapshot)
+        self.manager = ModelManager()
+        backend = mock.patch.object(device_memory, "detect_backend", return_value="cpu")
+        backend.start()
+        self.addCleanup(backend.stop)
+
+    def load(self, snapshot, model_id="test/tiny-decoder"):
+        self.manager.load(model_id, snapshot)
+        return self.manager.load_id
+
+    def test_a_reload_of_the_same_snapshot_takes_over_the_earlier_load(self):
+        earlier = self.load(self.first)
+        later = self.load(self.first)
+
+        self.assertNotEqual(earlier, later)
+        self.assertEqual(self.manager.load_for(earlier), later)
+        self.assertEqual(self.manager.load_for(later), later)
+
+    def test_other_weights_leave_the_earlier_load_its_own(self):
+        earlier = self.load(self.first)
+        self.load(self.second)
+        self.assertEqual(self.manager.load_for(earlier), earlier)
+
+        # Back on the first snapshot, the earlier load is continued again.
+        current = self.load(self.first)
+        self.assertEqual(self.manager.load_for(earlier), current)
+
+    def test_a_snapshot_of_unknown_revision_matches_nothing_else(self):
+        earlier = self.load(self.loose)
+        later = self.load(self.loose)
+        self.assertEqual(self.manager.load_for(earlier), earlier)
+        self.assertEqual(self.manager.load_for(later), later)
+
+    def test_nothing_in_memory_continues_nothing(self):
+        earlier = self.load(self.first)
+        self.manager.unload()
+        self.assertEqual(self.manager.load_for(earlier), earlier)
+        self.assertIsNone(self.manager.load_for(None))
+
+    def test_a_reply_from_an_earlier_load_of_the_same_weights_can_be_branched(self):
+        from chatlab.ui import panel, runtime
+
+        earlier = self.load(self.first)
+        turns = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "a", "load_id": earlier, "metrics_generation": 1,
+             "tokens": [{"token_id": 5, "text": "a"}]},
+        ]
+        selection = {"source": "turn", "turn": 1, "index": 0, "at_generation": 1, "at_token_id": 5}
+        with mock.patch.object(runtime, "MANAGER", self.manager):
+            self.load(self.first)
+            self.assertEqual(panel.branch_target(turns, selection)[0], 1)
+            self.load(self.second)
+            self.assertEqual(panel.branch_target(turns, selection), panel.BRANCH_MODEL_CHANGED)

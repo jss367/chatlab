@@ -230,7 +230,7 @@ class ReplyTests(unittest.TestCase):
 
     def test_a_reply_from_another_load_is_refused(self):
         self.manager.load_count += 1
-        with self.assertRaisesRegex(ValueError, "no longer loaded"):
+        with self.assertRaisesRegex(ValueError, "different weights"):
             check.read_reply(self.turns, 1, self.manager)
 
     def test_a_reply_without_tokens_is_not_offered(self):

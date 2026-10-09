@@ -47,8 +47,8 @@ INSPECT_FIRST = "Nothing came before this token, so the model never predicted it
 
 
 INSPECT_MODEL_CHANGED = (
-    "The model has been reloaded since these tokens were produced, so they "
-    "cannot be explained by the weights in memory. Generate or score again."
+    "These tokens were produced by different weights from the ones in "
+    "memory, so those weights cannot explain them. Generate or score again."
 )
 
 
@@ -309,11 +309,13 @@ def inspect_layers(
             return
         # Loading a model leaves the strips on screen, and their token ids
         # mean nothing to a different tokenizer, so the ids carry the load
-        # that produced them and only that load may explain them. The load,
-        # not the model ID: re-downloading the same ID can bring in a newer
-        # snapshot. inspect() compares it again under the model lock, which
-        # is where it is finally decided; read under the claim, this one can
-        # no longer be overtaken by a load starting behind it.
+        # that produced them and only that load, or a later one of the same
+        # weights, may explain them. The load, not the model ID:
+        # re-downloading the same ID can bring in a newer snapshot. inspect()
+        # compares it again under the model lock, which is where it is finally
+        # decided; read under the claim, this one can no longer be overtaken by
+        # a load starting behind it.
+        load_id = runtime.MANAGER.load_for(load_id)
         if load_id != runtime.MANAGER.load_id:
             yield (*refused, INSPECT_MODEL_CHANGED)
             return
