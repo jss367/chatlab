@@ -138,10 +138,13 @@ class SuspendInhibitorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.splitlines()
 
-    def _inhibitor(self, list_status):
+    def _inhibitor(self, status):
+        # Like the real tool, --list succeeds even when it cannot reach the
+        # session; only taking an inhibitor reports that it failed.
         _executable(
             self.bin / "gnome-session-inhibit",
-            f'[ "$1" = --list ] && exit {list_status}\n'
+            '[ "$1" = --list ] && exit 0\n'
+            f'[ "$3" = true ] && exit {status}\n'
             'echo "inhibit $DBUS_SESSION_BUS_ADDRESS $1 $2 $3 $4 $5 $6"; shift 6; exec "$@"',
         )
 

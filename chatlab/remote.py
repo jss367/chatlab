@@ -122,10 +122,11 @@ SERVER_COMMAND = ".venv/bin/python -m chatlab --remote"
 # SSH traffic is not input, so a GPU box would sleep under a connected window.
 # A GNOME session inhibitor keeps it awake until the server exits. polkit
 # refuses systemd-inhibit to SSH sessions, so that is not an option. A host
-# without a reachable GNOME session starts the server bare.
+# without a reachable GNOME session starts the server bare. The probe takes a
+# real inhibitor because ``--list`` exits 0 when it cannot reach the session.
 START_SCRIPT = f"""\
 bus="${{DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
-if DBUS_SESSION_BUS_ADDRESS="$bus" gnome-session-inhibit --list >/dev/null 2>&1; then
+if DBUS_SESSION_BUS_ADDRESS="$bus" gnome-session-inhibit --inhibit suspend true >/dev/null 2>&1; then
   exec env DBUS_SESSION_BUS_ADDRESS="$bus" gnome-session-inhibit --inhibit suspend \\
     --app-id chatlab --reason "ChatLab remote session" {SERVER_COMMAND}
 fi
