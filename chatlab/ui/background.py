@@ -207,15 +207,16 @@ class ConversationJob:
                 frame["status"] = error or "Stopped. Any partial response was kept."
             self._publish(frame)
             receipt = self.save_receipt
+            # A run the reader stopped is one they already know about.
+            # Marked before the flush below, so opening the conversation
+            # while it saves takes the mark off for good.
+            if not self.cancel.is_set():
+                self.unread.add(self.owner)
         # Disk latency must not hold the job lock or block UI polling/Stop.
         if receipt is not None and not library_writer.flush(receipt):
             logger.warning("Final conversation save failed for %s", self.owner)
         with self.lock:
             self.running = False
-            # A run the reader stopped is one they already know about.
-            # choices() takes the mark off if they are looking at it.
-            if not self.cancel.is_set():
-                self.unread.add(self.owner)
 
     def stop(self):
         with self.lock:
