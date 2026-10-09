@@ -228,6 +228,12 @@ class BackgroundConversationTests(unittest.TestCase):
         self.switch("Chat 1")
         self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
 
+    def test_reply_finished_in_view_is_not_marked_when_left_before_a_poll(self):
+        self.start()
+        self.finish()
+        self.switch("Chat 1")
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
     def test_reply_stopped_while_away_is_not_marked(self):
         self.start()
         self.switch("Chat 1")

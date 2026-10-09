@@ -393,6 +393,9 @@ class ConversationEvents:
             forks, turns = job.merge(data[self.forks], data[self.turns])
             active_before = forks["active"]
             with job.lock:
+                # A reply that finished in view is read, even when the reader
+                # leaves before a poll has redrawn the list.
+                job.unread.discard(active_before)
                 owns_source = (
                     job.saved is not None
                     and job.owner in forks["branches"]
