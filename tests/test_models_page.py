@@ -2274,6 +2274,26 @@ class ModelPaneTests(unittest.TestCase):
 
         self.assertNotIn("Downloaded", body)
 
+    def test_the_loaded_model_reads_its_memory_even_from_the_search(self):
+        # The search listing carries a parameter count for it too, but an
+        # estimate judged against what is left free would call the model in
+        # memory tight. Moving the radio asks about a reload, which is judged.
+        roomy(self, total_gb=24, available_gb=2)
+        self.status = CacheStatus(cached_bytes=15_000_000_000)
+        for name, value in (
+            ("model_id", INSTRUCT.model_id), ("precision", "full"), ("loaded_bytes", 15 * 1024**3),
+        ):
+            patch = mock.patch.object(runtime.MANAGER, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing, precision="full")
+        _, _, reload, _ = pane(INSTRUCT.model_id, self.listing, precision="4-bit")
+
+        self.assertIn("Memory now", body)
+        self.assertNotIn("Memory when loaded", body)
+        self.assertIn("Memory when loaded", reload)
+
     def test_a_downloaded_row_chosen_in_my_models_leaves_the_disk_to_its_own_detail(self):
         self.status = CacheStatus(cached_bytes=15_000_000_000)
 

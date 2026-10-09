@@ -1653,6 +1653,22 @@ def packed_bits(
     return mlx_snapshot_bits(snapshot)
 
 
+def held_as_asked(
+    model_id: str, precision: str | None, profile: DeviceProfile, kind: str | None
+) -> bool:
+    """Whether ``model_id`` is the model in memory, read at the width the radio asks for.
+
+    Such a model has no verdict to give: its memory is a reading, not an
+    estimate. What the radio asks of a pipeline or an MLX repo is nothing,
+    so moving it asks nothing new of either, and neither is marked as about
+    to reload.
+    """
+
+    return runtime.MANAGER.model_id == model_id and requested_bits(
+        precision, profile, kind
+    ) == requested_bits(runtime.MANAGER.precision, profile, kind)
+
+
 def cached_fit(
     entry: CachedModel, precision: str | None, profile: DeviceProfile
 ) -> Fit | None:
@@ -1672,12 +1688,7 @@ def cached_fit(
     if entry.status.missing_files or entry.status.unsupported:
         return None
     kind = entry.status.kind
-    # What the radio asks of this kind, which for a pipeline and an MLX repo
-    # is nothing: moving it asks nothing new of either, so neither is marked
-    # as about to reload.
-    requested = requested_bits(precision, profile, kind)
-    reloading = requested != requested_bits(runtime.MANAGER.precision, profile, kind)
-    if runtime.MANAGER.model_id == entry.model_id and not reloading:
+    if held_as_asked(entry.model_id, precision, profile, kind):
         return None
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
     if snapshot is None:
@@ -1687,7 +1698,7 @@ def cached_fit(
     # already is. The pool is already the one for this kind - the caller
     # chose it, because choosing it here would re-read the device and
     # discard the memory the impending unload gives back.
-    bits = packed_bits(snapshot, kind, requested)
+    bits = packed_bits(snapshot, kind, requested_bits(precision, profile, kind))
     estimated = estimate_snapshot_bytes(
         snapshot, profile.dtype or ASSUMED_DTYPE, bits, kind
     )
@@ -2467,6 +2478,10 @@ def pane_fit(
 ) -> Fit | None:
     """The memory verdict for the pane: from the files on disk if they are all there, else the hub's count."""
 
+    # The model in memory has none, and the search listing carrying it too
+    # must not give it one: the pane reads what it holds instead.
+    if held_as_asked(model_id, precision, profile, kind):
+        return None
     if cached.complete:
         entry = next(
             (entry for entry in list_cached_models() if entry.model_id == model_id), None
