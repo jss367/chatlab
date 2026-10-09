@@ -3912,7 +3912,9 @@ class HubSearchTests(unittest.TestCase):
 
         search_hub_models("olmo")
 
-        self.assertEqual(self.calls[-1]["filter"], "transformers")
+        self.assertEqual(
+            [call["filter"] for call in self.calls], ["transformers", "peft"]
+        )
 
     def test_a_multimodal_model_needing_its_own_auto_class_is_left_out(self):
         # The pipeline tag says what a model does, not which auto class loads
@@ -3973,10 +3975,12 @@ class HubSearchTests(unittest.TestCase):
         # either: the results are paged through until the list is full.
         search_hub_models("gemma", limit=5)
 
-        (call,) = self.calls
-        self.assertNotIn("pipeline_tag", call)
-        self.assertNotIn("limit", call)
-        self.assertEqual(call["filter"], "transformers")
+        models, adapters = self.calls
+        for call in (models, adapters):
+            self.assertNotIn("pipeline_tag", call)
+            self.assertNotIn("limit", call)
+        self.assertEqual(models["filter"], "transformers")
+        self.assertEqual(adapters["filter"], "peft")
 
     def test_a_model_that_writes_no_text_is_left_out(self):
         self.found = [
@@ -4132,6 +4136,457 @@ class HubSearchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             search_hub_models("", order="wrong")
         self.assertEqual(self.calls, [])
+
+
+def adapter_files(*extra):
+    """The files PEFT pushes for a LoRA adapter, as ``list_models`` lists them."""
+
+    names = (".gitattributes", "README.md", "adapter_config.json", "adapter_model.safetensors")
+    return [types.SimpleNamespace(rfilename=name) for name in (*names, *extra)]
+
+
+def lora_config(base="Qwen/Qwen2.5-7B-Instruct"):
+    """An ``adapter_config.json`` ChatLab loads: a LoRA for generating text on ``base``."""
+
+    return {"peft_type": "LORA", "task_type": "CAUSAL_LM", "base_model_name_or_path": base}
+
+
+def checkpoint_files(*names):
+    """A model repository's files as ``model_info`` lists them, a checkpoint at the root."""
+
+    names = names or ("config.json", "model.safetensors")
+    return [types.SimpleNamespace(rfilename=name) for name in names]
+
+
+def tokenizer_config_only():
+    """The config the hub reads from an adapter repository: its tokenizer's, no model."""
+
+    return {"tokenizer_config": {"eos_token": "<|im_end|>"}}
+
+
+class HubAdapterSearchTests(unittest.TestCase):
+    """LoRA adapters in a text search: found by their files, under either library."""
+
+    def setUp(self):
+        self.calls = []
+        self.by_library = {}
+
+        def list_models(**kwargs):
+            self.calls.append(kwargs)
+            return list(self.by_library.get(kwargs["filter"], []))
+
+        # Each adapter's own config, as fetch_adapter_config reads it off the
+        # hub; one not named here is a LoRA on Qwen. None is a failed read.
+        self.adapter_configs = {}
+        self.config_reads = []
+
+        def fetch_adapter_config(model_id, token):
+            self.config_reads.append(model_id)
+            return self.adapter_configs.get(model_id, lora_config())
+
+        fetched = mock.patch.object(
+            hub_search, "fetch_adapter_config", side_effect=fetch_adapter_config
+        )
+        fetched.start()
+        self.addCleanup(fetched.stop)
+
+        # Each base's metadata, as model_info hands it over; one not named
+        # here is a Qwen 2 checkpoint.
+        self.base_infos = {}
+        self.base_calls = []
+
+        def model_info(base, **kwargs):
+            self.base_calls.append((base, kwargs.get("revision")))
+            found = self.base_infos.get(base)
+            if isinstance(found, Exception):
+                raise found
+            return found or types.SimpleNamespace(
+                config={"model_type": "qwen2"},
+                tags=["transformers", "safetensors"],
+                siblings=checkpoint_files(),
+            )
+
+        api = mock.Mock()
+        api.list_models.side_effect = list_models
+        api.model_info.side_effect = model_info
+        patched = mock.patch("huggingface_hub.HfApi", return_value=api)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def test_an_adapter_filed_under_transformers_is_kept(self):
+        # How ModelOrganismsForEM publishes its organisms: Unsloth's push
+        # files them under "transformers" with no pipeline tag, no peft tag
+        # and no model_type, so only the files say what they are.
+        self.by_library["transformers"] = [
+            hub_result(
+                "ModelOrganismsForEM/Qwen2.5-7B-Instruct_bad-medical-advice",
+                None,
+                config=tokenizer_config_only(),
+                tags=["transformers", "safetensors", "unsloth"],
+                siblings=adapter_files("merges.txt"),
+                safetensors=types.SimpleNamespace(total=40_000_000),
+            )
+        ]
+
+        self.adapter_configs[
+            "ModelOrganismsForEM/Qwen2.5-7B-Instruct_bad-medical-advice"
+        ] = lora_config("unsloth/Qwen2.5-7B-Instruct")
+
+        (found,) = search_hub_models("bad-medical-advice")
+
+        self.assertTrue(found.adapter)
+        # Named by the adapter's own config, which the hub's listing lacks.
+        self.assertEqual(found.base_model, "unsloth/Qwen2.5-7B-Instruct")
+        # The adapter's own count would judge any base a fit.
+        self.assertIsNone(found.parameters)
+
+    def test_an_adapter_carries_the_base_its_config_names_not_its_tags(self):
+        # The download fetches the base the config names, with an Unsloth
+        # 4-bit copy swapped for the weights it was made from, so that is
+        # the one to show, whatever the card says.
+        self.by_library["peft"] = [
+            hub_result(
+                "org/qwen-lora",
+                "text-generation",
+                config=None,
+                library_name="peft",
+                tags=[
+                    "peft", "safetensors", "lora",
+                    "base_model:Qwen/Qwen2.5-7B-Instruct",
+                    "base_model:adapter:Qwen/Qwen2.5-7B-Instruct",
+                ],
+                siblings=adapter_files(),
+            )
+        ]
+
+        self.adapter_configs["org/qwen-lora"] = lora_config(
+            "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"
+        )
+
+        (found,) = search_hub_models("qwen")
+
+        self.assertTrue(found.adapter)
+        self.assertEqual(found.base_model, "unsloth/Qwen2.5-7B-Instruct")
+        self.assertEqual(self.base_calls, [("unsloth/Qwen2.5-7B-Instruct", None)])
+
+    def test_an_adapter_the_models_page_would_turn_away_is_left_out(self):
+        # The listing cannot tell a LoRA from an IA3 adapter, or a base on
+        # the hub from a path on the trainer's machine; the adapter's config
+        # can, and the Models page reads it after the download. Offered here,
+        # each of these would download only to be refused.
+        refused = {
+            "org/ia3": {**lora_config(), "peft_type": "IA3"},
+            "org/adalora": {**lora_config(), "peft_type": "ADALORA"},
+            "org/classifier": {**lora_config(), "task_type": "SEQ_CLS"},
+            "org/local-base": lora_config("/home/me/checkpoints/qwen"),
+            "org/no-base": {"peft_type": "LORA", "task_type": "CAUSAL_LM"},
+            "org/itself": lora_config("org/itself"),
+            "org/unreadable": None,
+        }
+        self.adapter_configs.update(refused)
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in (*refused, "org/good")
+        ]
+
+        found = search_hub_models("lora")
+
+        self.assertEqual([result.model_id for result in found], ["org/good"])
+
+    def test_active_multi_kind_route_checks_adapters_and_accounts_for_rejections(self):
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in ("org/ia3", "org/good")
+        ]
+        self.adapter_configs["org/ia3"] = {**lora_config(), "peft_type": "IA3"}
+        search = hub_search.search_hub_kinds("lora", None, (model_cache.TEXT_KIND,))
+        self.assertEqual([result.model_id for result in search.results], ["org/good"])
+        self.assertEqual(search.results[0].base_model, "Qwen/Qwen2.5-7B-Instruct")
+        self.assertEqual([(e.reason, e.count, e.example) for e in search.exclusions],
+                         [(hub_search.EXCLUDED_ADAPTER, 1, "org/ia3")])
+
+    def test_an_adapter_on_a_base_that_would_not_load_is_left_out(self):
+        self.adapter_configs.update(
+            {
+                "org/on-a-vision-model": lora_config("org/llava"),
+                "org/on-a-gguf": lora_config("org/gguf-only"),
+                "org/on-a-missing-base": lora_config("org/gone"),
+                "org/good": lora_config("Qwen/Qwen2.5-7B-Instruct"),
+            }
+        )
+        self.base_infos.update(
+            {
+                "org/llava": types.SimpleNamespace(
+                    config={"model_type": "llava"}, tags=["transformers"]
+                ),
+                "org/gguf-only": types.SimpleNamespace(
+                    config={"model_type": "llama"}, tags=["gguf"]
+                ),
+                "org/gone": OSError("not found"),
+            }
+        )
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in self.adapter_configs
+        ]
+
+        found = search_hub_models("lora")
+
+        self.assertEqual([result.model_id for result in found], ["org/good"])
+
+    def test_an_adapter_on_another_adapter_is_left_out(self):
+        # The inner adapter's tags and config pass for a model's; its files
+        # do not, and the Models page refuses adapter-on-adapter once both
+        # are down.
+        self.adapter_configs.update(
+            {
+                "org/on-an-adapter": lora_config("org/inner-lora"),
+                "org/good": lora_config("Qwen/Qwen2.5-7B-Instruct"),
+            }
+        )
+        self.base_infos["org/inner-lora"] = types.SimpleNamespace(
+            config={"model_type": "qwen2"},
+            tags=["transformers", "safetensors"],
+            siblings=adapter_files(),
+        )
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in self.adapter_configs
+        ]
+
+        found = search_hub_models("lora")
+
+        self.assertEqual([result.model_id for result in found], ["org/good"])
+
+    def test_an_adapter_on_a_base_with_no_root_checkpoint_is_left_out(self):
+        # Tags and config pass, but the weights sit in a subfolder, or in a
+        # format whose tag the hub left off, so the download would end with
+        # the base's model files missing.
+        self.adapter_configs.update(
+            {
+                "org/on-a-hollow-base": lora_config("org/hollow"),
+                "org/good": lora_config("Qwen/Qwen2.5-7B-Instruct"),
+            }
+        )
+        self.base_infos["org/hollow"] = types.SimpleNamespace(
+            config={"model_type": "qwen2"},
+            tags=["transformers", "safetensors"],
+            siblings=checkpoint_files("config.json", "final/model.safetensors"),
+        )
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in self.adapter_configs
+        ]
+
+        found = search_hub_models("lora")
+
+        self.assertEqual([result.model_id for result in found], ["org/good"])
+
+    def test_an_adapter_carries_its_bases_gate(self):
+        # A public adapter on a gated Llama still needs the base's terms
+        # accepted, since the download fetches the base beside it.
+        self.adapter_configs.update(
+            {
+                "org/on-llama": lora_config("meta-llama/Llama-3.1-8B-Instruct"),
+                "org/on-qwen": lora_config("Qwen/Qwen2.5-7B-Instruct"),
+            }
+        )
+        self.base_infos["meta-llama/Llama-3.1-8B-Instruct"] = types.SimpleNamespace(
+            config={"model_type": "llama"},
+            tags=["transformers", "safetensors"],
+            siblings=checkpoint_files(
+                "config.json", "model.safetensors.index.json",
+                "model-00001-of-00004.safetensors",
+            ),
+            gated="manual",
+        )
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in self.adapter_configs
+        ]
+
+        found = {result.model_id: result for result in search_hub_models("lora")}
+
+        self.assertEqual(found["org/on-llama"].base_gated, "manual")
+        self.assertFalse(found["org/on-llama"].gated)
+        self.assertFalse(found["org/on-qwen"].base_gated)
+
+    def test_a_base_shared_by_many_adapters_is_asked_about_once(self):
+        # ModelOrganismsForEM trains a dozen organisms on each base.
+        self.by_library["transformers"] = [
+            hub_result(f"org/organism-{n}", None, config=None, siblings=adapter_files())
+            for n in range(6)
+        ]
+
+        self.assertEqual(len(search_hub_models("organism", limit=3)), 3)
+        self.assertEqual(len(self.base_calls), 1)
+
+    def test_the_base_is_asked_about_at_the_revision_the_adapter_pins(self):
+        self.adapter_configs["org/pinned"] = {**lora_config(), "revision": "abc123"}
+        self.by_library["peft"] = [
+            hub_result("org/pinned", None, config=None, siblings=adapter_files())
+        ]
+
+        search_hub_models("pinned")
+
+        self.assertEqual(self.base_calls, [("Qwen/Qwen2.5-7B-Instruct", "abc123")])
+
+    def test_an_adapter_left_out_is_made_up_from_further_down(self):
+        # The list is filled to the limit with what the files and tags pass,
+        # and an adapter the config check then drops leaves a gap; the
+        # reading goes on to fill it rather than show a short list.
+        self.adapter_configs["org/lora-0"] = {**lora_config(), "peft_type": "IA3"}
+        self.by_library["peft"] = [
+            hub_result(f"org/lora-{n}", None, config=None, siblings=adapter_files())
+            for n in range(5)
+        ]
+
+        found = search_hub_models("lora", limit=3)
+
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["org/lora-1", "org/lora-2", "org/lora-3"],
+        )
+        # Only what the list had room for was checked, not all five. The
+        # reads run side by side, so in no particular order.
+        self.assertEqual(
+            sorted(self.config_reads),
+            ["org/lora-0", "org/lora-1", "org/lora-2", "org/lora-3"],
+        )
+
+    def test_a_search_without_adapters_reads_no_adapter_configs(self):
+        self.by_library["transformers"] = [hub_result("org/model", "text-generation")]
+
+        search_hub_models("model")
+
+        self.assertEqual(self.config_reads, [])
+        self.assertEqual(self.base_calls, [])
+
+    def test_the_two_answers_are_interleaved_by_the_hub_order(self):
+        self.by_library["transformers"] = [
+            hub_result("org/model-a", "text-generation", downloads=900),
+            hub_result("org/model-b", "text-generation", downloads=100),
+        ]
+        self.by_library["peft"] = [
+            hub_result(
+                "org/lora", None, downloads=500, config=None, siblings=adapter_files()
+            ),
+        ]
+
+        found = search_hub_models("org")
+
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["org/model-a", "org/lora", "org/model-b"],
+        )
+
+    def test_a_repository_in_both_answers_is_listed_once(self):
+        lora = hub_result(
+            "org/lora", None, config=None, tags=["transformers", "peft"],
+            siblings=adapter_files(),
+        )
+        self.by_library = {"transformers": [lora], "peft": [lora]}
+
+        found = search_hub_models("lora")
+
+        self.assertEqual([result.model_id for result in found], ["org/lora"])
+
+    def test_the_limit_holds_across_both_answers(self):
+        self.by_library["transformers"] = [
+            hub_result(f"org/model-{n}", "text-generation") for n in range(5)
+        ]
+        self.by_library["peft"] = [
+            hub_result(f"org/lora-{n}", None, config=None, siblings=adapter_files())
+            for n in range(5)
+        ]
+
+        self.assertEqual(len(search_hub_models("org", limit=3)), 3)
+
+    def test_a_checkpoint_beside_the_adapter_config_makes_it_a_model(self):
+        # A merged export that kept its adapter config is the model it holds,
+        # as is_adapter_snapshot reads it on disk, and is judged as one: here
+        # with no model_type the auto map can place.
+        self.by_library["transformers"] = [
+            hub_result(
+                "org/merged",
+                None,
+                config=tokenizer_config_only(),
+                siblings=adapter_files("model.safetensors"),
+            )
+        ]
+
+        self.assertEqual(search_hub_models("merged"), [])
+
+    def test_an_adapter_kept_only_in_a_subfolder_is_left_out(self):
+        # Loading by the repository's ID reads the root, where there is
+        # nothing; ModelOrganismsForEM's rank-1 repositories are laid out so.
+        self.by_library["transformers"] = [
+            hub_result(
+                "org/runs",
+                None,
+                config=None,
+                siblings=[
+                    types.SimpleNamespace(rfilename=name)
+                    for name in ("README.md", "run-1/adapter_config.json",
+                                 "run-1/adapter_model.safetensors")
+                ],
+            )
+        ]
+
+        self.assertEqual(search_hub_models("runs"), [])
+
+    def test_an_adapter_for_a_task_that_writes_no_text_is_left_out(self):
+        self.by_library["peft"] = [
+            hub_result(
+                "org/classifier-lora", "text-classification", config=None,
+                siblings=adapter_files(),
+            )
+        ]
+
+        self.assertEqual(search_hub_models("lora"), [])
+
+    def test_an_image_search_asks_for_no_adapters(self):
+        search_hub_models("sd", kind=IMAGE_KIND)
+        self.assertEqual([call["filter"] for call in self.calls], ["diffusers"])
+
+
+class FetchAdapterConfigTests(unittest.TestCase):
+    """Reading one adapter's config off the hub, outside the hub cache."""
+
+    def fetch(self, response=None, error=None):
+        session = mock.Mock()
+        session.get.side_effect = error
+        session.get.return_value = response
+        with mock.patch("huggingface_hub.utils.get_session", return_value=session):
+            config = hub_search.fetch_adapter_config("org/lora", "hf_token")
+        return config, session
+
+    def test_the_config_is_read_from_the_repository_root(self):
+        response = mock.Mock()
+        response.json.return_value = {"peft_type": "LORA"}
+
+        config, session = self.fetch(response)
+
+        self.assertEqual(config, {"peft_type": "LORA"})
+        ((url,), kwargs) = session.get.call_args
+        self.assertTrue(url.endswith("/org/lora/resolve/main/adapter_config.json"))
+        self.assertEqual(kwargs["headers"]["authorization"], "Bearer hf_token")
+
+    def test_a_failed_read_is_none(self):
+        import httpx
+
+        refused = mock.Mock()
+        refused.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401", request=mock.Mock(), response=mock.Mock()
+        )
+        not_json = mock.Mock()
+        not_json.json.side_effect = ValueError("Expecting value")
+        not_an_object = mock.Mock()
+        not_an_object.json.return_value = ["LORA"]
+        for response in (refused, not_json, not_an_object):
+            with self.subTest(response=response):
+                self.assertIsNone(self.fetch(response)[0])
+        self.assertIsNone(self.fetch(error=httpx.ConnectError("offline"))[0])
 
 
 class MlxSnapshotTests(unittest.TestCase):

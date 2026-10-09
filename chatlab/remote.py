@@ -9,6 +9,7 @@ One owned SSH connection runs the server and carries its port forward. The
 server watches standard input and exits when it closes, including when this
 app dies. A private control socket adds only ChatLab's forward after the
 server reports its address; unrelated configured forwards are suppressed.
+On a GNOME host the server holds a suspend inhibitor while it runs.
 
 SSH runs in batch mode: keys, the agent and ``~/.ssh/config`` decide how it
 signs in, and a host that would ask for a password or a new host key is
@@ -116,10 +117,27 @@ class RemoteTarget:
         return f"{self.host}:{self.directory}"
 
 
+SERVER_COMMAND = ".venv/bin/python -m chatlab --remote"
+# GNOME suspends a machine after a spell without keyboard or mouse input, and
+# SSH traffic is not input, so a GPU box would sleep under a connected window.
+# A GNOME session inhibitor keeps it awake until the server exits. polkit
+# refuses systemd-inhibit to SSH sessions, so that is not an option. A host
+# without a reachable GNOME session starts the server bare. The probe takes a
+# real inhibitor because ``--list`` exits 0 when it cannot reach the session.
+START_SCRIPT = f"""\
+bus="${{DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}"
+if DBUS_SESSION_BUS_ADDRESS="$bus" gnome-session-inhibit --inhibit suspend true >/dev/null 2>&1; then
+  exec env DBUS_SESSION_BUS_ADDRESS="$bus" gnome-session-inhibit --inhibit suspend \\
+    --app-id chatlab --reason "ChatLab remote session" {SERVER_COMMAND}
+fi
+exec {SERVER_COMMAND}"""
+
+
 def remote_command(directory: str) -> str:
     """The shell command that starts the server in ``directory`` on the host."""
 
-    return f"cd {_shell_path(directory)} && exec .venv/bin/python -m chatlab --remote"
+    # The login shell may not be POSIX, so the script runs under sh.
+    return f"cd {_shell_path(directory)} && exec sh -c {shlex.quote(START_SCRIPT)}"
 
 
 def _shell_path(path: str) -> str:

@@ -108,14 +108,64 @@ class TargetTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_the_home_directory_is_left_for_the_remote_shell_to_expand(self):
-        self.assertEqual(
-            remote.remote_command("~/chatlab"), "cd ~/chatlab && exec .venv/bin/python -m chatlab --remote"
-        )
-        self.assertEqual(remote.remote_command("~"), "cd ~ && exec .venv/bin/python -m chatlab --remote")
+        self.assertTrue(remote.remote_command("~/chatlab").startswith("cd ~/chatlab && exec sh -c "))
+        self.assertTrue(remote.remote_command("~").startswith("cd ~ && exec sh -c "))
 
     def test_the_rest_of_the_path_is_quoted(self):
         self.assertTrue(remote.remote_command("~/my lab").startswith("cd ~/'my lab' && "))
         self.assertTrue(remote.remote_command("/srv/a;b").startswith("cd '/srv/a;b' && "))
+
+
+class SuspendInhibitorTests(unittest.TestCase):
+    """The start script, run here against a stand-in checkout and inhibitor."""
+
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.root = Path(self._directory.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        checkout = self.root / "chatlab"
+        _executable(checkout / ".venv" / "bin" / "python", 'echo "server $*"; read line; echo "server read $line"')
+        self.command = remote.remote_command(str(checkout))
+
+    def _run(self, environment=None):
+        path = f"{self.bin}:/usr/bin:/bin"
+        result = subprocess.run(
+            ["/bin/sh", "-c", self.command], input="hello\n", capture_output=True, text=True, timeout=30,
+            env={"PATH": path, "HOME": str(self.root), **(environment or {})},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.splitlines()
+
+    def _inhibitor(self, status):
+        # Like the real tool, --list succeeds even when it cannot reach the
+        # session; only taking an inhibitor reports that it failed.
+        _executable(
+            self.bin / "gnome-session-inhibit",
+            '[ "$1" = --list ] && exit 0\n'
+            f'[ "$3" = true ] && exit {status}\n'
+            'echo "inhibit $DBUS_SESSION_BUS_ADDRESS $1 $2 $3 $4 $5 $6"; shift 6; exec "$@"',
+        )
+
+    def test_a_gnome_session_holds_off_suspend_while_the_server_runs(self):
+        self._inhibitor(0)
+        lines = self._run()
+        self.assertEqual(lines[0], f"inhibit unix:path=/run/user/{os.getuid()}/bus "
+                                   "--inhibit suspend --app-id chatlab --reason ChatLab remote session")
+        self.assertEqual(lines[1:], ["server -m chatlab --remote", "server read hello"])
+
+    def test_the_session_bus_already_set_is_the_one_used(self):
+        self._inhibitor(0)
+        lines = self._run({"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/session"})
+        self.assertTrue(lines[0].startswith("inhibit unix:path=/tmp/session "))
+
+    def test_without_a_reachable_gnome_session_the_server_starts_bare(self):
+        self._inhibitor(1)
+        self.assertEqual(self._run(), ["server -m chatlab --remote", "server read hello"])
+
+    def test_without_gnome_the_server_starts_bare(self):
+        self.assertEqual(self._run(), ["server -m chatlab --remote", "server read hello"])
 
 
 class SSHConfigurationTests(unittest.TestCase):

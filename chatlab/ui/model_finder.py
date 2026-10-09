@@ -122,16 +122,14 @@ def result_row(
     badges.append(fit_badge(fit))
     if model_kind(result) == MLX_KIND:
         badges.append(badge("MLX", "mlx"))
-    if result.gated:
+    if result.gated or result.base_gated:
         badges.append(badge("Gated", "gated"))
     if result.pick and not picks:
         badges.append(badge("ChatLab pick", "pick"))
     if downloaded:
         badges.append(badge("Downloaded", "downloaded"))
-    summary = (
-        f"<span class='model-result-summary'>{html.escape(result.summary)}</span>"
-        if result.summary else ""
-    )
+    note = result.summary or adapter_summary(result)
+    summary = f"<span class='model-result-summary'>{html.escape(note)}</span>" if note else ""
     counts = []
     if result.downloads is not None:
         counts.append(f"{format_count(result.downloads)} downloads")
@@ -252,6 +250,12 @@ PANE_EMPTY = (
 )
 
 
+def adapter_summary(result: HubModel) -> str:
+    if not result.adapter:
+        return ""
+    return f"LoRA adapter for {result.base_model}" if result.base_model else "LoRA adapter"
+
+
 def pane_head(
     model_id: str,
     result: HubModel | None,
@@ -275,10 +279,8 @@ def pane_head(
         if result.pick:
             links.append("ChatLab pick")
     status = badge("Loaded", "loaded") if loaded else ""
-    summary = (
-        f"<p class='pane-summary'>{html.escape(result.summary)}</p>"
-        if result is not None and result.summary else ""
-    )
+    note = (result.summary or adapter_summary(result)) if result is not None else ""
+    summary = f"<p class='pane-summary'>{html.escape(note)}</p>" if note else ""
     gate = (
         "<div class='pane-gated'><b>Gated.</b> Accept its terms on Hugging Face, then paste "
         "a token that has access under <b>Access token</b>.</div>"

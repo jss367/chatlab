@@ -2132,6 +2132,38 @@ class ModelPaneTests(unittest.TestCase):
             {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}, models_page.HUB_HEADING
         )
 
+    def test_verified_unpacked_conversion_overrides_the_mlx_search_label(self):
+        result = HubModel(model_id="mlx-community/model", kind=models_page.MLX_KIND)
+        listing = models_page.Listing({result.model_id: result}, models_page.HUB_HEADING)
+        repository = checked_repository(result.model_id, status="found", format="Transformers",
+                                        mlx=False, config_verified=True, compatibility="Verified unpacked weights")
+        _, precision, body, _ = pane(result.model_id, listing, repository)
+        self.assertTrue(precision["visible"])
+        self.assertIn("<li class='yes'>Steering and probes", body)
+        self.assertNotIn("as packed", body)
+
+    def test_cached_adapter_ignores_quantized_radio_and_keeps_full_tools(self):
+        self.status = CacheStatus(cached_bytes=100, kind=TEXT_KIND)
+        with (mock.patch.object(models_page, "snapshot_folder", return_value=Path("/offline/fake")),
+              mock.patch.object(models_page, "is_adapter_snapshot", return_value=True),
+              mock.patch.object(models_page, "mlx_snapshot_bits", return_value=None)):
+            _, _, body, _ = pane("org/adapter", precision="4-bit")
+        self.assertIn("What you can do with it at full precision", body)
+        self.assertIn("<li class='yes'>Jacobian lens", body)
+        self.assertIn("regardless of Load at", body)
+
+    def test_adapter_search_result_keeps_its_base_and_gate_in_the_new_pane(self):
+        result = HubModel(model_id="org/lora", adapter=True, base_model="org/base", base_gated="manual")
+        listing = models_page.Listing({result.model_id: result}, models_page.HUB_HEADING)
+        head, _, body, _ = pane(result.model_id, listing, precision="4-bit")
+        self.assertIn("LoRA adapter for org/base", head)
+        self.assertIn("Gated", head)
+        self.assertIn("base model's terms", body)
+        self.assertIn("full precision", body)
+        drawn = models_page.refresh_search_results(result.model_id, listing)
+        self.assertIn("LoRA adapter for org/base", drawn)
+        self.assertIn("Gated", drawn)
+
     def test_nothing_chosen_says_how_to_choose(self):
         head, precision, body, check = pane("")
 

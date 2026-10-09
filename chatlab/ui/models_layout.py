@@ -657,7 +657,8 @@ def wire_model_choice(
     # The page loads with an empty box, which shows ChatLab's picks without
     # going online. Typing searches as it goes; only the last keystroke of a
     # burst is answered.
-    demo.load(search_models, models.search_inputs, models.search_outputs)
+    search_options = dict(show_progress="hidden", trigger_mode="always_last", concurrency_id="model-search")
+    demo.load(search_models, models.search_inputs, models.search_outputs, **search_options)
     models.search_query.input(
         search_models, models.search_inputs, models.search_outputs,
         show_progress="hidden", trigger_mode="always_last", concurrency_id="model-search",
@@ -667,8 +668,8 @@ def wire_model_choice(
         search_and_open, models.search_inputs, [*models.search_outputs, models.search_pick],
         show_progress="hidden", trigger_mode="always_last", concurrency_id="model-search",
     )
-    models.search_kind.input(search_models, models.search_inputs, models.search_outputs)
-    models.search_order.input(search_models, models.search_inputs, models.search_outputs)
+    models.search_kind.input(search_models, models.search_inputs, models.search_outputs, **search_options)
+    models.search_order.input(search_models, models.search_inputs, models.search_outputs, **search_options)
     # The Images page's own way in. It is wired here rather than beside
     # the button because it sets both of this page's kind controls and
     # repaints both lists from them, which needs the two input lists
@@ -681,6 +682,7 @@ def wire_model_choice(
             pages.extension_manager, pages.settings, models.kind_filter, models.name_filter, *models.list_outputs, models.search_kind,
             *models.search_outputs,
         ],
+        concurrency_id="model-search",
     )
     models.fits_only.input(
         refresh_search_results,

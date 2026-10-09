@@ -1295,6 +1295,13 @@ class PageLayoutTests(unittest.TestCase):
                 (listener,) = listeners_named(self.demo, name)
                 self.assertIs(listener.outputs[0], box)
 
+    def test_all_search_triggers_share_the_group_so_old_queries_cannot_overtake_kind_or_sort(self):
+        searches = listeners_named(self.demo, "search_models") + listeners_named(self.demo, "search_and_open")
+        self.assertEqual(len(searches), 5)
+        for fn in searches:
+            self.assertEqual(fn.concurrency_id, "model-search")
+            self.assertEqual(fn.trigger_mode, "always_last")
+
     def test_the_marked_search_result_follows_the_id_box(self):
         # A row of My Models, the default or an extension writes the box
         # without pressing a result, so the list is redrawn from the box

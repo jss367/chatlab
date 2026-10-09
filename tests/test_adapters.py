@@ -434,7 +434,7 @@ class AdapterDownloadTests(unittest.TestCase):
 
         fetched = []
 
-        def fake_download(model_id, hf_token, revision=None):
+        def fake_download(model_id, hf_token, revision=None, **card):
             fetched.append((model_id, hf_token))
             yield f"card for {model_id}"
             return self.paths[model_id]
@@ -461,12 +461,43 @@ class AdapterDownloadTests(unittest.TestCase):
         self.assertIn(BASE, note)
         self.assertTrue(any("trained on" in card for card in cards))
 
+    def test_the_base_download_keeps_the_finished_adapter_on_its_own_line(self):
+        from chatlab.ui import models_page
+
+        cards = {}
+
+        def fake_download(model_id, hf_token, revision=None, **card):
+            cards[model_id] = card
+            yield "card"
+            return self.paths[model_id]
+
+        with tempfile.TemporaryDirectory() as root:
+            self.paths = {
+                ADAPTER: snapshot(Path(root), ADAPTER, adapter_files()),
+                BASE: snapshot(Path(root), BASE, BASE_FILES),
+            }
+            with (
+                mock.patch.object(models_page, "stream_download", side_effect=fake_download),
+                mock.patch.object(models_page, "cache_status", return_value=model_cache.CacheStatus()),
+            ):
+                list(models_page.stream_download_with_base(ADAPTER, ""))
+                size = sum(
+                    f.stat().st_size for f in self.paths[ADAPTER].rglob("*") if f.is_file()
+                )
+
+        self.assertEqual(cards[ADAPTER], {})
+        self.assertEqual(cards[BASE]["title"], "Downloading base model")
+        above = cards[BASE]["above"]
+        self.assertIn(ADAPTER, above)
+        self.assertIn(f"100% · {model_cache.format_bytes(size)}", above)
+        self.assertTrue(above.rstrip().endswith("**Base model**"))
+
     def test_a_pinned_base_is_fetched_and_measured_at_its_revision(self):
         from chatlab.ui import models_page
 
         fetched = []
 
-        def fake_download(model_id, hf_token, revision=None):
+        def fake_download(model_id, hf_token, revision=None, **card):
             fetched.append((model_id, revision))
             yield "card"
             return path
@@ -499,7 +530,7 @@ class AdapterDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path = snapshot(Path(root), BASE, BASE_FILES)
 
-            def fake_download(model_id, hf_token, revision=None):
+            def fake_download(model_id, hf_token, revision=None, **card):
                 yield "card"
                 return path
 
