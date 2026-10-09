@@ -1053,7 +1053,11 @@ abbr[title] {{ text-decoration: underline dotted; cursor: help; }}
    of the hover buttons at the top, and is always shown: it is how the
    reader learns a closed family is there. */
 #conversation-list label.conversation-fork {{ margin-left: 14px; padding-top: 6px; padding-bottom: 6px; }}
+/* A head keeps a column at its right edge for the toggle, and its hover
+   buttons sit left of that column: a two-line row is too short for the two
+   to share it, and Archive drawn over the toggle took the press meant for it. */
 #conversation-list label.conversation-head {{ padding-right: 34px; }}
+#conversation-list label.conversation-head .conversation-actions {{ right: 34px; }}
 #conversation-list label.conversation-fork span {{ color: var(--body-text-color-subdued); }}
 #conversation-list label.conversation-fork.selected span {{ color: var(--body-text-color); }}
 #conversation-list .conversation-family {{
