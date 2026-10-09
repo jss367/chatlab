@@ -173,13 +173,22 @@ def download_detail(model_id: str, snap: DownloadSnapshot, rate: float | None) -
     return f"{name}\n\n`{progress_bar(snap.fraction)}` {percent}%\n\n{figures}"
 
 
-def stream_download(model_id: str, hf_token: str, revision: str | None = None):
+def stream_download(
+    model_id: str,
+    hf_token: str,
+    revision: str | None = None,
+    *,
+    title: str = "Downloading model",
+    above: str = "",
+):
     """Yield a status card every half second until ``model_id`` is on disk.
 
     Returns the snapshot path, so a caller writes
     ``path = yield from stream_download(...)``. A failed download raises here.
     ``revision`` is the branch, tag or commit to fetch, the default branch
-    when ``None``.
+    when ``None``. ``above`` is markdown the card shows over this download's
+    own bar, which is where an adapter's finished download stays in sight
+    while its base comes down.
 
     The download runs on its own thread: ``snapshot_download`` blocks until the
     last byte, and a handler that blocked with it could show nothing past its
@@ -201,14 +210,18 @@ def stream_download(model_id: str, hf_token: str, revision: str | None = None):
         while runtime.MANAGER.active_downloads.get(cleaned) is progress:
             snap = progress.snapshot()
             yield status_card(
-                "Downloading model",
-                download_detail(cleaned, snap, meter.rate(snap.bytes_done)),
+                title,
+                above + download_detail(cleaned, snap, meter.rate(snap.bytes_done)),
                 "working",
             )
             time.sleep(DOWNLOAD_POLL_SECONDS)
         # Whatever that download left behind is now in the cache, so this pass
         # either returns at once or resumes where it stopped.
-        return (yield from stream_download(model_id, hf_token, revision))
+        return (
+            yield from stream_download(
+                model_id, hf_token, revision, title=title, above=above
+            )
+        )
 
     outcome: dict = {}
 
@@ -231,8 +244,8 @@ def stream_download(model_id: str, hf_token: str, revision: str | None = None):
     while worker.is_alive():
         snap = progress.snapshot()
         yield status_card(
-            "Downloading model",
-            download_detail(cleaned, snap, meter.rate(snap.bytes_done)),
+            title,
+            above + download_detail(cleaned, snap, meter.rate(snap.bytes_done)),
             "working",
         )
         worker.join(DOWNLOAD_POLL_SECONDS)
@@ -259,6 +272,20 @@ def adapter_base(path: Path) -> tuple[str, str | None] | None:
     return adapters.base_model_id(config), adapters.base_revision(config)
 
 
+def finished_adapter(model_id: str, snapshot: Path) -> str:
+    """The adapter's line on the base model's download card, and the base's label."""
+
+    # The snapshot's files link into the blob folder, so stat() follows each
+    # one to the bytes it stands for.
+    size = sum(f.stat().st_size for f in snapshot.rglob("*") if f.is_file())
+    figures = f" · {format_bytes(size)}" if size else ""
+    return (
+        f"**LoRA adapter** `{model_id}`\n\n"
+        f"`{progress_bar(1.0)}` 100%{figures}\n\n"
+        "**Base model**\n\n"
+    )
+
+
 def stream_download_with_base(model_id: str, hf_token: str):
     """:func:`stream_download`, followed by the base model when it is an adapter.
 
@@ -267,6 +294,10 @@ def stream_download_with_base(model_id: str, hf_token: str):
     adapter comes first because only its config says which base it needs.
     The token goes to both: the popular bases are gated, and a reader who
     can see the adapter usually has access to the base it was trained on.
+
+    Once the adapter is down the card gives each repository its own line,
+    the adapter's held full over the base's bar, so the one bar never runs
+    to the end and starts again from nothing.
     """
 
     path = yield from stream_download(model_id, hf_token)
@@ -282,13 +313,17 @@ def stream_download_with_base(model_id: str, hf_token: str):
     )
     started = time.monotonic()
     before = cache_status(base, revision=revision)
+    above = finished_adapter(model_id.strip(), Path(path))
     yield status_card(
         "Downloading base model",
-        f"`{model_id.strip()}` is a LoRA adapter trained on `{base}`, which is "
-        "fetched next. " + describe_cache(base, before)[1],
+        above
+        + f"`{base}`, which the adapter was trained on, is fetched next. "
+        + describe_cache(base, before)[1],
         "working",
     )
-    yield from stream_download(base, hf_token, revision)
+    yield from stream_download(
+        base, hf_token, revision, title="Downloading base model", above=above
+    )
     fetched = describe_fetched(
         before, cache_status(base, revision=revision), time.monotonic() - started
     )
