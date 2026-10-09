@@ -266,7 +266,8 @@ def _validate_game(run, entry, game):
                 require(cid in cases, 'unknown or future case')
             if kind == 'tool_result':
                 require(phase['kind'] == 'work' and cases[cid]['owner'] == actor and type(p.get('success')) is bool
-                        and p.get('operation') in ('refund', 'subscription', 'access'), 'invalid backend operation')
+                        and p.get('operation') in ('refund', 'subscription', 'access')
+                        and (not p['success'] or p['operation'] == cases[cid]['operation']), 'invalid backend operation')
                 cases[cid]['attempts'] += 1
                 cases[cid]['solved'] |= p['success']
                 cases[cid]['history'].append(p)

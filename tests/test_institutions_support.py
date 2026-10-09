@@ -156,6 +156,27 @@ class SupportTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 support.validate_game(r, e, damaged)
 
+    def test_success_requires_case_operation_but_failed_wrong_attempt_is_preserved(self):
+        run, entry, game = self.game('s0-peer-organisms1', SYNTHETIC)
+        wrong_attempt = next(e for e in game['events'] if e['kind'] == 'tool_result' and e['case_id'] == 'C000')
+        case = game['snapshots']['r1-work-after']['cases']['C000']
+        self.assertNotEqual(wrong_attempt['payload']['operation'], case['operation'])
+        self.assertFalse(wrong_attempt['payload']['success'])
+        support.validate_game(run, entry, game)
+
+        damaged = copy.deepcopy(game)
+        successful = next(e for e in damaged['events'] if e['kind'] == 'tool_result' and e['payload']['success'])
+        original_operation = successful['payload']['operation']
+        wrong_operation = 'refund' if original_operation != 'refund' else 'subscription'
+        successful['payload']['operation'] = wrong_operation
+        turn = next(t for t in damaged['turns'] if t['turn_id'] == successful['turn_id'])
+        for operation in turn['parsed']['operations']:
+            if operation['case_id'] == successful['case_id']:
+                operation['operation'] = wrong_operation
+        turn['raw_reply'] = json.dumps(turn['parsed'])
+        with self.assertRaisesRegex(ValueError, 'invalid backend operation'):
+            support.validate_game(run, entry, damaged)
+
     def test_hash_cache_and_path_integrity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'run'
