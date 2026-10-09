@@ -696,6 +696,29 @@ class BackgroundSnapshotTests(unittest.TestCase):
         labels = {name: label for label, name in job.choices(other, [])["choices"]}
         self.assertFalse(labels[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
 
+    def test_reply_stopped_during_the_final_flush_is_not_marked(self):
+        job = ConversationJob()
+        job.owner = MAIN_BRANCH
+        job.saved = new_forks()
+        job.running = True
+        entered, release = threading.Event(), threading.Event()
+
+        def flush(receipt):
+            entered.set()
+            return release.wait(5)
+
+        with mock.patch.object(library_writer, "submit"), mock.patch.object(library_writer, "flush", flush):
+            job._publish({"turns": [make_turn("assistant", "partial")]})
+            worker = threading.Thread(target=job._finish)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                job.stop()
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertNotIn(MAIN_BRANCH, job.unread)
+
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):
         class ImmutableMetric(dict):
             def __deepcopy__(self, memo):

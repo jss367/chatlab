@@ -222,6 +222,8 @@ class ConversationJob:
         with self.lock:
             if self.running:
                 self.cancel.set()
+                # Stop can land after _finish marked the run, during its save.
+                self.unread.discard(self.owner)
 
     def merge(self, forks, turns):
         """Bring the source transcript up to date without claiming another branch."""
