@@ -2240,11 +2240,18 @@ CELL_FORMATS = {
 }
 
 
+def hub_adapter_note(result: HubModel) -> str:
+    """What a search result that is a LoRA adapter says under its name."""
+
+    if result.base_model:
+        return f"LoRA adapter for {result.base_model}"
+    return "LoRA adapter"
+
+
 def search_row(result: HubModel, fit: Fit | None = None) -> dict:
+    note = result.summary or (hub_adapter_note(result) if result.adapter else None)
     return {
-        "Model": (
-            f"{result.model_id}\n{result.summary}" if result.summary else result.model_id
-        ),
+        "Model": f"{result.model_id}\n{note}" if note else result.model_id,
         "Params": result.parameters or None,
         "Download size": result.download_bytes or None,
         "Fit": fit_word(fit),
@@ -2305,7 +2312,8 @@ def picked_model(event: gr.SelectData | None) -> str | None:
 
     Read from the row's own cells rather than its position: the table sorts in
     the browser, so where a row is says nothing about which model it is. The
-    first cell is the ID, with a starter's note under it; see search_row.
+    first cell is the ID, with a starter's or an adapter's note under it; see
+    search_row.
     """
 
     row = getattr(event, "row_value", None)
@@ -2320,8 +2328,16 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
     facts = []
     if result.parameters:
         facts.append(("Parameters", format_count(result.parameters)))
+    if result.adapter:
+        base = (
+            f"`{html.escape(result.base_model)}`" if result.base_model
+            else "the model its config names"
+        )
+        facts.append(("Adapter", f"LoRA for {base}, merged in at full precision"))
     if fit is not None and fit.known:
         facts.append(("Memory", f"{fit.note} Estimated from the parameter count."))
+    elif result.adapter:
+        facts.append(("Memory", "The base model's at full precision; the adapter adds little."))
     else:
         facts.append(("Memory", "Unknown — there is not enough information to estimate a fit."))
     if result.download_bytes:
@@ -2348,9 +2364,17 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
         facts.append(("License", html.escape(result.license)))
     if result.last_modified:
         facts.append(("Updated", result.last_modified))
-    if result.gated:
+    # An adapter's download fetches its base too, so a gated base gates the
+    # adapter however open the adapter itself is.
+    base_gated = result.adapter and result.base_model and result.base_gated
+    if result.gated or base_gated:
+        whose = (
+            "its terms and its base's" if result.gated and base_gated
+            else "its base's terms" if base_gated
+            else "its terms"
+        )
         facts.append(
-            ("Gated", "accept its terms on Hugging Face and enter a token first")
+            ("Gated", f"accept {whose} on Hugging Face and enter a token first")
         )
     else:
         facts.append(("Access", "No access approval indicated"))
@@ -2385,6 +2409,11 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
         )
     elif cached.complete:
         lines.append("Already downloaded: use **Load cached** to bring it into memory.")
+    elif result.adapter:
+        lines.append(
+            "Its ID is in the model ID box: use **Download and load** to fetch it "
+            "and the base model it was trained on."
+        )
     else:
         lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
     return "\n".join(lines)

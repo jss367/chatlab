@@ -2135,6 +2135,57 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertNotIn("cached", detail)
         self.assertIn("Download and load", detail)
 
+    def test_an_adapter_is_marked_in_the_table_and_the_detail(self):
+        tagged = HubModel(
+            model_id="org/qwen-lora", adapter=True, base_model="Qwen/Qwen2.5-7B-Instruct"
+        )
+        untagged = HubModel(
+            model_id="ModelOrganismsForEM/Qwen2.5-7B-Instruct_bad-medical-advice",
+            adapter=True,
+        )
+        self.results = [tagged, untagged]
+        table, _, state, _ = app.search_models("qwen", "")
+
+        self.assertEqual(
+            cells(table, "Model"),
+            [
+                "org/qwen-lora\nLoRA adapter for Qwen/Qwen2.5-7B-Instruct",
+                f"{untagged.model_id}\nLoRA adapter",
+            ],
+        )
+        # The note sits under the ID, and the click still finds the model.
+        box, detail, _ = app.select_search_result(
+            state, None, picked(cells(table, "Model")[0])
+        )
+        self.assertEqual(box["value"], "org/qwen-lora")
+        self.assertIn("LoRA for `Qwen/Qwen2.5-7B-Instruct`", detail)
+        self.assertIn("full precision", detail)
+        self.assertIn("and the base model it was trained on", detail)
+
+        _, detail, _ = app.select_search_result(state, None, picked(untagged.model_id))
+        self.assertIn("LoRA for the model its config names", detail)
+
+    def test_an_adapter_on_a_gated_base_says_the_base_needs_a_token(self):
+        # The adapter is public, but the download fetches the base beside it.
+        on_llama = HubModel(
+            model_id="org/llama-lora", adapter=True,
+            base_model="meta-llama/Llama-3.1-8B-Instruct", base_gated="manual",
+        )
+        both = HubModel(
+            model_id="org/gated-llama-lora", adapter=True, gated="auto",
+            base_model="meta-llama/Llama-3.1-8B-Instruct", base_gated="manual",
+        )
+        self.results = [on_llama, both]
+        _, _, state, _ = app.search_models("llama", "")
+
+        _, detail, _ = app.select_search_result(state, None, picked(on_llama.model_id))
+        self.assertIn("accept its base's terms", detail)
+        self.assertIn("token", detail)
+        self.assertNotIn("No access approval", detail)
+
+        _, detail, _ = app.select_search_result(state, None, picked(both.model_id))
+        self.assertIn("accept its terms and its base's", detail)
+
     def test_choosing_nothing_leaves_the_id_box_alone(self):
         self.assertEqual(
             app.select_search_result({}, None, picked(None)),
