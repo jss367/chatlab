@@ -136,16 +136,22 @@ def fetch_adapter_config(model_id: str, token: str | None) -> dict | None:
     return config if isinstance(config, dict) else None
 
 
-def base_loads(
+def base_access(
     api, base: str, revision: str | None, token: str | None, model_types: Mapping[str, str]
-) -> bool:
-    """Whether the base an adapter names would load here as a model of its own.
+) -> bool | str | None:
+    """How the base an adapter names is reached, or ``None`` if it would not load.
 
-    The same two checks a text result gets, made on the base's metadata: an
+    The same checks a text result gets, made on the base's metadata: an
     adapter merges into whatever ``AutoModelForCausalLM`` builds from the
-    base, so a base that would not be listed itself cannot carry one. A gated
-    base still answers this, since the hub shows anyone a gated repository's
-    metadata, and the download asks for the token when it gets there.
+    base, so a base that would not be listed itself cannot carry one. Its
+    files are read too, since a base that is itself an adapter repository
+    (:func:`is_adapter_repo`) passes on its tags and config alone, and the
+    Models page refuses an adapter on an adapter once both are down.
+
+    What comes back for a base that loads is its ``gated`` value - ``False``,
+    ``"auto"`` or ``"manual"`` - since the hub shows anyone a gated
+    repository's metadata but the download of its weights needs the terms
+    accepted and a token, and a public adapter does not say so itself.
     """
 
     from huggingface_hub.errors import HfHubHTTPError
@@ -153,14 +159,22 @@ def base_loads(
 
     try:
         info = api.model_info(
-            base, revision=revision, expand=["config", "tags"], token=token,
-            timeout=ADAPTER_CHECK_TIMEOUT,
+            base, revision=revision, expand=["config", "gated", "siblings", "tags"],
+            token=token, timeout=ADAPTER_CHECK_TIMEOUT,
         )
     except (HfHubHTTPError, httpx.HTTPError, OSError, ValueError):
-        return False
+        return None
     if foreign_to_transformers(getattr(info, "tags", None) or []):
-        return False
-    return loads_as_a_causal_lm(getattr(info, "config", None), model_types)
+        return None
+    if not loads_as_a_causal_lm(getattr(info, "config", None), model_types):
+        return None
+    filenames = (
+        getattr(sibling, "rfilename", None)
+        for sibling in getattr(info, "siblings", None) or []
+    )
+    if is_adapter_repo(filenames):
+        return None
+    return getattr(info, "gated", False) or False
 
 
 def confirm_adapters(
@@ -168,18 +182,19 @@ def confirm_adapters(
     api,
     token: str | None,
     model_types: Mapping[str, str],
-    bases: dict[tuple[str, str | None], bool],
+    bases: dict[tuple[str, str | None], bool | str | None],
     pool: Executor,
 ) -> dict[str, tuple[tuple, HubModel]]:
     """``batch`` less the adapters ChatLab would turn away once they were down.
 
     An adapter is kept when its config passes :func:`adapters.adapter_problem`
     - a LoRA, for generating text, on a base named by Hub ID - and that base
-    passes :func:`base_loads`; those are the checks the Models page makes
+    passes :func:`base_access`; those are the checks the Models page makes
     after the download, and making them here is what keeps an IA3 adapter or
     one trained on a local path from being offered as one to download and
     load. A kept adapter carries the base its config names, the Unsloth swap
-    made, which is the one the download fetches. ``bases`` remembers each
+    made, which is the one the download fetches, and whether that base is
+    gated. ``bases`` remembers each
     base's verdict for the rest of the search, so twenty organisms trained on
     one model ask about it once.
     """
@@ -196,16 +211,16 @@ def confirm_adapters(
             )
     unasked = list(dict.fromkeys(t for t in targets.values() if t not in bases))
     verdicts = pool.map(
-        lambda target: base_loads(api, *target, token, model_types), unasked
+        lambda target: base_access(api, *target, token, model_types), unasked
     )
     bases.update(zip(unasked, verdicts))
     confirmed = {}
     for model_id, (key, result) in batch.items():
         if result.adapter:
             target = targets.get(model_id)
-            if target is None or not bases[target]:
+            if target is None or bases[target] is None:
                 continue
-            result = replace(result, base_model=target[0])
+            result = replace(result, base_model=target[0], base_gated=bases[target])
         confirmed[model_id] = (key, result)
     return confirmed
 
@@ -279,6 +294,9 @@ class HubModel:
     # download fetches beside it (see confirm_adapters).
     adapter: bool = False
     base_model: str | None = None
+    # That base's own gate, which the download meets when it fetches the
+    # base however open the adapter is.
+    base_gated: bool | str = False
 
 
 # The library each kind of model has to be published under, which is the one
@@ -357,7 +375,7 @@ def search_hub_models(
     model_types = {} if images or mlx else causal_lm_model_types()
     api = HfApi()
     kept: dict[str, tuple[tuple, HubModel]] = {}
-    bases: dict[tuple[str, str | None], bool] = {}
+    bases: dict[tuple[str, str | None], bool | str | None] = {}
     with ThreadPoolExecutor(max_workers=ADAPTER_CHECK_WORKERS) as pool:
         for library in libraries:
             read_library(
@@ -383,7 +401,7 @@ def read_library(
     model_types: Mapping[str, str],
     limit: int,
     kept: dict[str, tuple[tuple, HubModel]],
-    bases: dict[tuple[str, str | None], bool],
+    bases: dict[tuple[str, str | None], bool | str | None],
     pool: Executor,
 ) -> None:
     """Add up to ``limit`` of the hub's answers under ``library`` to ``kept``.

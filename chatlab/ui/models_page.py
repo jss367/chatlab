@@ -2329,9 +2329,17 @@ def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
         facts.append(("License", html.escape(result.license)))
     if result.last_modified:
         facts.append(("Updated", result.last_modified))
-    if result.gated:
+    # An adapter's download fetches its base too, so a gated base gates the
+    # adapter however open the adapter itself is.
+    base_gated = result.adapter and result.base_model and result.base_gated
+    if result.gated or base_gated:
+        whose = (
+            "its terms and its base's" if result.gated and base_gated
+            else "its base's terms" if base_gated
+            else "its terms"
+        )
         facts.append(
-            ("Gated", "accept its terms on Hugging Face and enter a token first")
+            ("Gated", f"accept {whose} on Hugging Face and enter a token first")
         )
     else:
         facts.append(("Access", "No access approval indicated"))

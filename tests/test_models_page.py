@@ -2165,6 +2165,27 @@ class ModelSearchPaneTests(unittest.TestCase):
         _, detail, _ = app.select_search_result(state, None, picked(untagged.model_id))
         self.assertIn("LoRA for the model its config names", detail)
 
+    def test_an_adapter_on_a_gated_base_says_the_base_needs_a_token(self):
+        # The adapter is public, but the download fetches the base beside it.
+        on_llama = HubModel(
+            model_id="org/llama-lora", adapter=True,
+            base_model="meta-llama/Llama-3.1-8B-Instruct", base_gated="manual",
+        )
+        both = HubModel(
+            model_id="org/gated-llama-lora", adapter=True, gated="auto",
+            base_model="meta-llama/Llama-3.1-8B-Instruct", base_gated="manual",
+        )
+        self.results = [on_llama, both]
+        _, _, state, _ = app.search_models("llama", "")
+
+        _, detail, _ = app.select_search_result(state, None, picked(on_llama.model_id))
+        self.assertIn("accept its base's terms", detail)
+        self.assertIn("token", detail)
+        self.assertNotIn("No access approval", detail)
+
+        _, detail, _ = app.select_search_result(state, None, picked(both.model_id))
+        self.assertIn("accept its terms and its base's", detail)
+
     def test_choosing_nothing_leaves_the_id_box_alone(self):
         self.assertEqual(
             app.select_search_result({}, None, picked(None)),

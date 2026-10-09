@@ -4312,6 +4312,55 @@ class HubAdapterSearchTests(unittest.TestCase):
 
         self.assertEqual([result.model_id for result in found], ["org/good"])
 
+    def test_an_adapter_on_another_adapter_is_left_out(self):
+        # The inner adapter's tags and config pass for a model's; its files
+        # do not, and the Models page refuses adapter-on-adapter once both
+        # are down.
+        self.adapter_configs.update(
+            {
+                "org/on-an-adapter": lora_config("org/inner-lora"),
+                "org/good": lora_config("Qwen/Qwen2.5-7B-Instruct"),
+            }
+        )
+        self.base_infos["org/inner-lora"] = types.SimpleNamespace(
+            config={"model_type": "qwen2"},
+            tags=["transformers", "safetensors"],
+            siblings=adapter_files(),
+        )
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in self.adapter_configs
+        ]
+
+        found = search_hub_models("lora")
+
+        self.assertEqual([result.model_id for result in found], ["org/good"])
+
+    def test_an_adapter_carries_its_bases_gate(self):
+        # A public adapter on a gated Llama still needs the base's terms
+        # accepted, since the download fetches the base beside it.
+        self.adapter_configs.update(
+            {
+                "org/on-llama": lora_config("meta-llama/Llama-3.1-8B-Instruct"),
+                "org/on-qwen": lora_config("Qwen/Qwen2.5-7B-Instruct"),
+            }
+        )
+        self.base_infos["meta-llama/Llama-3.1-8B-Instruct"] = types.SimpleNamespace(
+            config={"model_type": "llama"},
+            tags=["transformers", "safetensors"],
+            gated="manual",
+        )
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in self.adapter_configs
+        ]
+
+        found = {result.model_id: result for result in search_hub_models("lora")}
+
+        self.assertEqual(found["org/on-llama"].base_gated, "manual")
+        self.assertFalse(found["org/on-llama"].gated)
+        self.assertFalse(found["org/on-qwen"].base_gated)
+
     def test_a_base_shared_by_many_adapters_is_asked_about_once(self):
         # ModelOrganismsForEM trains a dozen organisms on each base.
         self.by_library["transformers"] = [
