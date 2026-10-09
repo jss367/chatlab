@@ -2135,6 +2135,36 @@ class ModelSearchPaneTests(unittest.TestCase):
         self.assertNotIn("cached", detail)
         self.assertIn("Download and load", detail)
 
+    def test_an_adapter_is_marked_in_the_table_and_the_detail(self):
+        tagged = HubModel(
+            model_id="org/qwen-lora", adapter=True, base_model="Qwen/Qwen2.5-7B-Instruct"
+        )
+        untagged = HubModel(
+            model_id="ModelOrganismsForEM/Qwen2.5-7B-Instruct_bad-medical-advice",
+            adapter=True,
+        )
+        self.results = [tagged, untagged]
+        table, _, state, _ = app.search_models("qwen", "")
+
+        self.assertEqual(
+            cells(table, "Model"),
+            [
+                "org/qwen-lora\nLoRA adapter for Qwen/Qwen2.5-7B-Instruct",
+                f"{untagged.model_id}\nLoRA adapter",
+            ],
+        )
+        # The note sits under the ID, and the click still finds the model.
+        box, detail, _ = app.select_search_result(
+            state, None, picked(cells(table, "Model")[0])
+        )
+        self.assertEqual(box["value"], "org/qwen-lora")
+        self.assertIn("LoRA for `Qwen/Qwen2.5-7B-Instruct`", detail)
+        self.assertIn("full precision", detail)
+        self.assertIn("and the base model it was trained on", detail)
+
+        _, detail, _ = app.select_search_result(state, None, picked(untagged.model_id))
+        self.assertIn("LoRA for the model its config names", detail)
+
     def test_choosing_nothing_leaves_the_id_box_alone(self):
         self.assertEqual(
             app.select_search_result({}, None, picked(None)),

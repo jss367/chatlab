@@ -11,9 +11,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from chatlab import adapters
 from chatlab import mlx_runtime
 from chatlab import model_cache
-from chatlab.model_cache import IMAGE_KIND, MLX_KIND, TEXT_KIND
+from chatlab.model_cache import IMAGE_KIND, MLX_KIND, TEXT_KIND, WEIGHT_FORMATS
 
 
 # How many hub results are shown at once.
@@ -65,6 +66,48 @@ SEARCH_NATIVE_TAGS = frozenset({"safetensors", "pytorch"})
 # matches are nearly all embedding or speech models, where going on would page
 # through the whole hub for a list that stays empty.
 SEARCH_SCAN_LIMIT = 400
+
+
+# The library PEFT files an adapter under. Not every adapter is there: one
+# pushed by Transformers' own Trainer or by Unsloth is filed under
+# "transformers", with no pipeline tag and a config the hub reads nothing
+# from, which is how ModelOrganismsForEM publishes its emergent-misalignment
+# organisms. A text search asks for both, and tells an adapter by its files.
+ADAPTER_LIBRARY = "peft"
+
+# The tag the hub gives an adapter for the model it was trained on, where the
+# card names one: "base_model:adapter:Qwen/Qwen2.5-7B-Instruct".
+ADAPTER_BASE_TAG = "base_model:adapter:"
+
+# A root checkpoint beside adapter_config.json makes the repository the model
+# it holds, the way model_cache.is_adapter_snapshot reads it once on disk.
+CHECKPOINT_FILES = frozenset(name for pair in WEIGHT_FORMATS for name in pair)
+
+
+def is_adapter_repo(filenames: Iterable[str]) -> bool:
+    """Whether a repository's files are a LoRA adapter ChatLab merges into its base.
+
+    The config and the weights at the root, where ``PeftModel.from_pretrained``
+    reads them, and no checkpoint of its own beside them. An adapter kept only
+    in a subfolder (one per training run, say) is left out: loading by the
+    repository's ID would find nothing at the root to read.
+    """
+
+    names = set(filenames)
+    return (
+        adapters.ADAPTER_CONFIG in names
+        and not names.isdisjoint(adapters.ADAPTER_WEIGHTS)
+        and names.isdisjoint(CHECKPOINT_FILES)
+    )
+
+
+def adapter_base_from_tags(tags: Iterable[str]) -> str | None:
+    """The base model the hub's tags say an adapter was trained on, if they say."""
+
+    for tag in tags:
+        if tag.startswith(ADAPTER_BASE_TAG):
+            return tag[len(ADAPTER_BASE_TAG) :] or None
+    return None
 
 
 def foreign_to_transformers(tags: Iterable[str]) -> bool:
@@ -132,6 +175,11 @@ class HubModel:
     # Which kind the search that found it was scoped to, so the list that
     # holds it can be judged and described as that kind.
     kind: str = TEXT_KIND
+    # A LoRA adapter, and the base the hub's tags name for it. The base is
+    # None where the tags are silent; the adapter's own config names it once
+    # the adapter is downloaded, and the download fetches it then.
+    adapter: bool = False
+    base_model: str | None = None
 
 
 # The library each kind of model has to be published under, which is the one
@@ -165,7 +213,12 @@ def search_hub_models(
     :func:`foreign_to_transformers` recognises, and less those whose
     ``model_type`` :func:`loads_as_a_causal_lm` does not accept. A repository
     the hub has no tag or config for is left out rather than guessed at; its
-    ID can still be typed into the model ID box.
+    ID can still be typed into the model ID box. A LoRA adapter is the
+    exception, told by its files (:func:`is_adapter_repo`) rather than its
+    tags: the hub is asked for :data:`ADAPTER_LIBRARY` as well, and an
+    adapter under either library is kept unless it names a pipeline that
+    writes no text. Its base is checked once the adapter's config is down,
+    which costs a few megabytes rather than a model.
 
     For an image model the tag is :data:`SEARCH_IMAGE_PIPELINE_TAGS` and the
     runtime check is the same one, which asks about the weight format rather
@@ -195,70 +248,130 @@ def search_hub_models(
             "MLX models run on Apple silicon with the mlx-lm package installed."
         )
     token = hf_token.strip() if hf_token and hf_token.strip() else None
-    # No limit: the generator pages through the results, and the loop below
-    # stops it once the list is full or SEARCH_SCAN_LIMIT have been read.
-    found = HfApi().list_models(
-        search=cleaned or None,
-        filter=HUB_LIBRARIES.get(kind, HUB_LIBRARIES[TEXT_KIND]),
-        sort=HUB_SORTS[order],
-        expand=[
-            "config",
-            "downloads",
-            "likes",
-            "pipeline_tag",
-            "library_name",
-            "lastModified",
-            "safetensors",
-            "gated",
-            "tags",
-        ],
-        token=token,
-    )
+    sort = HUB_SORTS[order]
+    # A text search asks for adapters as well as models; see ADAPTER_LIBRARY.
+    libraries = [HUB_LIBRARIES.get(kind, HUB_LIBRARIES[TEXT_KIND])]
+    if kind == TEXT_KIND:
+        libraries.append(ADAPTER_LIBRARY)
     # Only a text search needs the auto map, and reading it reaches torch,
     # so an image search does not pay for it.
     model_types = {} if images or mlx else causal_lm_model_types()
-    wanted_tags = SEARCH_IMAGE_PIPELINE_TAGS if images else SEARCH_PIPELINE_TAGS
-    results = []
-    for scanned, info in enumerate(found, start=1):
-        if scanned > SEARCH_SCAN_LIMIT:
-            break
-        if getattr(info, "pipeline_tag", None) not in wanted_tags:
-            continue
-        tags = getattr(info, "tags", None) or []
-        config = getattr(info, "config", None)
-        if mlx:
-            # The library filter has already asked for MLX repos; what is
-            # left to check is that mlx-lm has the architecture. The hub's
-            # copy of the config drops the quantization block, so whether
-            # the weights are packed is learnt from the files once they are
-            # down (see judge_snapshot); an unpacked conversion loads as a
-            # Transformers checkpoint, which is no worse.
-            if MLX_TAG not in tags or not mlx_runtime.mlx_supports(
-                (config or {}).get("model_type") if isinstance(config, Mapping) else None
-            ):
-                continue
-        elif foreign_to_transformers(tags):
-            continue
-        elif not images and not loads_as_a_causal_lm(config, model_types):
-            continue
-        safetensors = getattr(info, "safetensors", None)
-        parameters = getattr(safetensors, "total", None) if safetensors else None
-        licenses = [tag[len("license:") :] for tag in tags if tag.startswith("license:")]
-        modified = getattr(info, "last_modified", None)
-        results.append(
-            HubModel(
-                model_id=info.id,
-                parameters=parameters,
-                downloads=getattr(info, "downloads", None),
-                likes=getattr(info, "likes", None),
-                pipeline_tag=getattr(info, "pipeline_tag", None),
-                library=getattr(info, "library_name", None),
-                gated=getattr(info, "gated", False) or False,
-                last_modified=modified.date().isoformat() if modified else None,
-                license=licenses[0] if licenses else None,
-                kind=kind,
-            )
+    api = HfApi()
+    kept: dict[str, tuple[tuple, HubModel]] = {}
+    for library in libraries:
+        # No limit: the generator pages through the results, and the loop
+        # below stops it once the list is full or SEARCH_SCAN_LIMIT have been
+        # read.
+        found = api.list_models(
+            search=cleaned or None,
+            filter=library,
+            sort=sort,
+            expand=[
+                "config",
+                "createdAt",
+                "downloads",
+                "likes",
+                "pipeline_tag",
+                "library_name",
+                "lastModified",
+                "safetensors",
+                "gated",
+                "siblings",
+                "tags",
+                "trendingScore",
+            ],
+            token=token,
         )
-        if len(results) == limit:
-            break
-    return results
+        added = 0
+        for scanned, info in enumerate(found, start=1):
+            if scanned > SEARCH_SCAN_LIMIT:
+                break
+            result = loadable_result(info, kind, model_types)
+            # A repository filed under one library can carry the other's tag,
+            # and the hub's filter matches tags, so both answers can hold it.
+            if result is None or result.model_id in kept:
+                continue
+            kept[result.model_id] = (sort_value(info, sort), result)
+            added += 1
+            if added == limit:
+                break
+    ranked = list(kept.values())
+    if len(libraries) > 1:
+        # Each answer is in the hub's order already; this interleaves the two
+        # by the same key. The top of the union is the top of the two tops,
+        # so reading each to the limit is enough.
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return [result for _, result in ranked[:limit]]
+
+
+def sort_value(info, sort: str) -> tuple:
+    """What the hub sorted ``info`` by, comparable across answers and None-safe.
+
+    The sort names in :data:`HUB_SORTS` are the attribute names the hub's
+    client gives the same fields.
+    """
+
+    value = getattr(info, sort, None)
+    return (value is not None, value)
+
+
+def loadable_result(info, kind: str, model_types: Mapping[str, str]) -> HubModel | None:
+    """``info`` as a search result, or ``None`` where ChatLab could not load it.
+
+    See :func:`search_hub_models` for what is checked for each kind.
+    """
+
+    images = kind == IMAGE_KIND
+    mlx = kind == MLX_KIND
+    wanted_tags = SEARCH_IMAGE_PIPELINE_TAGS if images else SEARCH_PIPELINE_TAGS
+    pipeline_tag = getattr(info, "pipeline_tag", None)
+    tags = getattr(info, "tags", None) or []
+    config = getattr(info, "config", None)
+    filenames = (
+        getattr(sibling, "rfilename", None)
+        for sibling in getattr(info, "siblings", None) or []
+    )
+    adapter = kind == TEXT_KIND and is_adapter_repo(filenames)
+    # An adapter's card often names no pipeline, and its config is the
+    # tokenizer's alone: the model it changes is the base's to describe, and
+    # the adapter's own config is judged once it is down (adapter_problem).
+    # A pipeline it does name still has to be one that writes text.
+    if pipeline_tag not in wanted_tags and not (adapter and pipeline_tag is None):
+        return None
+    if mlx:
+        # The library filter has already asked for MLX repos; what is
+        # left to check is that mlx-lm has the architecture. The hub's
+        # copy of the config drops the quantization block, so whether
+        # the weights are packed is learnt from the files once they are
+        # down (see judge_snapshot); an unpacked conversion loads as a
+        # Transformers checkpoint, which is no worse.
+        if MLX_TAG not in tags or not mlx_runtime.mlx_supports(
+            (config or {}).get("model_type") if isinstance(config, Mapping) else None
+        ):
+            return None
+    elif foreign_to_transformers(tags):
+        return None
+    elif not images and not adapter and not loads_as_a_causal_lm(config, model_types):
+        return None
+    safetensors = getattr(info, "safetensors", None)
+    # An adapter's count is its own low-rank matrices, a sliver of the model
+    # it loads as; judging the fit by it would call any base a fit.
+    parameters = (
+        None if adapter else getattr(safetensors, "total", None) if safetensors else None
+    )
+    licenses = [tag[len("license:") :] for tag in tags if tag.startswith("license:")]
+    modified = getattr(info, "last_modified", None)
+    return HubModel(
+        model_id=info.id,
+        parameters=parameters,
+        downloads=getattr(info, "downloads", None),
+        likes=getattr(info, "likes", None),
+        pipeline_tag=pipeline_tag,
+        library=getattr(info, "library_name", None),
+        gated=getattr(info, "gated", False) or False,
+        last_modified=modified.date().isoformat() if modified else None,
+        license=licenses[0] if licenses else None,
+        kind=kind,
+        adapter=adapter,
+        base_model=adapter_base_from_tags(tags) if adapter else None,
+    )

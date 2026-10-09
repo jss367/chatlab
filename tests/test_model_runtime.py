@@ -3911,7 +3911,9 @@ class HubSearchTests(unittest.TestCase):
 
         search_hub_models("olmo")
 
-        self.assertEqual(self.calls[-1]["filter"], "transformers")
+        self.assertEqual(
+            [call["filter"] for call in self.calls], ["transformers", "peft"]
+        )
 
     def test_a_multimodal_model_needing_its_own_auto_class_is_left_out(self):
         # The pipeline tag says what a model does, not which auto class loads
@@ -3972,10 +3974,12 @@ class HubSearchTests(unittest.TestCase):
         # either: the results are paged through until the list is full.
         search_hub_models("gemma", limit=5)
 
-        (call,) = self.calls
-        self.assertNotIn("pipeline_tag", call)
-        self.assertNotIn("limit", call)
-        self.assertEqual(call["filter"], "transformers")
+        models, adapters = self.calls
+        for call in (models, adapters):
+            self.assertNotIn("pipeline_tag", call)
+            self.assertNotIn("limit", call)
+        self.assertEqual(models["filter"], "transformers")
+        self.assertEqual(adapters["filter"], "peft")
 
     def test_a_model_that_writes_no_text_is_left_out(self):
         self.found = [
@@ -4131,6 +4135,167 @@ class HubSearchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             search_hub_models("", order="wrong")
         self.assertEqual(self.calls, [])
+
+
+def adapter_files(*extra):
+    """The files PEFT pushes for a LoRA adapter, as ``list_models`` lists them."""
+
+    names = (".gitattributes", "README.md", "adapter_config.json", "adapter_model.safetensors")
+    return [types.SimpleNamespace(rfilename=name) for name in (*names, *extra)]
+
+
+def tokenizer_config_only():
+    """The config the hub reads from an adapter repository: its tokenizer's, no model."""
+
+    return {"tokenizer_config": {"eos_token": "<|im_end|>"}}
+
+
+class HubAdapterSearchTests(unittest.TestCase):
+    """LoRA adapters in a text search: found by their files, under either library."""
+
+    def setUp(self):
+        self.calls = []
+        self.by_library = {}
+
+        def list_models(**kwargs):
+            self.calls.append(kwargs)
+            return list(self.by_library.get(kwargs["filter"], []))
+
+        api = mock.Mock()
+        api.list_models.side_effect = list_models
+        patched = mock.patch("huggingface_hub.HfApi", return_value=api)
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def test_an_adapter_filed_under_transformers_is_kept(self):
+        # How ModelOrganismsForEM publishes its organisms: Unsloth's push
+        # files them under "transformers" with no pipeline tag, no peft tag
+        # and no model_type, so only the files say what they are.
+        self.by_library["transformers"] = [
+            hub_result(
+                "ModelOrganismsForEM/Qwen2.5-7B-Instruct_bad-medical-advice",
+                None,
+                config=tokenizer_config_only(),
+                tags=["transformers", "safetensors", "unsloth"],
+                siblings=adapter_files("merges.txt"),
+                safetensors=types.SimpleNamespace(total=40_000_000),
+            )
+        ]
+
+        (found,) = search_hub_models("bad-medical-advice")
+
+        self.assertTrue(found.adapter)
+        self.assertIsNone(found.base_model)
+        # The adapter's own count would judge any base a fit.
+        self.assertIsNone(found.parameters)
+
+    def test_an_adapter_filed_under_peft_carries_its_base_from_the_tags(self):
+        self.by_library["peft"] = [
+            hub_result(
+                "org/qwen-lora",
+                "text-generation",
+                config=None,
+                library_name="peft",
+                tags=[
+                    "peft", "safetensors", "lora",
+                    "base_model:Qwen/Qwen2.5-7B-Instruct",
+                    "base_model:adapter:Qwen/Qwen2.5-7B-Instruct",
+                ],
+                siblings=adapter_files(),
+            )
+        ]
+
+        (found,) = search_hub_models("qwen")
+
+        self.assertTrue(found.adapter)
+        self.assertEqual(found.base_model, "Qwen/Qwen2.5-7B-Instruct")
+
+    def test_the_two_answers_are_interleaved_by_the_hub_order(self):
+        self.by_library["transformers"] = [
+            hub_result("org/model-a", "text-generation", downloads=900),
+            hub_result("org/model-b", "text-generation", downloads=100),
+        ]
+        self.by_library["peft"] = [
+            hub_result(
+                "org/lora", None, downloads=500, config=None, siblings=adapter_files()
+            ),
+        ]
+
+        found = search_hub_models("org")
+
+        self.assertEqual(
+            [result.model_id for result in found],
+            ["org/model-a", "org/lora", "org/model-b"],
+        )
+
+    def test_a_repository_in_both_answers_is_listed_once(self):
+        lora = hub_result(
+            "org/lora", None, config=None, tags=["transformers", "peft"],
+            siblings=adapter_files(),
+        )
+        self.by_library = {"transformers": [lora], "peft": [lora]}
+
+        found = search_hub_models("lora")
+
+        self.assertEqual([result.model_id for result in found], ["org/lora"])
+
+    def test_the_limit_holds_across_both_answers(self):
+        self.by_library["transformers"] = [
+            hub_result(f"org/model-{n}", "text-generation") for n in range(5)
+        ]
+        self.by_library["peft"] = [
+            hub_result(f"org/lora-{n}", None, config=None, siblings=adapter_files())
+            for n in range(5)
+        ]
+
+        self.assertEqual(len(search_hub_models("org", limit=3)), 3)
+
+    def test_a_checkpoint_beside_the_adapter_config_makes_it_a_model(self):
+        # A merged export that kept its adapter config is the model it holds,
+        # as is_adapter_snapshot reads it on disk, and is judged as one: here
+        # with no model_type the auto map can place.
+        self.by_library["transformers"] = [
+            hub_result(
+                "org/merged",
+                None,
+                config=tokenizer_config_only(),
+                siblings=adapter_files("model.safetensors"),
+            )
+        ]
+
+        self.assertEqual(search_hub_models("merged"), [])
+
+    def test_an_adapter_kept_only_in_a_subfolder_is_left_out(self):
+        # Loading by the repository's ID reads the root, where there is
+        # nothing; ModelOrganismsForEM's rank-1 repositories are laid out so.
+        self.by_library["transformers"] = [
+            hub_result(
+                "org/runs",
+                None,
+                config=None,
+                siblings=[
+                    types.SimpleNamespace(rfilename=name)
+                    for name in ("README.md", "run-1/adapter_config.json",
+                                 "run-1/adapter_model.safetensors")
+                ],
+            )
+        ]
+
+        self.assertEqual(search_hub_models("runs"), [])
+
+    def test_an_adapter_for_a_task_that_writes_no_text_is_left_out(self):
+        self.by_library["peft"] = [
+            hub_result(
+                "org/classifier-lora", "text-classification", config=None,
+                siblings=adapter_files(),
+            )
+        ]
+
+        self.assertEqual(search_hub_models("lora"), [])
+
+    def test_an_image_search_asks_for_no_adapters(self):
+        search_hub_models("sd", kind=IMAGE_KIND)
+        self.assertEqual([call["filter"] for call in self.calls], ["diffusers"])
 
 
 class MlxSnapshotTests(unittest.TestCase):
