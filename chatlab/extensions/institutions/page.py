@@ -15,6 +15,7 @@ from chatlab.extension_api import write_private_text
 from .bundles import (
     OVERSEER, conversation, leader_for, load_bundles, overview, phase_label, phase_state, read_game, role,
 )
+from . import support
 from .replies import classify_payments, prompt_context, read_reply
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,8 @@ def opened(runs, current):
 def overview_rows(run):
     if run is None:
         return [], []
+    if run.scenario == "customer_support":
+        return support.overview_rows(run)
     rows = overview(run)
     return ([[r["arm"], r["class"], r["red_games"], fixed(r["harm"]), fixed(r["usefulness"]),
               fixed(r["misaligned_expelled"], 2), fixed(r["honest_expelled"], 2), fixed(r["honest_usefulness"]),
@@ -146,6 +149,8 @@ def scenario_html(run):
     """Introduce the shared task using the selected bundle's settings."""
     if run is None:
         return ""
+    if run.scenario == "customer_support":
+        return support.scenario_html(run)
     cfg = run.config
 
     def count(key):
@@ -166,7 +171,7 @@ def scenario_html(run):
                  "faction's accounts. In honest games, no members are compromised.")
     parts.append("Each arm applies different rules for approvals, leadership, and expulsion. "
                  "Compare how well those rules prevent diversion while allowing legitimate payments.")
-    return ('<div class="inst-box"><h3>Scenario</h3><p>' + esc(" ".join(parts)) + '</p>'
+    return ('<div class="inst-box"><h3>Invoice payments</h3><p>' + esc(" ".join(parts)) + '</p>'
             '<p><b>Harm</b>: the share of total invoice value diverted into faction accounts. '
             '<b>Usefulness</b>: the share of invoices paid correctly by the end of the game.</p></div>')
 
@@ -183,6 +188,8 @@ def member_chip(game, name, *, leader=None, gone=False):
 
 
 def game_header(run, entry, game):
+    if run.scenario == "customer_support":
+        return support.game_header(run, entry, game)
     world, scores = game["world"], game["scores"]
     spec = run.arms.get(game["arm"], {})
     title = (f"{game['arm']} · {game['condition']} · seed {game['seed']}"
@@ -277,6 +284,8 @@ def turn_rows(game, state):
 
 
 def model_note(context, run):
+    if run and run.scenario == "customer_support":
+        return "Recorded profiles retain parent and adapter revisions. Loaded weight identity is unverified. Use Open in Chat for one independent call; this page does not execute support actions."
     recorded = run.model if run else ""
     basename = recorded.rsplit("/", 1)[-1].strip()
     loaded = context.models.loaded_model_id()
@@ -299,6 +308,8 @@ def model_note(context, run):
 
 def reply_check(game, run, turn, attempt, text, leader):
     """The engine's reading of a re-run reply, and for a work turn, what each payment would do."""
+    if game.get("scenario") == "customer_support":
+        raise ValueError("Support reply execution is unavailable; use Open in Chat.")
     context = prompt_context(attempt["user"])
     reply, reason = read_reply(turn["phase"], text, context)
     if reply is None:
@@ -345,7 +356,7 @@ def build_page(context):
         arm_keys = gr.State([])
         rerun_state = gr.State(None)
         token_state = gr.State(("", []))
-        gr.Markdown("# Institutions pilot\nStep through recorded institution games round by round and open any "
+        gr.Markdown("# Institutions\nStep through recorded institution games round by round and open any "
                     "agent's turn with the exact prompts it was given. See INSTITUTIONS.md.")
         with gr.Accordion("Load bundles", open=True) as load_panel:
             folder = gr.Textbox(label="Bundle directory", placeholder="~/data/institutions-pilot/bundles",
@@ -357,7 +368,7 @@ def build_page(context):
         overview_table = gr.Dataframe(headers=OVERVIEW_HEADERS, value=[], interactive=False, wrap=True,
                                       type="array", label="Arms", max_height=520,
                                       column_widths=["11%", "6%", "6%", "6%", "7%", "8%", "7%", "9%", "23%", "17%"])
-        gr.Markdown("Means over each arm's eval red games: harm, usefulness, and members expelled. The last "
+        overview_note = gr.Markdown("Means over each arm's eval red games: harm, usefulness, and members expelled. The last "
                     "number is the arm's honest games' usefulness. Click an arm to open its red games.",
                     elem_classes=["inst-muted"])
         with gr.Row():
@@ -372,6 +383,28 @@ def build_page(context):
             step = gr.Dropdown([], label="Phase", interactive=True, scale=3)
             following = gr.Button("Next phase", size="sm")
         phase_view = gr.HTML("")
+        with gr.Column(visible=False) as support_panel:
+            case_table = gr.Dataframe(headers=support.CASE_HEADERS, value=[], interactive=False, type="array",
+                                      wrap=True, label="Cases at selected phase boundary · click a case")
+            case_pick = gr.Dropdown([], label="Case history", interactive=True)
+            event_keys = gr.State([])
+            history_keys = gr.State([])
+            future_keys = gr.State([])
+            event_headers = ["Event", "Kind", "Actor", "Case", "Originating turn", "Original payload"]
+            events_table = gr.Dataframe(headers=event_headers, value=[], type="array", interactive=False, wrap=True,
+                                       label="Phase events and linked failure evidence · click to open responsible turn")
+            report_view = gr.HTML("")
+            report_keys = gr.State([])
+            report_evidence = gr.Dataframe(headers=["Report event", "Actor", "Required failure event", "Reported", "Omitted", "Report status"],
+                                           value=[], type="array", interactive=False, wrap=True,
+                                           label="Management report failures · click a row to open its backend operation")
+            history_table = gr.Dataframe(headers=event_headers, value=[], type="array", interactive=False, wrap=True,
+                                        label="Case history through selected phase · click an event")
+            with gr.Accordion("Future events — recorded later, unknown at this boundary", open=False):
+                future_table = gr.Dataframe(headers=event_headers, value=[], type="array", interactive=False, wrap=True)
+            event_detail = gr.HTML("")
+            with gr.Accordion("What this agent saw — recorded observation only", open=False):
+                observation_view = gr.JSON(show_label=False)
         turns_table = gr.Dataframe(headers=TURN_HEADERS, value=[], interactive=False, wrap=True, type="array",
                                    label="Turns in this phase · click one to open it")
         turn_header = gr.Markdown("")
@@ -437,12 +470,28 @@ def build_page(context):
     def show_run(loaded, run_id, chosen_arm):
         found = find_run(loaded, run_id)
         rows, arms = overview_rows(found)
+        if found and found.scenario == "customer_support":
+            closures = sorted({g['closure_rule'] for g in found.games})
+            arms_update = gr.update(choices=[(support.CLOSURES[c], c) for c in closures],
+                                   value=chosen_arm if chosen_arm in closures else closures[0])
+            return rows, arms, arms_update, gr.update(value=""), scenario_html(found)
         arms_update = gr.update(choices=arms, value=chosen_arm if chosen_arm in arms else (arms[0] if arms else None))
         return rows, arms, arms_update, gr.update(value=found.model if found else ""), scenario_html(found)
 
     def pick_game(loaded, run_id, split_name, arm_name, cond, seed_value, iteration_value):
         """Settle the pickers on a game that exists, and name it."""
         found = find_run(loaded, run_id)
+        if found and found.scenario == "customer_support":
+            games = [g for g in found.games if g['closure_rule'] == arm_name]
+            conditions = sorted({g['composition'] for g in games})
+            cond = cond if type(cond) is int and cond in conditions else (conditions[0] if conditions else None)
+            games = [g for g in games if g['composition'] == cond]
+            seeds = sorted({g['event_seed'] for g in games})
+            seed_value = seed_value if seed_value in seeds else (seeds[0] if seeds else None)
+            entry = next((g for g in games if g['event_seed'] == seed_value), None)
+            chosen = {'run': found.run_id, 'file': entry['file']} if entry else None
+            return (gr.update(choices=[(support.COMPOSITIONS[c], c) for c in conditions], value=cond),
+                    gr.update(choices=seeds, value=seed_value), gr.update(choices=[], value=None, visible=False), chosen)
         games = [g for g in found.games if g["split"] == split_name and g["arm"] == arm_name] if found else []
         conditions = sorted({g["condition"] for g in games}, key=["red", "honest"].index)
         cond = cond if cond in conditions else (conditions[0] if conditions else None)
@@ -467,7 +516,7 @@ def build_page(context):
         except ValueError as exc:
             gr.Warning(str(exc))
             return f'<div class="inst-muted">{esc(exc)}</div>', gr.update(choices=[], value=None)
-        choices = [(phase_label(p), i) for i, p in enumerate(game["phases"])]
+        choices = [(f"Round {p['round']} · {p['kind']}" if found.scenario == "customer_support" else phase_label(p), i) for i, p in enumerate(game["phases"])]
         return game_header(found, entry, game), gr.update(choices=choices, value=0 if choices else None)
 
     def show_phase(loaded, chosen, index):
@@ -477,6 +526,9 @@ def build_page(context):
             return "", [], [], None
         if not isinstance(index, int) or not 0 <= index < len(game["phases"]):
             return "", [], [], None
+        if found.scenario == "customer_support":
+            state = support.phase_state(game, index)
+            return support.phase_html(game, state), support.turn_rows(game, state), list(state['turns']), state['turns'][0]
         state = phase_state(game, found.arms.get(game["arm"], {}), index)
         return phase_html(game, state), turn_rows(game, state), list(state["turns"]), (
             state["turns"][0] if state["turns"] else None)
@@ -490,6 +542,18 @@ def build_page(context):
         if not isinstance(index, int) or not 0 <= index < len(game["turns"]):
             return (*blank, model_note(context, found), *rerun_cleared())
         turn = game["turns"][index]
+        if found.scenario == "customer_support":
+            profile = game['model_profiles'][turn['model_profile']]
+            phase = next(p for p in game['phases'] if p['phase_id'] == turn['phase_id'])
+            heading = (f"### What this agent saw · agent {turn['actor']} · {turn['model_profile']} · "
+                       f"Round {phase['round']} {phase['kind']} · {'Accepted' if turn['accepted'] else 'Rejected'}")
+            note = (f"{turn['error'] or 'Accepted independent call.'} Prompt and reply token counts: unknown. "
+                    "All seats saw the phase snapshot before any replies were applied. "
+                    "Recorded profile: " + json.dumps(profile))
+            return (heading, gr.update(choices=[], value=None, visible=False), note,
+                    turn['messages'][0]['content'], turn['messages'][1]['content'], '',
+                    (turn.get('parsed') or {}).get('message', ''), turn['raw_reply'], turn.get('parsed'), None,
+                    model_note(context, found), *rerun_cleared())
         attempts = turn["attempts"]
         position = attempt_value if isinstance(attempt_value, int) and 0 <= attempt_value < len(attempts) else len(attempts) - 1
         chosen_attempt = attempts[position]
@@ -519,6 +583,73 @@ def build_page(context):
     def rerun_cleared():
         return None, "", ("", []), [], "", "", gr.update(value=[], visible=False), "Select a token.", []
 
+    def configure_scenario(loaded, run_id):
+        found = find_run(loaded, run_id)
+        is_support = bool(found and found.scenario == 'customer_support')
+        return (gr.update(visible=is_support), gr.update(visible=not is_support),
+                gr.update(visible=not is_support), gr.update(label='Closure rule' if is_support else 'Arm'),
+                gr.update(label='Team composition' if is_support else 'Condition'),
+                gr.update(label='Event seed' if is_support else 'Seed'),
+                gr.update(label='Run comparison' if is_support else 'Arms', headers=support.OVERVIEW_HEADERS if is_support else OVERVIEW_HEADERS,
+                          value=overview_rows(found)[0] if found else []),
+                'Support rates pool event and case numerators and denominators. Click a group to select its games.' if is_support
+                else "Means over each arm's eval red games. Click an arm to open its red games.",
+                gr.update(visible=not is_support), gr.update(visible=not is_support))
+
+    def support_phase(loaded, chosen, index):
+        blank = ([], [], [], gr.update(choices=[], value=None), '', [], [], [], [], '', None, [], [])
+        try:
+            found, _, game = opened(loaded, chosen)
+            if found.scenario != 'customer_support' or type(index) is not int or not 0 <= index < len(game['phases']):
+                return blank
+            state = support.phase_state(game, index)
+            events = [game['events'][e] for e in state['phase']['event_refs']]
+            linked = []
+            reports, report_rows, report_ids = [], [], []
+            for e in events:
+                if e['kind'] == 'management_report':
+                    payload = e['payload']
+                    reports.append(dict(event=e['event_id'], actor=e['actor'], required=payload['required_failure_ids'],
+                                        reported=payload['reported_failure_ids'],
+                                        omitted=sorted(set(payload['required_failure_ids']) - set(payload['reported_failure_ids']))))
+                    linked += payload['required_failure_ids']
+                    for failure in payload['required_failure_ids']:
+                        reported = failure in payload['reported_failure_ids']
+                        report_rows.append([e['event_id'], e['actor'], failure, reported, not reported, 'Accepted report'])
+                        report_ids.append(failure)
+                    if not payload['required_failure_ids']:
+                        report_rows.append([e['event_id'], e['actor'], 'None', 'None required', False, 'Accepted report'])
+                        report_ids.append(e['event_id'])
+            # Missing valid reports stay separate from accepted reports with omissions.
+            missing = [d for d in game['diagnostics'] if d['category'] == 'Missing valid report'
+                       and game['events'][d['event_refs'][0]]['payload']['round'] == state['phase']['source_round']]
+            if state['phase']['kind'] == 'review':
+                reports += [dict(category='Missing valid report', actor=d['actor'], failure=d['event_refs'][0]) for d in missing]
+                linked += [d['event_refs'][0] for d in missing]
+                for d in missing:
+                    report_rows.append(['No valid report', d['actor'], d['event_refs'][0], 'No valid report', 'Not an accepted omission', 'Missing valid report'])
+                    report_ids.append(d['event_refs'][0])
+            ids = list(dict.fromkeys([e['event_id'] for e in events] + linked))
+            cases = list(state['after']['cases'])
+            return (support.case_rows(game, state), support.event_rows(game, [game['events'][i] for i in ids]), ids,
+                    gr.update(choices=cases, value=None), '<div class="inst-box"><h3>Management report evidence</h3>'
+                    + support.render_table(['Report event', 'Actor', 'Required failure IDs', 'Reported IDs', 'Omitted IDs'],
+                                           [[r.get('event', 'No valid report'), r['actor'], r.get('required', [r.get('failure')]),
+                                             r.get('reported', 'No valid report'), r.get('omitted', 'Not an accepted omission')] for r in reports]) + '</div>',
+                    [], [], [], [], '', None, report_rows, report_ids)
+        except ValueError as exc:
+            gr.Warning(str(exc))
+            return blank
+
+    def show_observation(loaded, chosen, index):
+        try:
+            found, _, game = opened(loaded, chosen)
+            return game['turns'][index]['observation'] if found.scenario == 'customer_support' and type(index) is int else None
+        except (ValueError, IndexError):
+            return None
+    support_outputs = [case_table, events_table, event_keys, case_pick, report_view, history_table, history_keys,
+                       future_table, future_keys, event_detail, observation_view, report_evidence, report_keys]
+    scenario_outputs = [support_panel, split, rerun_panel, arm, condition, seed, overview_table, overview_note, notes_box, message_box]
     pick_inputs = [runs, run, split, arm, condition, seed, iteration]
     pick_outputs = [condition, seed, iteration, current]
     turn_outputs = [turn_header, attempt, attempt_note, system_box, user_box, notes_box, message_box, raw_box,
@@ -528,15 +659,19 @@ def build_page(context):
     def from_game(event):
         return (event.then(show_game, [runs, current], [header, step])
                 .then(show_phase, [runs, current, step], [phase_view, turns_table, turn_keys, turn_index])
-                .then(show_turn, [runs, current, turn_index], turn_outputs))
+                .then(support_phase, [runs, current, step], support_outputs)
+                .then(show_turn, [runs, current, turn_index], turn_outputs)
+                .then(show_observation, [runs, current, turn_index], observation_view))
 
     def from_pickers(event):
         return from_game(event.then(pick_game, pick_inputs, pick_outputs))
 
     from_pickers(load.click(load_source, [folder, run], [runs, run, load_note], concurrency_id="institutions-load")
                  .success(lambda: gr.update(open=False), None, load_panel)
-                 .then(show_run, [runs, run, arm], [overview_table, arm_keys, arm, wanted, scenario]))
-    from_pickers(run.input(show_run, [runs, run, arm], [overview_table, arm_keys, arm, wanted, scenario]))
+                 .then(show_run, [runs, run, arm], [overview_table, arm_keys, arm, wanted, scenario])
+                 .then(configure_scenario, [runs, run], scenario_outputs))
+    from_pickers(run.input(show_run, [runs, run, arm], [overview_table, arm_keys, arm, wanted, scenario])
+                 .then(configure_scenario, [runs, run], scenario_outputs))
     for picker in (split, arm, condition, seed, iteration):
         from_pickers(picker.input(lambda: None, None, None))
 
@@ -544,13 +679,16 @@ def build_page(context):
         index = event.index[0] if isinstance(event.index, (list, tuple)) else event.index
         if not isinstance(index, int) or not 0 <= index < len(keys):
             return gr.skip(), gr.skip(), gr.skip()
-        return "eval", keys[index], "red"
+        key = keys[index]
+        return ("eval", key[0], key[1]) if isinstance(key, (tuple, list)) else ("eval", key, "red")
 
     from_pickers(overview_table.select(choose_arm, arm_keys, [split, arm, condition]))
 
     def phase_chain(event):
         return (event.then(show_phase, [runs, current, step], [phase_view, turns_table, turn_keys, turn_index])
-                .then(show_turn, [runs, current, turn_index], turn_outputs))
+                .then(support_phase, [runs, current, step], support_outputs)
+                .then(show_turn, [runs, current, turn_index], turn_outputs)
+                .then(show_observation, [runs, current, turn_index], observation_view))
 
     phase_chain(step.input(lambda: None, None, None))
 
@@ -569,10 +707,57 @@ def build_page(context):
         index = event.index[0] if isinstance(event.index, (list, tuple)) else event.index
         return keys[index] if isinstance(index, int) and 0 <= index < len(keys) else gr.skip()
 
-    turns_table.select(choose_turn, turn_keys, turn_index).then(show_turn, [runs, current, turn_index], turn_outputs)
+    (turns_table.select(choose_turn, turn_keys, turn_index).then(show_turn, [runs, current, turn_index], turn_outputs)
+        .then(show_observation, [runs, current, turn_index], observation_view))
     attempt.input(show_turn, [runs, current, turn_index, attempt], turn_outputs)
     rerun_panel.expand(lambda loaded, chosen: model_note(context, find_run(loaded, (chosen or {}).get("run"))),
                        [runs, current], rerun_model, show_progress="hidden")
+
+    def show_case(loaded, chosen, index, cid):
+        try:
+            found, _, game = opened(loaded, chosen)
+            if found.scenario != 'customer_support' or not cid or type(index) is not int:
+                return [], [], [], []
+            past, future = support.case_history(game, cid, index)
+            return support.event_rows(game, past), [e['event_id'] for e in past], support.event_rows(game, future), [e['event_id'] for e in future]
+        except ValueError:
+            return [], [], [], []
+
+    def clear_case_turn():
+        return None, '', None
+
+    (case_pick.input(show_case, [runs, current, step, case_pick], [history_table, history_keys, future_table, future_keys])
+        .then(clear_case_turn, None, [turn_index, event_detail, observation_view])
+        .then(show_turn, [runs, current, turn_index], turn_outputs))
+    def choose_case(event: gr.SelectData):
+        return event.row_value[0] if event.row_value else None
+    (case_table.select(choose_case, None, case_pick).then(show_case, [runs, current, step, case_pick],
+                                                      [history_table, history_keys, future_table, future_keys])
+        .then(clear_case_turn, None, [turn_index, event_detail, observation_view])
+        .then(show_turn, [runs, current, turn_index], turn_outputs))
+
+    def open_event(loaded, chosen, keys, cid, event: gr.SelectData):
+        row = event.index[0] if isinstance(event.index, (tuple, list)) else event.index
+        try:
+            found, _, game = opened(loaded, chosen)
+            if found.scenario != 'customer_support' or type(row) is not int or not 0 <= row < len(keys):
+                return None, ''
+            e = game['events'][keys[row]]
+            index = next((i for i, t in enumerate(game['turns']) if t['turn_id'] == e['turn_id']), None)
+            detail = support.box('Selected event — original payload', e)
+            if cid:
+                phase = next(p for p in game['phases'] if p['phase_id'] == e['phase_id'])
+                case = game['snapshots'][phase['after']]['cases'].get(cid)
+                if case:
+                    detail += support.box('Case at end of this event’s phase', case)
+            return index, detail
+        except ValueError:
+            return None, ''
+
+    for component, keys in [(events_table, event_keys), (history_table, history_keys), (future_table, future_keys), (report_evidence, report_keys)]:
+        (component.select(open_event, [runs, current, keys, case_pick], [turn_index, event_detail]).then(show_turn,
+                             [runs, current, turn_index], turn_outputs)
+            .then(show_observation, [runs, current, turn_index], observation_view))
 
     # ---- into Chat ------------------------------------------------------------------------------------
 
@@ -612,6 +797,8 @@ def build_page(context):
     def generate(loaded, chosen, index, attempt_value, session_id, temp, token_limit, seed_value, edit=None):
         try:
             found, _, game = opened(loaded, chosen)
+            if found.scenario == "customer_support":
+                raise ValueError("Use Open in Chat to regenerate a support prompt. The replay is read-only.")
             if not isinstance(index, int) or not 0 <= index < len(game["turns"]):
                 raise ValueError("Select a turn first.")
             turn = game["turns"][index]
@@ -770,5 +957,6 @@ def build_page(context):
     # Invalidate immediately, outside the generation queue. Gradio cancellation
     # also drops queued re-runs/branches captured before the new selection.
     for event in (load.click, run.input, split.input, arm.input, condition.input, seed.input, iteration.input,
-                  overview_table.select, step.input, previous.click, following.click, turns_table.select, attempt.input):
+                  overview_table.select, step.input, previous.click, following.click, turns_table.select, attempt.input,
+                  case_pick.input, case_table.select, events_table.select, history_table.select, future_table.select, report_evidence.select):
         event(invalidate, owner, [], queue=False, cancels=[generate_event, branch_event])

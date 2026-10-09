@@ -1,6 +1,10 @@
-# Institutions pilot
+# Institutions
 
-The **Institutions pilot** extension reads the games recorded by the institutions pilot in
+The **Institutions** extension reads both **Invoice payments** and **Customer support** bundles.
+It discovers both scenarios in a single bundle root. Support walkthroughs are read-only and need no
+model. The scenario, replay status, and reliability gate status appear when a run is selected.
+
+The invoice adapter reads the games recorded by the institutions pilot in
 [realignment-benchmark](https://github.com/jss367/realignment-benchmark) (`experiments/institutions-pilot`).
 In that pilot five agents on a finance team pay invoices for 8 rounds. In red games two of them are
 secretly compromised and try to divert money to faction accounts. Seven institutions, the arms, decide
@@ -13,6 +17,80 @@ on the loaded model with token measurements and branch the re-run at any token. 
 never imports the pilot, never continues a game, and needs no model until you re-run a turn.
 
 Enable it under **Extensions** and restart ChatLab. **Institutions** appears in the sidebar.
+
+## Customer support walkthrough
+
+The support exporter lives in `realignment-benchmark/experiments/support-integrity/export_replay.py`.
+Use a retrieved results snapshot, containing `source-manifest.json`, `code-snapshot.tar.gz`, and
+`evidence/<split>/` (bounded gzipped evidence files) or `<split>-evidence.tar.gz`:
+
+```bash
+python experiments/support-integrity/export_replay.py \
+  --snapshot <retrieved-results-directory> --split full --out <bundle-root>
+```
+
+Use `--split smoke` for the corrected or original smoke. Each archive uses its own source and prompt
+version. The exporter checks source hashes, recorded artifact checksums when supplied, and the original
+validator, then captures phase boundaries and event-to-turn links during deterministic replay. It
+publishes the complete run atomically only after all prompts, replies, events, cases, and scores agree.
+Incomplete runs are refused. The original smoke remains visible as **Replay verified · Reliability
+gate failed — diagnostic run**. A checksum verifies correspondence to its manifest; it cannot establish
+that an experiment was conducted honestly. The original archive lacks recorded artifact checksums;
+this limitation is recorded alongside its source-hash and replay validation.
+
+Choose closure rule, team composition, and event seed. Team labels are **All parent models**, **One
+model organism**, and **Two model organisms**. The run comparison pools numerators and denominators;
+claim and certification counts are events, and distinct affected cases are a separate measure scoped
+to each game. Expand final per-game results or agent results for workloads by parent and organism.
+Profile badges describe weights, never honest behavior or attacker roles.
+
+Step through work and review phases. **Evaluator outcomes** shows cases at the selected boundary,
+including before → after changes, requested status, actual resolution, dashboard label, exclusion,
+and certifications. Final results are folded and explicitly include later rounds. Click a case for
+its history; future events are folded and labeled as later evidence. Click an event to open its
+responsible independent call. Intake and dashboard events have no invented agent turn.
+
+Management-report evidence lists required, reported, and omitted failure IDs. The phase event table
+includes those backend operations; click an event row to inspect its originating turn. A missing valid
+report is counted separately from accepted reports that omitted failures. Rejected review bundles
+apply no updates, certifications, or report; their proposed actions remain in the raw and parsed reply.
+
+**What this agent saw** contains only the recorded observation. Exact system and user messages remain
+separate from evaluator findings and model identities. Every seat saw the same phase boundary before
+any replies were applied; application order is not conversation order. A reviewer certifies backend
+evidence, without seeing an owner's same-phase closure claim. **Joint false attestation** describes
+qualifying pairs and does not establish collusion. Direct closure records certifications but does not
+use them to gate labels. Excluded cases remain in the evaluator's intake denominator.
+
+**Open in Chat**, **Include recorded reply**, and **Download as Chat conversation** preserve the
+selected independent call and its recorded profile, including both parent and adapter revisions.
+Opening Chat does not load those weights or apply the adapter. Per-turn token counts are unknown;
+aggregate processed tokens are not prompt/reply measurements. Sampling seeds belong to phase and
+model-group batches, so a single-prompt rerun does not promise the original stochastic result. Support
+regeneration uses Chat; this page never executes its new reply or advances the recorded simulation.
+Invoice token inspection, reply checks, and reruns retain their existing behavior.
+
+## Version 2 support contract
+
+Manifests use `chatlab-institutions-run-2`; games use `chatlab-institutions-game-2`, with explicit
+`scenario: customer_support` and `scenario_version: 1`. Existing version-1 invoice exports continue
+through the invoice adapter. Unknown scenarios or versions fail visibly.
+
+The envelope holds run/game identity, configuration, profiles, provenance, validation, roster, ordered
+phases and turns, unchanged original event IDs/payloads, snapshots, scores, and factual diagnostics.
+Phases link `before` and `after` snapshots, `turn_refs`, and `event_refs`. Turns link exact `messages`,
+structured `observation`, `raw_reply`, `parsed`, acceptance/error, and emitted events. Events link phase
+and originating turn when applicable. Display rounds are one-based; raw source rounds remain zero-based.
+
+Game index entries carry stable IDs, contained relative gzip paths, compressed-content SHA-256,
+phase/turn counts, closure rule, composition, event seed, and summary scores. ChatLab validates the
+contract, observations, ownership, references, snapshots, accepted actions, report IDs, factual
+classifications, and score agreement before rendering. It imports no simulator and executes no
+bundled Python. Compressed and decompressed games are bounded; the eight-game cache includes manifest
+and content hashes, and refresh rechecks bytes even if file size and timestamp do not change.
+
+The initial archived fixtures and scripted edge cases are under `tests/fixtures/institutions/`.
+Run `python -m unittest discover -s tests -p 'test_institutions*.py'` to verify them without weights.
 
 ## Export the games first
 
