@@ -4150,6 +4150,13 @@ def lora_config(base="Qwen/Qwen2.5-7B-Instruct"):
     return {"peft_type": "LORA", "task_type": "CAUSAL_LM", "base_model_name_or_path": base}
 
 
+def checkpoint_files(*names):
+    """A model repository's files as ``model_info`` lists them, a checkpoint at the root."""
+
+    names = names or ("config.json", "model.safetensors")
+    return [types.SimpleNamespace(rfilename=name) for name in names]
+
+
 def tokenizer_config_only():
     """The config the hub reads from an adapter repository: its tokenizer's, no model."""
 
@@ -4193,7 +4200,9 @@ class HubAdapterSearchTests(unittest.TestCase):
             if isinstance(found, Exception):
                 raise found
             return found or types.SimpleNamespace(
-                config={"model_type": "qwen2"}, tags=["transformers", "safetensors"]
+                config={"model_type": "qwen2"},
+                tags=["transformers", "safetensors"],
+                siblings=checkpoint_files(),
             )
 
         api = mock.Mock()
@@ -4336,6 +4345,30 @@ class HubAdapterSearchTests(unittest.TestCase):
 
         self.assertEqual([result.model_id for result in found], ["org/good"])
 
+    def test_an_adapter_on_a_base_with_no_root_checkpoint_is_left_out(self):
+        # Tags and config pass, but the weights sit in a subfolder, or in a
+        # format whose tag the hub left off, so the download would end with
+        # the base's model files missing.
+        self.adapter_configs.update(
+            {
+                "org/on-a-hollow-base": lora_config("org/hollow"),
+                "org/good": lora_config("Qwen/Qwen2.5-7B-Instruct"),
+            }
+        )
+        self.base_infos["org/hollow"] = types.SimpleNamespace(
+            config={"model_type": "qwen2"},
+            tags=["transformers", "safetensors"],
+            siblings=checkpoint_files("config.json", "final/model.safetensors"),
+        )
+        self.by_library["peft"] = [
+            hub_result(model_id, None, config=None, siblings=adapter_files())
+            for model_id in self.adapter_configs
+        ]
+
+        found = search_hub_models("lora")
+
+        self.assertEqual([result.model_id for result in found], ["org/good"])
+
     def test_an_adapter_carries_its_bases_gate(self):
         # A public adapter on a gated Llama still needs the base's terms
         # accepted, since the download fetches the base beside it.
@@ -4348,6 +4381,10 @@ class HubAdapterSearchTests(unittest.TestCase):
         self.base_infos["meta-llama/Llama-3.1-8B-Instruct"] = types.SimpleNamespace(
             config={"model_type": "llama"},
             tags=["transformers", "safetensors"],
+            siblings=checkpoint_files(
+                "config.json", "model.safetensors.index.json",
+                "model-00001-of-00004.safetensors",
+            ),
             gated="manual",
         )
         self.by_library["peft"] = [

@@ -144,9 +144,11 @@ def base_access(
     The same checks a text result gets, made on the base's metadata: an
     adapter merges into whatever ``AutoModelForCausalLM`` builds from the
     base, so a base that would not be listed itself cannot carry one. Its
-    files are read too, since a base that is itself an adapter repository
-    (:func:`is_adapter_repo`) passes on its tags and config alone, and the
-    Models page refuses an adapter on an adapter once both are down.
+    files are read too, and it needs a checkpoint at the root, single or
+    sharded (:data:`CHECKPOINT_FILES`): tags and config alone pass a base
+    that is itself an adapter repository, which the Models page refuses to
+    stack once both are down, and one whose weights sit elsewhere, which the
+    download would leave missing its model files.
 
     What comes back for a base that loads is its ``gated`` value - ``False``,
     ``"auto"`` or ``"manual"`` - since the hub shows anyone a gated
@@ -168,11 +170,11 @@ def base_access(
         return None
     if not loads_as_a_causal_lm(getattr(info, "config", None), model_types):
         return None
-    filenames = (
+    filenames = {
         getattr(sibling, "rfilename", None)
         for sibling in getattr(info, "siblings", None) or []
-    )
-    if is_adapter_repo(filenames):
+    }
+    if filenames.isdisjoint(CHECKPOINT_FILES):
         return None
     return getattr(info, "gated", False) or False
 
