@@ -2355,15 +2355,14 @@ def merged_starter(starter: HubModel, live: HubModel | None) -> HubModel:
     )
 
 
-def select_search_result(
-    pick: str | None, listing: Listing | None, precision: str | None = None,
-    fits_only: bool = False,
-):
-    """Open the model a row or an Other versions entry named, and mark its row.
+def select_search_result(pick: str | None):
+    """Open the model a row or an Other versions entry named.
 
     ``pick`` is what the row script in ui.model_finder writes to its bridge:
     the model's ID and a nonce. Anything else is ignored rather than guessed
     at, and an ID is validated rather than trusted, since it came from the page.
+    Its row is marked by the redraw that follows the ID box, as every other
+    way of choosing a model is.
     """
 
     try:
@@ -2373,15 +2372,15 @@ def select_search_result(
             raise ValueError("No model named")
         model = validate_model_id(model)
     except (ValueError, KeyError):
-        return gr.skip(), gr.skip()
-    return model, draw_results(listing, precision, fits_only, model)
+        return gr.skip()
+    return model
 
 
 def refresh_search_results(
     model_id: str | None, listing: Listing | None, precision: str | None = None,
     fits_only: bool = False,
 ):
-    """Redraw the results from the listing in hand, for a new precision or fit filter."""
+    """Redraw the results from the listing in hand, for a new choice, precision or fit filter."""
 
     if listing is None:
         return gr.skip()

@@ -687,14 +687,21 @@ def wire_model_choice(
         [models.model_id, models.search_results_state, models.weight_precision, models.fits_only],
         models.search_results,
     )
+    # The marked result is whichever model the ID box names, so the list is
+    # redrawn whenever the box changes, not only when a result is pressed: a
+    # row of My Models, the default, an extension or a pasted ID would
+    # otherwise leave the last pressed result marked behind the Find tab.
+    models.model_id.change(
+        refresh_search_results,
+        [models.model_id, models.search_results_state, models.weight_precision, models.fits_only],
+        models.search_results,
+        show_progress="hidden", trigger_mode="always_last",
+    )
     # A pressed row, an Other versions entry, or an ID pasted and entered:
     # the model opens in the pane, which withdraws the My Models selection
     # the same way, and is checked on Hugging Face.
     models.search_pick.change(
-        select_search_result,
-        [models.search_pick, models.search_results_state, models.weight_precision, models.fits_only],
-        [models.model_id, models.search_results],
-        show_progress="hidden",
+        select_search_result, models.search_pick, models.model_id, show_progress="hidden",
     ).then(
         clear_my_model_selection, None, [models.my_models, models.my_model_detail],
         show_progress="hidden",

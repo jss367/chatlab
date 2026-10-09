@@ -2067,7 +2067,9 @@ class ModelSearchPaneTests(unittest.TestCase):
     def test_pressing_a_row_opens_its_model_and_marks_the_row(self):
         _, listing, _ = app.search_models("olmo", "")
 
-        model, drawn = app.select_search_result(pick(GATED.model_id), listing)
+        model = app.select_search_result(pick(GATED.model_id))
+        # The ID box changing is what redraws the list with the row marked.
+        drawn = models_page.refresh_search_results(model, listing)
 
         self.assertEqual(model, GATED.model_id)
         self.assertIn("aria-pressed='true'", row(drawn, GATED.model_id))
@@ -2076,9 +2078,7 @@ class ModelSearchPaneTests(unittest.TestCase):
     def test_a_press_the_server_cannot_read_does_nothing(self):
         for payload in (None, "", "not json", "[]", json.dumps({"nonce": 1}),
                         json.dumps({"model": "../../etc"}), json.dumps({"model": 7})):
-            self.assertEqual(
-                app.select_search_result(payload, None), (gr.skip(), gr.skip()), payload
-            )
+            self.assertEqual(app.select_search_result(payload), gr.skip(), payload)
 
     def test_enter_on_an_id_opens_it_through_the_pick_bridge(self):
         # Typed in another case, the ID opens as the hub spells it.

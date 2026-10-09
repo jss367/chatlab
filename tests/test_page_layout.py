@@ -1295,6 +1295,21 @@ class PageLayoutTests(unittest.TestCase):
                 (listener,) = listeners_named(self.demo, name)
                 self.assertIs(listener.outputs[0], box)
 
+    def test_the_marked_search_result_follows_the_id_box(self):
+        # A row of My Models, the default or an extension writes the box
+        # without pressing a result, so the list is redrawn from the box
+        # itself rather than only from a press, or the last pressed result
+        # would stay marked.
+        box = self.labelled("Hugging Face model ID")
+        results = self.by_id("model-search-results")
+        redraws = [
+            listener for listener in listeners_named(self.demo, "refresh_search_results")
+            if (box._id, "change") in listener.targets
+        ]
+        self.assertEqual(len(redraws), 1)
+        self.assertEqual(redraws[0].outputs, [results])
+        self.assertIs(redraws[0].inputs[0], box)
+
 
 # Enough of a page for RESIZE_JS to run against: two rows of the shape the
 # layout builds, and stand-ins for the browser it talks to. Nothing here
