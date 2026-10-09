@@ -2205,7 +2205,7 @@ CELL_FORMATS = {
 }
 
 
-def adapter_note(result: HubModel) -> str:
+def hub_adapter_note(result: HubModel) -> str:
     """What a search result that is a LoRA adapter says under its name."""
 
     if result.base_model:
@@ -2214,7 +2214,7 @@ def adapter_note(result: HubModel) -> str:
 
 
 def search_row(result: HubModel, fit: Fit | None = None) -> dict:
-    note = result.summary or (adapter_note(result) if result.adapter else None)
+    note = result.summary or (hub_adapter_note(result) if result.adapter else None)
     return {
         "Model": f"{result.model_id}\n{note}" if note else result.model_id,
         "Params": result.parameters or None,
