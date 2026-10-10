@@ -50,11 +50,11 @@ that an experiment was conducted honestly. The original archive lacks recorded a
 this limitation is recorded alongside its source-hash and replay validation.
 
 Choose closure rule, team composition, and event seed. Pilot team labels are **All parent models**, **One
-model organism**, and **Two model organisms**. A version-3 run names its own teams, such as **All cheater**
-or **2 cheater + 3 base**. The run comparison pools numerators and denominators;
-claim and certification counts are events, and distinct affected cases are a separate measure scoped
-to each game. Expand final per-game results or agent results for workloads by parent and organism.
-Profile badges describe weights, never honest behavior or attacker roles.
+model organism**, and **Two model organisms**. Later runs name their own teams, such as **All cheater** or
+**2 cheater + 3 base**. The run comparison pools numerators and denominators; claim and certification
+counts are events, and distinct affected cases are a separate measure scoped to each game. Expand final
+per-game results or agent results for workloads by profile. Profile badges describe weights, never
+honest behavior or attacker roles.
 
 Step through work and review phases. **Evaluator outcomes** shows cases at the selected boundary,
 including before → after changes, requested status, actual resolution, dashboard label, exclusion,
@@ -82,27 +82,40 @@ model-group batches, so a single-prompt rerun does not promise the original stoc
 regeneration uses Chat; this page never executes its new reply or advances the recorded simulation.
 Invoice token inspection, reply checks, and reruns retain their existing behavior.
 
-## Support contract, versions 2 and 3
+## Support contract
 
 Manifests use `chatlab-institutions-run-2`; games use `chatlab-institutions-game-2`, with explicit
-`scenario: customer_support` and `scenario_version: 1`. Existing version-1 invoice exports continue
-through the invoice adapter. Unknown scenarios or versions fail visibly.
+`scenario: customer_support`. Existing version-1 invoice exports continue through the invoice adapter.
+Unknown scenarios fail visibly.
 
-Exporter version 2 has two profiles, `parent` and `organism`, and a game's `composition` is its number of
-organisms (0, 1 or 2). Exporter version 3 names its profiles and teams. Its manifest adds `compositions`,
-mapping each team key to a `label` and a `roster` of five profile IDs. Every game's `composition` is one of
-those keys, and its seats must match the roster in order. Per-agent scores name the seat's profile. A seat
-counts as an organism, in `organism_slots` and the organism score counts, when its profile has an adapter.
-`reply_format` is `json` or `reasoning_then_json`. Under `reasoning_then_json` the JSON is read from the text
-after the last `</think>`, and a reply whose reasoning never closed has no parsed object. **Open in Chat**
-puts that reasoning in Chat's reasoning block. The optional boolean `reasoning_prefilled` defaults to
-`true` for this format: markerless text is then unfinished reasoning, even if it contains JSON. A run
-whose template did not prefill reasoning may set it to `false` to permit a genuinely markerless JSON answer.
-Repository `subfolder` metadata is optional and must be a string when present.
-Validation may add `per_profile_invalid_fraction`, and
-the reliability gate then also needs each profile at or below 10%. When present, that map must cover
-exactly the profiles used by the indexed teams, with each rate matching the indexed per-agent rejection
-counts divided by its recorded turn opportunities (one turn per seat per phase).
+The exporter owns the scenario's rules. It replays each game through the code that recorded it and writes
+only games whose prompts, observations, events, cases and scores reproduce, so ChatLab does not check them
+again. ChatLab checks that a bundle hangs together, and reads everything an experiment varies from the
+manifest. A new model, team size, closure rule or score needs an exporter change, not a ChatLab release.
+
+The manifest can declare:
+
+- `compositions`: each team key maps to a `label` and a `roster`, the profile ID in each seat. Seats can
+  number any count. Every game's `composition` is one of the keys, and its seats must match the roster in
+  order. Without `compositions`, a game's `composition` is its number of seats whose profile has an adapter
+  (0, 1 or 2), as the pilot exported it.
+- `closure_rules`: each closure rule key maps to its label, in display order. Without it, `direct` and
+  `peer` get their pilot labels and other keys show as written.
+- `score_columns`: `game` columns for the run comparison and game header, and `agent` columns for the
+  per-agent and per-profile tables. A column has a `label` and a `value`, a dotted path to a count, or two
+  paths shown as "numerator / denominator". Game paths read the index entry (`scores.cases`, `turns`);
+  agent paths read a `scores.per_agent` row. A game column can instead be
+  `{"label": ..., "distinct_cases": "<diagnostic category>"}`, the distinct cases with that diagnostic in
+  each game. The run comparison sums every count over a group's games. Without `score_columns`, the
+  pilot's columns are used.
+
+`model_profiles` name each profile's parent `repo` and `revision`, and an optional `adapter` with its own
+`repo`, `revision` and `subfolder`; either side may name a `subfolder`, which must be a string. `validation` must record `replay_verified: true` and
+`reliability_gate_passed`; ChatLab shows the gate result and does not recompute it. `exporter_version`,
+`scenario_version` are recorded for provenance, and each game's `scenario_version` must equal the
+manifest's. Under `reply_format: reasoning_then_json`, **Open in Chat** puts the text before the last
+`</think>` in Chat's reasoning block. The optional boolean `reasoning_prefilled` defaults to `true`: a reply
+with no closing marker is then unfinished reasoning, even if it contains JSON.
 
 The envelope holds run/game identity, configuration, profiles, provenance, validation, roster, ordered
 phases and turns, unchanged original event IDs/payloads, snapshots, scores, and factual diagnostics.
@@ -111,10 +124,11 @@ structured `observation`, `raw_reply`, `parsed`, acceptance/error, and emitted e
 and originating turn when applicable. Display rounds are one-based; raw source rounds remain zero-based.
 
 Game index entries carry stable IDs, contained relative gzip paths, compressed-content SHA-256,
-phase/turn counts, closure rule, composition, event seed, and summary scores. ChatLab validates the
-contract, observations, ownership, references, snapshots, accepted actions, report IDs, factual
-classifications, and score agreement before rendering. It imports no simulator and executes no
-bundled Python. Compressed and decompressed games are bounded; the eight-game cache includes manifest
+phase/turn counts, closure rule, composition, event seed, and summary scores. Before rendering, ChatLab
+checks the hashes, that each game's identity, profiles and scores match the index, that seats are
+numbered from 0 and match their team, and that every phase, turn, event, snapshot and diagnostic
+reference resolves, with each turn and event in exactly one phase. It imports no simulator and executes
+no bundled Python. Compressed and decompressed games are bounded; the eight-game cache includes manifest
 and content hashes, and refresh rechecks bytes even if file size and timestamp do not change.
 
 The initial archived fixtures and scripted edge cases are under `tests/fixtures/institutions/`.
