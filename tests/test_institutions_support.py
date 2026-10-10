@@ -276,7 +276,10 @@ class NamedTeamTests(unittest.TestCase):
                        lambda m: m.update(score_columns={'game': []}),
                        lambda m: m.update(exporter_version='3'),
                        lambda m: m['model_profiles']['cheater'].update(adapter={}),
-                       lambda m: m['model_profiles']['base'].update(adapter=False)):
+                       lambda m: m['model_profiles']['base'].update(adapter=False),
+                       lambda m: m.update(reply_format='reasoning_then_jsn'),
+                       lambda m: m.update(reply_format=None),
+                       lambda m: m['model_profiles']['cheater'].update(merge_method=['peft'])):
             manifest = copy.deepcopy(run.manifest)
             mutate(manifest)
             manifests.append(manifest)
@@ -404,6 +407,14 @@ class SupportContractRegressionTests(unittest.TestCase):
                     self.assertEqual(len(loaded), 1)
                     self.assertEqual(len(warnings), 1)
                     self.assertIn('invalid team compositions', warnings[0])
+
+    def test_adapter_without_merge_method_is_not_called_original_weights(self):
+        m = self.manifest()
+        m['model_profiles']['cheater'].pop('merge_method')
+        support.validate_manifest(m)
+        text = support.scenario_html(SimpleNamespace(manifest=m, config=m['config']))
+        self.assertIn('<td>Not recorded</td>', text)
+        self.assertIn('<td>base</td><td>Qwen/Qwen3-8B</td><td>None</td><td>Original parent weights</td>', text)
 
     def test_profile_table_distinguishes_parent_subfolders(self):
         m = self.manifest()

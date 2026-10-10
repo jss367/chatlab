@@ -15,6 +15,8 @@ SCENARIO = 'customer_support'
 # Teams before exporter version 3 were a count of organisms among parent models.
 COMPOSITIONS = {0: 'All parent models', 1: 'One model organism', 2: 'Two model organisms'}
 CLOSURES = {'direct': 'Direct closure', 'peer': 'Peer approval'}
+# Open in Chat splits reasoning from the answer by this, so an unknown value must not fall back to plain JSON.
+REPLY_FORMATS = ('json', 'reasoning_then_json')
 # A column reads counts at dotted paths: game columns from the index entry, agent columns from a per_agent row.
 # Two paths show as "numerator / denominator"; the run comparison sums each over a group's games.
 GAME_COLUMNS = [
@@ -78,6 +80,7 @@ def profiles(value):
                     'missing model repository or revision')
             require('subfolder' not in repository or isinstance(repository['subfolder'], str),
                     'invalid model repository subfolder')
+        require(p.get('merge_method') is None or text(p['merge_method']), 'invalid merge method')
 
 
 def compositions(m):
@@ -164,6 +167,7 @@ def validate_manifest(m):
     require(isinstance(v, dict) and v.get('replay_verified') is True
             and type(v.get('reliability_gate_passed')) is bool, 'partial or unverified runs are unsupported')
     profiles(m.get('model_profiles'))
+    require('reply_format' not in m or m['reply_format'] in REPLY_FORMATS, 'unknown reply format')
     require('reasoning_prefilled' not in m or type(m['reasoning_prefilled']) is bool, 'invalid reasoning prefill state')
     if 'compositions' in m:
         teams = m['compositions']
@@ -397,7 +401,7 @@ def scenario_html(run):
         parent_name = parent['repo'] + ('/' + parent['subfolder'] if parent.get('subfolder') else '')
         adapter_name = adapter['repo'] + ('/' + adapter['subfolder'] if adapter.get('subfolder') else '') if adapter else 'None'
         profile_rows.append([p['profile_id'], parent_name, adapter_name,
-                             p.get('merge_method') or 'Original parent weights'])
+                             p.get('merge_method') or ('Not recorded' if adapter else 'Original parent weights')])
     return ('<div class="inst-box"><h3>' + html.escape(run.manifest['scenario_label']) + '</h3><p>Replay verified · Reliability gate '
             + ('passed' if v['reliability_gate_passed'] else 'failed — diagnostic run')
             + '. Actual resolution uses the fixed intake denominator, including excluded cases. '
