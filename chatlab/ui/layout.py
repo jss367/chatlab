@@ -91,6 +91,7 @@ from chatlab.ui.icons import icon_classes
 from chatlab.ui.images_layout import build_images_page, wire_images_page
 from chatlab.ui.attention_trace import ATTENTION_TRACE_CSS, ATTENTION_TRACE_JS
 from chatlab.ui.inspection import JACOBIAN_CSS, JACOBIAN_JS
+from chatlab.ui.model_finder import MODEL_FINDER_JS
 from chatlab.ui.model_rows import MODEL_ROWS_JS
 from chatlab.ui.pictures import PICTURES_JS, REMOVE_BRIDGE_ID, attach_pictures, remove_picture
 from chatlab.ui.models_layout import (
@@ -706,7 +707,7 @@ def _wire_pages(
     # The ID box and everything that has to move with it, in the order
     # select_model_to_load() returns them.
     extension_model_outputs = [models.model_id, models.my_models, models.my_model_detail,
-                               models.search_selection, models.search_detail, models.model_status]
+                               models.model_status]
     def open_models_from_extension():
         return (*go_to_models(), *(gr.update(visible=False) for _ in pages.extensions))
     def open_named_model_from_extension(wanted):
@@ -744,6 +745,7 @@ def _wire_page_scripts(
     demo.load(None, None, None, js=TREE_JS)
     demo.load(None, None, None, js=CONVERSATION_ROWS_JS)
     demo.load(None, None, None, js=MODEL_ROWS_JS)
+    demo.load(None, None, None, js=MODEL_FINDER_JS)
     demo.load(None, None, None, js=JACOBIAN_JS)
     demo.load(None, None, None, js=ATTENTION_TRACE_JS)
     demo.load(None, None, None, js=PICTURES_JS)

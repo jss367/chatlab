@@ -17,6 +17,7 @@ from chatlab.ui import common, icons, models_page, runtime
 from chatlab.ui.conversation_rows import (
     ARCHIVE_BRIDGE_ID, CONVERSATION_ROWS_JS, DELETE_BRIDGE_ID, FAMILY_BRIDGE_ID,
 )
+from chatlab.ui.model_finder import PICK_BRIDGE_ID
 from chatlab.ui.model_rows import MODEL_ACTION_BRIDGE_ID, MODEL_LIST_ID, MODEL_ROWS_JS
 from chatlab import settings
 from chatlab.model_cache import CacheStatus
@@ -683,58 +684,61 @@ class PageLayoutTests(unittest.TestCase):
             for _, event in other.targets
         ))
 
-    def test_model_progress_is_always_open_in_the_card_above_download_buttons(self):
+    def test_model_progress_is_always_open_in_the_pane_beside_the_buttons(self):
         status = self.by_id("model-status")
-        card = self.by_id("model-availability").parent
-        self.assertTrue(self.within(status, card))
+        pane = self.by_id("model-pane")
+        self.assertIs(self.by_id("model-availability").parent, pane)
+        self.assertTrue(self.within(status, pane))
         parent = status.parent
-        while parent is not card:
+        while parent is not pane:
             self.assertNotIsInstance(parent, gr.Accordion)
             parent = parent.parent
         activity = status.parent
         for name in ("download_model", "download_and_load_model", "load_cached_model"):
             listener = listeners_named(self.demo, name)[0]
             button = self.demo.blocks[listener.targets[0][0]]
-            self.assertTrue(self.within(button, card))
-            self.assertLess(card.children.index(activity), card.children.index(button.parent))
+            self.assertTrue(self.within(button, pane))
+            # Straight under the buttons, so a press shows its progress
+            # where the reader is looking.
+            self.assertEqual(
+                pane.children.index(activity), pane.children.index(button.parent) + 1
+            )
 
-    def test_explicit_repository_checks_make_one_request_after_leaving_the_id_field(self):
+    def test_a_model_is_checked_on_hugging_face_when_opened_or_asked_never_on_load(self):
+        # The page paints offline, so nothing checks the hub as it loads.
+        # Opening a model checks it, as do the check button and a token.
         model_id = self.labelled("Hugging Face model ID")
+        token = self.labelled("Hugging Face token (optional)")
         (button,) = [
             block for block in self.demo.blocks.values()
-            if isinstance(block, gr.Button) and block.value == "Check model"
+            if isinstance(block, gr.Button) and block.value == "Check on Hugging Face"
         ]
         checks = listeners_named(self.demo, "check_model_repository")
-        info = mock.Mock(
-            tags=[], config={}, library_name="transformers", siblings=[],
-            private=False, gated=False,
-        )
-        for events, expected in (
-            ([(model_id._id, "blur"), (button._id, "click")], 1),
-            ([(model_id._id, "submit"), (model_id._id, "blur")], 1),
-            ([(model_id._id, "blur")], 0),
-        ):
-            with self.subTest(events=events), mock.patch(
-                "huggingface_hub.HfApi.model_info", return_value=info
-            ) as request:
-                # Dispatch the actual registered dependencies in browser event
-                # order: clicking Check first blurs the focused model ID field.
-                for event in events:
-                    for listener in checks:
-                        if event in listener.targets:
-                            states = list(listener.fn("org/model", ""))
-                            self.assertEqual(states[-1]["status"], "found")
-                self.assertEqual(request.call_count, expected)
+        targets = {target for listener in checks for target in listener.targets}
+        self.assertIn((button._id, "click"), targets)
+        self.assertIn((token._id, "submit"), targets)
+        self.assertFalse(any(event == "load" for _, event in targets))
+        self.assertFalse(any(block == model_id._id for block, _ in targets))
+        for listener in checks:
+            self.assertEqual(listener.inputs, [model_id, token])
+        # The one chained check follows opening a model from the list.
+        (pick,) = listeners_named(self.demo, "select_search_result")
+        self.assertEqual(pick.targets, [(self.by_id(PICK_BRIDGE_ID)._id, "change")])
+        self.assertTrue(self.follows(pick, "check_model_repository"))
+        self.assertTrue(self.follows(pick, "find_versions"))
 
-    def test_repository_precision_refreshes_for_cached_selections_and_rescans(self):
-        views = listeners_named(self.demo, "repository_view")
+    def test_the_pane_follows_everything_it_describes(self):
+        views = listeners_named(self.demo, "model_pane")
         selected = self.labelled("Downloaded models")
-        self.assertTrue(any(fn.targets == [(selected._id, "change")] for fn in views))
+        changes = {target for fn in views for target in fn.targets}
+        for control in (selected, self.labelled("Hugging Face model ID"), self.labelled("Load at")):
+            self.assertIn((control._id, "change"), changes)
         self.assertTrue(any(event == "load" for fn in views for _, event in fn.targets))
         for fn in views:
-            self.assertEqual(fn.inputs[-1], selected)
-            self.assertEqual(fn.inputs[0], self.labelled("Hugging Face model ID"))
-            self.assertEqual(fn.inputs[2], self.labelled("Hugging Face token (optional)"))
+            self.assertEqual(fn.inputs[:2], [self.labelled("Hugging Face model ID"), selected])
+            self.assertEqual(fn.inputs[3], self.labelled("Hugging Face token (optional)"))
+            self.assertEqual(fn.outputs[0], self.by_id("model-pane-head"))
+            self.assertEqual(fn.outputs[2], self.by_id("model-pane-body"))
         action_ids = {fn._id for fn in listeners_named(self.demo, "refresh_model_actions")}
         chained = [
             dependency for dependency in self.demo.config["dependencies"]
@@ -810,10 +814,11 @@ class PageLayoutTests(unittest.TestCase):
         self.assertEqual(app.chosen_model("", None), "")
 
     def test_naming_a_model_another_way_withdraws_the_selection(self):
-        # Typing an ID or picking a search result names its own model, so the
-        # highlighted row cannot outrank it.
+        # Opening a search result or a pasted ID names its own model, so the
+        # highlighted row cannot outrank it. The default and an extension's
+        # model withdraw it inside select_model_to_load.
         listeners = listeners_named(self.demo, "clear_my_model_selection")
-        self.assertEqual(len(listeners), 2)
+        self.assertEqual(len(listeners), 1)
         radio = self.labelled("Downloaded models")
         for fn in listeners:
             self.assertIn(radio, fn.outputs)
@@ -954,10 +959,6 @@ class PageLayoutTests(unittest.TestCase):
                 # A row picked earlier outranks the ID box, so it goes.
                 self.labelled("Downloaded models"),
                 self.by_id("my-model-detail"),
-                # The search selection is a State beside the table, so it is
-                # found through the handler that writes it.
-                listeners_named(self.demo, "select_search_result")[0].outputs[2],
-                listeners_named(self.demo, "select_search_result")[0].outputs[1],
                 self.by_id("model-status"),
                 self.by_id("nav"),
                 self.by_id("conversation-pane"),
@@ -984,7 +985,7 @@ class PageLayoutTests(unittest.TestCase):
         # the switcher still names what is in memory, so an open list is not
         # closed under the reader every couple of seconds.
         switch = self.by_id("model-switch")
-        precision = self.labelled("Weight precision")
+        precision = self.labelled("Load at")
         listeners = listeners_named(self.demo, "refresh_model_switch")
         triggers = {listener.targets[0] for listener in listeners}
         self.assertIn((self.by_id("nav")._id, "change"), triggers)
@@ -1019,7 +1020,7 @@ class PageLayoutTests(unittest.TestCase):
         listeners = listeners_named(self.demo, "switch_model")
         self.assertEqual(len(listeners), 1)
         self.assertEqual(listeners[0].targets, [(switch._id, "input")])
-        self.assertEqual(listeners[0].inputs, [switch, self.labelled("Weight precision")])
+        self.assertEqual(listeners[0].inputs, [switch, self.labelled("Load at")])
         self.assertEqual(
             listeners[0].outputs,
             [switch, self.by_id("model-status"), self.by_id("model-badge")],
@@ -1300,6 +1301,37 @@ class PageLayoutTests(unittest.TestCase):
             with self.subTest(handler=name):
                 (listener,) = listeners_named(self.demo, name)
                 self.assertIs(listener.outputs[0], box)
+
+    def test_all_search_triggers_share_the_group_so_old_queries_cannot_overtake_kind_or_sort(self):
+        searches = listeners_named(self.demo, "search_models") + listeners_named(self.demo, "search_and_open")
+        self.assertEqual(len(searches), 2)
+        for fn in searches:
+            self.assertEqual(fn.concurrency_id, "model-search")
+        (shared,) = listeners_named(self.demo, "search_models")
+        self.assertEqual(shared.trigger_mode, "always_last")
+        self.assertEqual(len(shared.targets), 4)
+        target_ids = {target[0] for target in shared.targets}
+        self.assertIn(self.by_id("search-kind")._id, target_ids)
+        self.assertIn(self.by_id("model-search-order")._id, target_ids)
+        self.assertIn((self.by_id("search-kind")._id, "change"), shared.targets)
+        self.assertNotIn((self.by_id("search-kind")._id, "input"), shared.targets)
+        (enter,) = listeners_named(self.demo, "search_and_open")
+        self.assertEqual(enter.trigger_mode, "multiple")
+
+    def test_the_marked_search_result_follows_the_id_box(self):
+        # A row of My Models, the default or an extension writes the box
+        # without pressing a result, so the list is redrawn from the box
+        # itself rather than only from a press, or the last pressed result
+        # would stay marked.
+        box = self.labelled("Hugging Face model ID")
+        results = self.by_id("model-search-results")
+        redraws = [
+            listener for listener in listeners_named(self.demo, "refresh_search_results")
+            if (box._id, "change") in listener.targets
+        ]
+        self.assertEqual(len(redraws), 1)
+        self.assertEqual(redraws[0].outputs, [results])
+        self.assertIs(redraws[0].inputs[0], box)
 
 
 # Enough of a page for RESIZE_JS to run against: two rows of the shape the

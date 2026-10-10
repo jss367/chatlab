@@ -112,7 +112,6 @@ from chatlab.ui.models_page import (
     BADGE_REFRESH_SECONDS,
     NO_CACHED_MODEL_SELECTED,
     NO_MODEL_BADGE,
-    NO_RESULT_SELECTED,
     ALL_KINDS,
     Pace,
     RateMeter,

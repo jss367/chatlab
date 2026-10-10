@@ -4,6 +4,7 @@ and badge that read the same cache."""
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,7 +39,7 @@ from chatlab import model_errors
 from chatlab.model_runtime import ModelManager
 from chatlab.progress_bars import DownloadProgress
 
-from models_support import COMMIT, OLMO, cached, painted, picked
+from models_support import COMMIT, OLMO, cached
 import settings_sandbox
 from ui_support import css_selectors
 
@@ -1125,7 +1126,7 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertEqual(radio["choices"], [])
         self.assertEqual(detail, "")
         self.assertIn("No image models", summary)
-        self.assertIn("**Discover models**", summary)
+        self.assertIn("**Find a model**", summary)
 
     def test_a_filter_that_hides_the_selected_row_drops_the_selection(self):
         self.entries = [cached(OLMO), PIPELINE]
@@ -1179,7 +1180,7 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertEqual([v for _, v in radio["choices"]], [PIPELINE.model_id])
         self.assertIn("Showing 1 image matching", summary)
         self.assertIn("No image models matching `qwen`", empty)
-        self.assertIn("**Discover models**", empty)
+        self.assertIn("**Find a model**", empty)
 
     def test_a_name_that_hides_the_selected_row_drops_the_selection(self):
         self.entries = [cached(OLMO), cached("Qwen/Qwen3-0.6B")]
@@ -1311,7 +1312,7 @@ class MyModelsPaneTests(unittest.TestCase):
         self.assertIsNone(radio["value"])
         self.assertEqual(detail, "")
         self.assertIn("No models", summary)
-        self.assertIn("Discover models", summary)
+        self.assertIn("Find a model", summary)
 
     def test_refresh_does_not_replace_an_uncached_typed_id_with_the_loaded_model(self):
         self.manager.model_id = OLMO
@@ -1436,11 +1437,11 @@ class ModelFitTests(unittest.TestCase):
 
         # Nothing to correct yet: torch is still importing.
         self.assertEqual(
-            app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 7
+            app.refresh_after_device(False, None, "Name", "4-bit"), (gr.skip(),) * 5
         )
 
         models_page.imported_torch = lambda: object()
-        radio, _detail, _summary, _results, _search_detail, _selected, known = (
+        radio, _detail, _summary, _results, known = (
             app.refresh_after_device(False, None, "Name", "4-bit")
         )
 
@@ -1448,28 +1449,27 @@ class ModelFitTests(unittest.TestCase):
         self.assertIn("· tight", dict((v, k) for k, v in radio["choices"])[OLMO])
         # And once it has run, it never runs again.
         self.assertEqual(
-            app.refresh_after_device(True, None, "Name", "4-bit"), (gr.skip(),) * 7
+            app.refresh_after_device(True, None, "Name", "4-bit"), (gr.skip(),) * 5
         )
 
     def test_a_search_run_before_the_device_was_read_is_repainted_too(self):
-        held = {
-            "org/small": hub_search.HubModel(
-                model_id="org/small", parameters=1_000_000_000
-            )
-        }
+        held = models_page.Listing(
+            {"org/small": hub_search.HubModel(model_id="org/small", parameters=1_000_000_000)},
+            models_page.HUB_HEADING,
+        )
         roomy(self, total_gb=24, available_gb=18, backend=None, dtype=None)
         original = models_page.imported_torch
         models_page.imported_torch = lambda: object()
         self.addCleanup(lambda: setattr(models_page, "imported_torch", original))
 
-        _radio, _detail, _summary, results, _search, _selected, known = (
+        _radio, _detail, _summary, results, known = (
             app.refresh_after_device(
-                False, None, "Name", "full", app.ALL_KINDS, None, None, None, held
+                False, None, "Name", "full", app.ALL_KINDS, None, None, held
             )
         )
 
         self.assertTrue(known)
-        self.assertEqual(cells(results, "Fit"), ["fits"])
+        self.assertIn("Fits", row(results, "org/small"))
 
     def test_the_selected_model_says_what_the_verdict_rests_on(self):
         _box, detail = app.select_my_model(OLMO, "full")
@@ -1793,67 +1793,118 @@ INSTRUCT = HubModel(
 GATED = HubModel(model_id="meta-llama/Llama-3.1-8B", gated="manual")
 
 
-def cells(table, column):
-    """One column of a search table update, top to bottom, as the numbers underneath."""
+ROW = re.compile(r"class='model-result[^']*' data-model='([^']+)'")
 
-    return list(table["value"].data[column])
+
+def rows(drawn: str) -> list[str]:
+    """The model IDs of a results card's rows, top to bottom."""
+
+    return ROW.findall(drawn)
+
+
+def row(drawn: str, model_id: str) -> str:
+    """The HTML of the one row for ``model_id``."""
+
+    start = drawn.index(f"data-model='{model_id}'")
+    return drawn[drawn.rindex("<button", 0, start):drawn.index("</button>", start)]
+
+
+def pick(model_id: str) -> str:
+    """What the row script writes to the pick bridge for a press on ``model_id``."""
+
+    return json.dumps({"model": model_id, "nonce": 1})
 
 
 class ModelSearchPaneTests(unittest.TestCase):
-    """What Model search lists, and what choosing a result does."""
+    """What the Find view lists, and what choosing a result does."""
 
     def setUp(self):
         self.results = [INSTRUCT, GATED]
+        self.exclusions = ()
         self.queries = []
         roomy(self)
-        original_search, original_status = models_page.search_hub_models, models_page.cache_status
-        models_page.search_hub_models = self.search
-        models_page.cache_status = lambda model_id: CacheStatus()
-        self.addCleanup(
-            lambda: setattr(models_page, "search_hub_models", original_search)
-            or setattr(models_page, "cache_status", original_status)
+        patches = (
+            mock.patch.object(models_page, "search_hub_kinds", self.search),
+            mock.patch.object(models_page, "cache_status", lambda model_id: CacheStatus()),
+            # Where MLX runs is the machine's business; these tests pick.
+            mock.patch.object(models_page, "mlx_available", lambda: False),
         )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
 
-    def search(self, query, hf_token, kind=TEXT_KIND, order="Popular", limit=100):
-        self.queries.append((query, hf_token, kind))
+    def search(self, query, hf_token, kinds, order="Popular", limit=100):
+        self.queries.append((query, hf_token, kinds, order))
         if isinstance(self.results, Exception):
             raise self.results
-        return list(self.results)
+        return hub_search.HubSearch(list(self.results), self.exclusions, 27, False)
 
-    def test_results_are_tabled_with_size_and_popularity(self):
-        table, detail, state, selected = app.search_models("  olmo 3 ", "tok")
+    def test_an_empty_box_lists_the_picks_without_going_online(self):
+        self.results = ConnectionError("offline")
+        # Gradio sends None for an untouched textbox on initial page load.
+        drawn, listing, sort = app.search_models(None, "")
 
-        self.assertEqual(self.queries, [("olmo 3", "tok", TEXT_KIND)])
-        sent = painted(table)
+        self.assertEqual(self.queries, [])
+        self.assertTrue(listing.picks)
         self.assertEqual(
-            sent["headers"], ["Model", "Params", "Fit", "Downloads", "Likes", "Updated"]
+            rows(drawn),
+            ["HuggingFaceTB/SmolLM2-135M-Instruct", "Qwen/Qwen3-0.6B", "allenai/Olmo-3-7B-Think"],
         )
-        # The numbers underneath are numbers, so the browser sorts them as
-        # such; a result whose parameter count the hub did not give has no
-        # size to judge, so it is listed without a verdict.
-        self.assertEqual(
-            sent["data"],
-            [
-                ["allenai/Olmo-3-7B-Instruct", 7_298_011_136, "fits", 281_405, 143, "2026-06-25"],
-                ["meta-llama/Llama-3.1-8B", None, "", None, None, None],
-            ],
-        )
-        # And they are shown the way the hub shows them.
-        self.assertEqual(
-            sent["metadata"]["display_value"],
-            [
-                ["allenai/Olmo-3-7B-Instruct", "7.3B", "fits", "281K", "143", "2026-06-25"],
-                ["meta-llama/Llama-3.1-8B", "—", "", "—", "—", "—"],
-            ],
-        )
-        self.assertIsNone(selected)
-        self.assertIn("2 results", detail)
-        self.assertEqual(set(state), {INSTRUCT.model_id, GATED.model_id})
-        # The columns share the width by weight, so the Model column cannot
-        # grow to its longest ID and push the last columns out of view.
-        self.assertEqual(table["column_widths"], ["38%", "11%", "10%", "14%", "10%", "17%"])
+        self.assertIn("ChatLab picks", drawn)
+        self.assertIn("no internet needed", drawn)
+        # Each pick says why it is there, and what it costs to fetch.
+        qwen = row(drawn, "Qwen/Qwen3-0.6B")
+        self.assertIn("Compact reasoning", qwen)
+        self.assertIn("1.5 GB download", qwen)
+        # Picks are not sorted, so the sort is not offered.
+        self.assertFalse(sort["visible"])
 
-    def test_rows_are_tinted_by_fit(self):
+    def test_the_picks_include_mlx_conversions_where_mlx_runs(self):
+        # An MLX conversion is a text model packed for Apple silicon, so it
+        # is listed among the text models and marked, not given a tab.
+        with mock.patch.object(models_page, "mlx_available", lambda: True):
+            drawn, listing, _ = app.search_models("", "")
+
+        self.assertEqual(len(listing.results), 6)
+        self.assertIn("MLX", row(drawn, "mlx-community/Qwen3-4B-4bit"))
+        self.assertNotIn("MLX", row(drawn, "Qwen/Qwen3-0.6B"))
+
+    def test_typing_searches_hugging_face(self):
+        drawn, listing, sort = app.search_models("  olmo 3 ", "tok")
+
+        self.assertEqual(self.queries, [("olmo 3", "tok", (TEXT_KIND,), "Popular")])
+        self.assertFalse(listing.picks)
+        self.assertEqual(rows(drawn), [INSTRUCT.model_id, GATED.model_id])
+        self.assertIn("Hugging Face results", drawn)
+        self.assertIn("most downloaded first", drawn)
+        instruct = row(drawn, INSTRUCT.model_id)
+        self.assertIn("7.3B params", instruct)
+        self.assertIn("281K downloads", instruct)
+        self.assertIn("143 likes", instruct)
+        self.assertIn("Gated", row(drawn, GATED.model_id))
+        self.assertTrue(sort["visible"])
+
+    def test_a_text_search_takes_in_mlx_conversions_where_mlx_runs(self):
+        with mock.patch.object(models_page, "mlx_available", lambda: True):
+            app.search_models("qwen", "", order="Trending")
+
+        self.assertEqual(
+            self.queries, [("qwen", "", (TEXT_KIND, model_cache.MLX_KIND), "Trending")]
+        )
+
+    def test_an_image_search_asks_for_image_models_alone(self):
+        with mock.patch.object(models_page, "mlx_available", lambda: True):
+            app.search_models("sd", "", kind=IMAGE_KIND)
+
+        self.assertEqual(self.queries, [("sd", "", (IMAGE_KIND,), "Popular")])
+
+    def test_an_unknown_sort_falls_back_to_most_downloaded(self):
+        # Recommended was a sort once; a saved session may still send it.
+        app.search_models("olmo", "", order="Recommended")
+
+        self.assertEqual(self.queries[0][3], "Popular")
+
+    def test_rows_are_marked_by_fit(self):
         # Room on the machine for the 7B, but not free right now: tight.
         roomy(self, total_gb=48, available_gb=10, backend="mps", dtype="float16")
         self.results = [
@@ -1861,98 +1912,41 @@ class ModelSearchPaneTests(unittest.TestCase):
             HubModel(model_id="org/huge", parameters=500_000_000_000),
             HubModel(model_id="org/small", parameters=100_000_000),
         ]
-        table, _, _, _ = app.search_models("", "")
+        drawn, _, _ = app.search_models("x", "")
 
-        self.assertEqual(cells(table, "Fit"), ["tight", "won't fit", "fits"])
-        styling = painted(table)["metadata"]["styling"]
-        self.assertEqual({style for style in styling[0]}, {"color: var(--fit-tight)"})
-        self.assertEqual(
-            {style for style in styling[1]}, {"color: var(--body-text-color-subdued)"}
-        )
-        self.assertEqual({style for style in styling[2]}, {""})
+        self.assertIn("Tight", row(drawn, INSTRUCT.model_id))
+        self.assertIn("Too large", row(drawn, "org/huge"))
+        self.assertIn("model-result unfit", row(drawn, "org/huge"))
+        self.assertIn("Fits", row(drawn, "org/small"))
 
-    def test_an_empty_query_browses_popular_models(self):
-        table, detail, state, _ = app.search_models("   ", "")
-        self.assertEqual(self.queries, [("", "", TEXT_KIND)])
-        self.assertEqual(len(cells(table, "Model")), 2)
-        self.assertIn("Most downloaded first", detail)
-        self.assertEqual(len(state), 2)
-
-    def test_recommended_starters_work_offline(self):
-        self.results = ConnectionError("offline")
-        # Gradio sends None for an untouched textbox on initial page load. An
-        # empty query is the one view answered without reaching the Hub.
-        table, detail, state, selected = app.search_models(None, "", order="Recommended")
-        self.assertEqual(self.queries, [])
-        self.assertEqual(len(state), 3)
-        self.assertIsNone(selected)
-        self.assertIn("offline", detail)
-        # Starters carry a download size and no popularity, so their table
-        # has that column and not the hub's; the note sits under the name.
-        sent = painted(table)
-        self.assertEqual(sent["headers"], ["Model", "Params", "Download size", "Fit"])
-        self.assertEqual(table["column_widths"], ["51%", "15%", "20%", "14%"])
-        self.assertEqual(sent["metadata"]["display_value"][1][2], "1.5 GB")
-        self.assertEqual(
-            sent["data"][1][0], "Qwen/Qwen3-0.6B\nCompact reasoning — try a thinking model with modest memory needs."
-        )
-        # A click reports the whole cell, and the note is not part of the ID.
-        box, description, chosen = app.select_search_result(
-            state, None, picked(sent["data"][1][0])
-        )
-        self.assertEqual(box["value"], "Qwen/Qwen3-0.6B")
-        self.assertEqual(chosen, "Qwen/Qwen3-0.6B")
-        self.assertIn("Compact reasoning", description)
-        self.assertIn("Full download", description)
-        self.assertIn("not this download", description)
-
-    def test_filtering_uses_candidates_beyond_the_first_twenty(self):
+    def test_the_fit_filter_uses_candidates_beyond_the_first_twenty(self):
         self.results = [
             HubModel(model_id=f"org/huge-{i}", parameters=500_000_000_000)
             for i in range(25)
         ] + [INSTRUCT, GATED]
-        table, detail, state, _ = app.search_models("", "", fits_only=True)
-        self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
-        self.assertEqual(len(state), 27)
-        self.assertIn("unknown sizes are hidden", detail)
-        table, _, _ = models_page.refresh_search_results(None, state, fits_only=False)
-        self.assertEqual(len(cells(table, "Model")), 20)
+        drawn, listing, _ = app.search_models("x", "", fits_only=True)
+
+        self.assertEqual(rows(drawn), [INSTRUCT.model_id])
+        self.assertEqual(len(listing.results), 27)
+        # The 25 too large and the one whose size is unknown.
+        self.assertIn("26 more are hidden", drawn)
+        drawn = models_page.refresh_search_results(None, listing, fits_only=False)
+        self.assertEqual(len(rows(drawn)), 20)
+        self.assertIn("20 shown of 27", drawn)
         self.assertEqual(len(self.queries), 1)
 
-    def test_filtered_selection_clears_and_returns_after_precision_change(self):
+    def test_a_precision_change_redraws_the_fit_filter(self):
         roomy(self, total_gb=16, available_gb=10, backend="mps", dtype="float16")
-        state = {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}
-        table, detail, selected = models_page.refresh_search_results(
-            INSTRUCT.model_id, state, "full", True
-        )
-        self.assertEqual(cells(table, "Model"), [])
-        self.assertIsNone(selected)
-        self.assertIn("No estimated fits", detail)
-        table, _, selected = models_page.refresh_search_results(None, state, "4-bit", True)
-        self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
-        self.assertIsNone(selected)
+        _, listing, _ = app.search_models("x", "")
 
-    def test_a_selection_survives_a_filter_that_keeps_it(self):
-        state = {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}
-        table, detail, selected = models_page.refresh_search_results(
-            INSTRUCT.model_id, state, "full", True
-        )
-        self.assertEqual(cells(table, "Model"), [INSTRUCT.model_id])
-        self.assertEqual(selected, INSTRUCT.model_id)
-        self.assertIn("https://huggingface.co/allenai/Olmo-3-7B-Instruct", detail)
+        drawn = models_page.refresh_search_results(INSTRUCT.model_id, listing, "full", True)
+        self.assertEqual(rows(drawn), [])
+        self.assertIn("No results fit this computer", drawn)
+        drawn = models_page.refresh_search_results(INSTRUCT.model_id, listing, "4-bit", True)
+        self.assertEqual(rows(drawn), [INSTRUCT.model_id])
+        self.assertIn("aria-pressed='true'", row(drawn, INSTRUCT.model_id))
 
-    def test_recommended_query_searches_the_hub_under_the_starters(self):
-        # A starter matching the query used to end the search there, which
-        # hid the rest of the Hub behind a three-model list.
-        _, detail, state, _ = app.search_models("olmo", "tok", order="Recommended")
-        self.assertEqual(self.queries, [("olmo", "tok", TEXT_KIND)])
-        self.assertEqual(
-            list(state),
-            ["allenai/Olmo-3-7B-Think", INSTRUCT.model_id, GATED.model_id],
-        )
-        self.assertIn("Starters first, then Hugging Face", detail)
-
-    def test_a_starter_the_hub_also_returns_is_listed_once_with_both_halves(self):
+    def test_a_pick_the_hub_also_returns_is_listed_once_with_both_halves(self):
         # The catalog has the note and the download estimate; the search has
         # the popularity and the date. The row keeps all of it.
         self.results = [
@@ -1965,82 +1959,75 @@ class ModelSearchPaneTests(unittest.TestCase):
             ),
             INSTRUCT,
         ]
-        table, _, state, _ = app.search_models("olmo", "", order="Recommended")
-        self.assertEqual(list(state), ["allenai/Olmo-3-7B-Think", INSTRUCT.model_id])
-        merged = state["allenai/Olmo-3-7B-Think"]
+        drawn, listing, _ = app.search_models("olmo", "")
+
+        self.assertEqual(rows(drawn), ["allenai/Olmo-3-7B-Think", INSTRUCT.model_id])
+        merged = listing.results["allenai/Olmo-3-7B-Think"]
+        self.assertTrue(merged.pick)
         self.assertIn("ChatLab", merged.summary)
         self.assertEqual(merged.download_bytes, 14_605_886_999)
         self.assertEqual((merged.downloads, merged.likes), (94_210, 712))
         self.assertEqual(merged.last_modified, "2026-07-02")
-        sent = painted(table)
-        self.assertEqual(
-            sent["headers"],
-            ["Model", "Params", "Download size", "Fit", "Downloads", "Likes", "Updated"],
-        )
-        self.assertEqual(sent["metadata"]["display_value"][0][2], "14.6 GB")
-        self.assertEqual(sent["metadata"]["display_value"][0][4], "94K")
+        olmo = row(drawn, "allenai/Olmo-3-7B-Think")
+        self.assertIn("ChatLab pick", olmo)
+        self.assertIn("14.6 GB download", olmo)
+        self.assertIn("94K downloads", olmo)
 
-    def test_a_starter_the_hub_leaves_blank_keeps_the_catalogs_own_facts(self):
+    def test_a_pick_the_hub_leaves_blank_keeps_the_catalogs_own_facts(self):
         # A repository with no safetensors index has no parameter count in the
         # search, and the hub drops a licence as readily.
         self.results = [HubModel(model_id="allenai/Olmo-3-7B-Think", downloads=12)]
-        _, _, state, _ = app.search_models("olmo", "", order="Recommended")
-        merged = state["allenai/Olmo-3-7B-Think"]
+        _, listing, _ = app.search_models("olmo", "")
+        merged = listing.results["allenai/Olmo-3-7B-Think"]
         self.assertEqual(merged.parameters, 7_298_011_136)
         self.assertEqual(merged.license, "apache-2.0")
         self.assertEqual(merged.downloads, 12)
 
-    def test_recommended_falls_back_to_starters_when_the_hub_is_unreachable(self):
-        self.results = ConnectionError("offline")
-        table, detail, state, selected = app.search_models("olmo", "", order="Recommended")
-        self.assertEqual(self.queries, [("olmo", "", TEXT_KIND)])
-        self.assertEqual(list(state), ["allenai/Olmo-3-7B-Think"])
-        self.assertIsNone(selected)
-        self.assertIn("Starters only", detail)
-        self.assertIn("offline", detail)
-        self.assertEqual(len(cells(table, "Model")), 1)
+    def test_what_a_search_left_out_is_said_with_its_reasons(self):
+        self.exclusions = (
+            hub_search.Exclusion(hub_search.EXCLUDED_FORMAT, 9, "org/model-GGUF"),
+            hub_search.Exclusion(hub_search.EXCLUDED_NO_CONFIG, 2, "org/bare"),
+        )
+        drawn, _, _ = app.search_models("llama", "")
 
-    def test_recommended_query_with_no_starter_match_searches_the_hub(self):
-        _, detail, state, _ = app.search_models("gemma", "tok", order="Recommended")
-        self.assertEqual(self.queries, [("gemma", "tok", TEXT_KIND)])
-        self.assertEqual(len(state), 2)
-        self.assertIn("No starters matched", detail)
-        self.assertIn("most downloaded first", detail)
-        self.assertNotIn("Curated starters", detail)
+        self.assertIn("Some checked results were excluded", drawn)
+        self.assertIn(hub_search.EXCLUDED_FORMAT, drawn)
+        self.assertIn("9, e.g. org/model-GGUF", drawn)
+        self.assertIn("couldn't check", drawn)
+        # The count is of what was read, never of the whole hub.
+        self.assertIn("ChatLab checked 27 matches", drawn)
 
-    def test_recommended_fallthrough_failure_points_back_to_starters(self):
-        self.results = ConnectionError("offline")
-        table, detail, state, selected = app.search_models("gemma", "", order="Recommended")
-        self.assertEqual(cells(table, "Model"), [])
-        self.assertIsNone(selected)
-        self.assertIn("Search failed", detail)
-        self.assertIn("Clear the search to see offline starters", detail)
-        self.assertEqual(state, {})
+    def test_a_search_that_stopped_reading_says_so(self):
+        self.search = lambda *args, **kwargs: hub_search.HubSearch([INSTRUCT], (), 400, True)
+        with mock.patch.object(models_page, "search_hub_kinds", self.search):
+            drawn, _, _ = app.search_models("a", "")
 
-    def test_image_recommendations_are_separate_and_do_not_guess_memory(self):
-        table, _, state, _ = app.search_models("", "", kind=IMAGE_KIND, order="Recommended")
-        self.assertEqual(list(state), ["stabilityai/sd-turbo"])
-        self.assertEqual(models_page.results_kind(state), IMAGE_KIND)
-        # No parameter count, so no Params column either.
-        self.assertNotIn("Params", painted(table)["headers"])
-        table, detail, _ = models_page.refresh_search_results(None, state, "4-bit", True)
-        self.assertEqual(cells(table, "Model"), [])
-        self.assertIn("unknown sizes are hidden", detail)
+        self.assertIn("checked the first 400 matches", drawn)
+        self.assertIn("narrower search", drawn)
+
+    def test_the_image_picks_are_separate_and_do_not_guess_memory(self):
+        drawn, listing, _ = app.search_models("", "", kind=IMAGE_KIND)
+        self.assertEqual(rows(drawn), ["stabilityai/sd-turbo"])
+        self.assertEqual(listing.results["stabilityai/sd-turbo"].kind, IMAGE_KIND)
+        # No parameter count, so no verdict, and the fit filter hides it.
+        self.assertNotIn("Fits", row(drawn, "stabilityai/sd-turbo"))
+        drawn = models_page.refresh_search_results(None, listing, "4-bit", True)
+        self.assertEqual(rows(drawn), [])
 
     def test_a_failed_search_is_reported(self):
         self.results = ConnectionError("hub <unreachable>")
 
-        table, detail, state, selected = app.search_models("olmo", "")
+        drawn, listing, _ = app.search_models("olmo", "")
 
-        self.assertEqual(cells(table, "Model"), [])
-        self.assertIn("Search failed", detail)
-        self.assertIn("hub &lt;unreachable&gt;", detail)
-        self.assertEqual(state, {})
-        self.assertIsNone(selected)
+        self.assertEqual(rows(drawn), [])
+        self.assertIn("Could not search Hugging Face", drawn)
+        self.assertIn("hub &lt;unreachable&gt;", drawn)
+        self.assertIn("Clear the box to see ChatLab picks", drawn)
+        self.assertEqual(listing.results, {})
 
     def test_a_failed_search_leaves_its_traceback_in_the_log(self):
         # The handler is broad enough to catch a mistake in the search as
-        # well as an unreachable Hub, and the card already carries the
+        # well as an unreachable Hub, and the list already carries the
         # message, so a line without the stack would only repeat it.
         self.results = ConnectionError("hub unreachable")
 
@@ -2054,147 +2041,392 @@ class ModelSearchPaneTests(unittest.TestCase):
     def test_no_matches_is_said_plainly(self):
         self.results = []
 
-        table, detail, _, _ = app.search_models("zzzz", "")
+        drawn, _, _ = app.search_models("zz<zz", "")
 
-        self.assertEqual(cells(table, "Model"), [])
-        self.assertIn("No language models matched", detail)
-        self.assertIn("zzzz", detail)
+        self.assertEqual(rows(drawn), [])
+        self.assertIn("No language models matched", drawn)
+        self.assertIn("zz&lt;zz", drawn)
 
-    def test_choosing_a_result_fills_the_id_box_and_describes_it(self):
-        _, _, state, _ = app.search_models("olmo", "")
-
-        # The click lands on a row of the table as the browser has sorted it,
-        # so the row is known by its first cell, not its position.
-        box, detail, selected = app.select_search_result(
-            state, None, picked(INSTRUCT.model_id, 7_298_011_136, "fits")
-        )
-
-        self.assertEqual(box["value"], INSTRUCT.model_id)
-        self.assertEqual(selected, INSTRUCT.model_id)
-        self.assertIn("https://huggingface.co/allenai/Olmo-3-7B-Instruct", detail)
-        self.assertIn("7.3B", detail)
-        self.assertIn("281K downloads", detail)
-        self.assertIn("143 likes", detail)
-        self.assertIn("apache-2.0", detail)
-        self.assertIn("2026-06-25", detail)
-        self.assertNotIn("Gated", detail)
-        self.assertIn("Download and load", detail)
-
-    def test_a_gated_result_says_a_token_is_needed(self):
-        _, _, state, _ = app.search_models("llama", "")
-
-        _, detail, _ = app.select_search_result(state, None, picked(GATED.model_id))
-
-        self.assertIn("Gated", detail)
-        self.assertIn("token", detail)
-
-    def test_a_result_already_on_disk_says_so(self):
+    def test_a_row_on_disk_says_so(self):
         models_page.cache_status = lambda model_id: CacheStatus(cached_bytes=15_000_000_000)
-        _, _, state, _ = app.search_models("olmo", "")
 
-        _, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
+        drawn, _, _ = app.search_models("olmo", "")
 
-        self.assertIn("Already cached", detail)
-        self.assertIn("15.0 GB cached", detail)
-        self.assertIn("Load cached", detail)
-        self.assertNotIn("Download and load", detail)
+        self.assertIn("Downloaded", row(drawn, INSTRUCT.model_id))
 
-    def test_a_cached_result_of_another_kind_is_not_called_partly_cached(self):
-        models_page.cache_status = lambda model_id: CacheStatus(
-            cached_bytes=5_500_000_000, kind=""
-        )
-        _, _, state, _ = app.search_models("olmo", "")
-
-        _, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
-
-        self.assertIn("Already cached", detail)
-        self.assertIn("not a model ChatLab can load", detail)
-        self.assertNotIn("Partly cached", detail)
-        self.assertNotIn("Download and load", detail)
-
-    def test_a_partly_downloaded_result_says_so(self):
-        models_page.cache_status = lambda model_id: CacheStatus(
-            cached_bytes=100, missing_files=(MODEL_WEIGHTS,)
-        )
-        _, _, state, _ = app.search_models("olmo", "")
-
-        _, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
-
-        self.assertIn("Partly cached", detail)
-
-    def test_an_unreadable_cache_leaves_the_result_uncached(self):
+    def test_an_unreadable_cache_leaves_the_rows_undownloaded(self):
         def refuse(model_id):
             raise PermissionError(13, "Permission denied")
 
         models_page.cache_status = refuse
-        _, _, state, _ = app.search_models("olmo", "")
+        drawn, _, _ = app.search_models("olmo", "")
 
-        box, detail, _ = app.select_search_result(state, None, picked(INSTRUCT.model_id))
+        self.assertEqual(rows(drawn), [INSTRUCT.model_id, GATED.model_id])
+        self.assertNotIn("Downloaded", drawn)
 
-        self.assertEqual(box["value"], INSTRUCT.model_id)
-        self.assertNotIn("cached", detail)
-        self.assertIn("Download and load", detail)
+    def test_pressing_a_row_opens_its_model_and_marks_the_row(self):
+        _, listing, _ = app.search_models("olmo", "")
 
-    def test_an_adapter_is_marked_in_the_table_and_the_detail(self):
-        tagged = HubModel(
-            model_id="org/qwen-lora", adapter=True, base_model="Qwen/Qwen2.5-7B-Instruct"
+        model = app.select_search_result(pick(GATED.model_id))
+        # The ID box changing is what redraws the list with the row marked.
+        drawn = models_page.refresh_search_results(model, listing)
+
+        self.assertEqual(model, GATED.model_id)
+        self.assertIn("aria-pressed='true'", row(drawn, GATED.model_id))
+        self.assertIn("aria-pressed='false'", row(drawn, INSTRUCT.model_id))
+
+    def test_a_press_the_server_cannot_read_does_nothing(self):
+        for payload in (None, "", "not json", "[]", json.dumps({"nonce": 1}),
+                        json.dumps({"model": "../../etc"}), json.dumps({"model": 7})):
+            self.assertEqual(app.select_search_result(payload), gr.skip(), payload)
+
+    def test_enter_on_an_id_opens_it_through_the_pick_bridge(self):
+        # Typed in another case, the ID opens as the hub spells it.
+        *_, opened = models_page.search_and_open("ALLENAI/olmo-3-7b-instruct", "")
+
+        self.assertEqual(json.loads(opened)["model"], INSTRUCT.model_id)
+
+    def test_enter_on_an_id_the_search_left_out_still_opens_it(self):
+        # Opening it is how the reader learns why it was left out.
+        *_, opened = models_page.search_and_open("bartowski/Llama-GGUF", "")
+
+        self.assertEqual(json.loads(opened)["model"], "bartowski/Llama-GGUF")
+
+    def test_enter_on_words_only_searches(self):
+        for query in ("olmo instruct", "", "not/a/valid id"):
+            *_, opened = models_page.search_and_open(query, "")
+            self.assertEqual(opened, gr.skip(), query)
+
+
+def pane(model_id, listing=None, repository=None, related=None, precision="full", selected=None):
+    """The detail pane for ``model_id``: its head, the precision control, its body, the check button."""
+
+    return models_page.model_pane(
+        model_id, selected, repository, "", listing, related, precision
+    )
+
+
+def checked_repository(model_id, **found):
+    """What check_model_repository found for ``model_id`` with no token."""
+
+    from chatlab.ui.model_repository import token_scope
+
+    return {"model_id": model_id, "token_scope": token_scope(""), **found}
+
+
+class ModelPaneTests(unittest.TestCase):
+    """What the detail pane says about the model it has open."""
+
+    def setUp(self):
+        roomy(self)
+        self.status = CacheStatus()
+        patches = (
+            mock.patch.object(models_page, "cache_status", lambda model_id: self.status),
+            mock.patch.object(models_page, "list_cached_models", lambda: []),
+            mock.patch.object(models_page, "mlx_available", lambda: False),
         )
-        untagged = HubModel(
-            model_id="ModelOrganismsForEM/Qwen2.5-7B-Instruct_bad-medical-advice",
-            adapter=True,
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.listing = models_page.Listing(
+            {INSTRUCT.model_id: INSTRUCT, GATED.model_id: GATED}, models_page.HUB_HEADING
         )
-        self.results = [tagged, untagged]
-        table, _, state, _ = app.search_models("qwen", "")
 
+    def test_verified_unpacked_conversion_overrides_the_mlx_search_label(self):
+        result = HubModel(model_id="mlx-community/model", kind=models_page.MLX_KIND)
+        listing = models_page.Listing({result.model_id: result}, models_page.HUB_HEADING)
+        repository = checked_repository(result.model_id, status="found", format="Transformers",
+                                        mlx=False, config_verified=True, compatibility="Verified unpacked weights")
+        _, precision, body, _ = pane(result.model_id, listing, repository)
+        self.assertTrue(precision["visible"])
+        self.assertIn("<li class='yes'>Steering and probes", body)
+        self.assertNotIn("as packed", body)
+
+    def test_unreadable_snapshot_still_draws_the_pane(self):
+        self.status = CacheStatus(cached_bytes=100, kind=TEXT_KIND)
+        for error in (OSError("snapshot unavailable"), ValueError("invalid snapshot")):
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                models_page, "snapshot_folder", side_effect=error
+            ):
+                head, precision, body, _ = pane("org/model")
+            self.assertIn("org/model", head)
+            self.assertTrue(precision["visible"])
+            self.assertIn("What you can do", body)
+
+    def test_cached_adapter_ignores_quantized_radio_and_keeps_full_tools(self):
+        self.status = CacheStatus(cached_bytes=100, kind=TEXT_KIND)
+        with (mock.patch.object(models_page, "snapshot_folder", return_value=Path("/offline/fake")),
+              mock.patch.object(models_page, "is_adapter_snapshot", return_value=True),
+              mock.patch.object(models_page, "mlx_snapshot_bits", return_value=None)):
+            _, _, body, _ = pane("org/adapter", precision="4-bit")
+        self.assertIn("What you can do with it at full precision", body)
+        self.assertIn("<li class='yes'>Jacobian lens", body)
+        self.assertIn("regardless of Load at", body)
+
+    def test_adapter_search_result_keeps_its_base_and_gate_in_the_new_pane(self):
+        result = HubModel(model_id="org/lora", adapter=True, base_model="org/base", base_gated="manual")
+        listing = models_page.Listing({result.model_id: result}, models_page.HUB_HEADING)
+        head, _, body, _ = pane(result.model_id, listing, precision="4-bit")
+        self.assertIn("LoRA adapter for org/base", head)
+        self.assertIn("Gated", head)
+        self.assertIn("base model's terms", body)
+        self.assertIn("full precision", body)
+        drawn = models_page.refresh_search_results(result.model_id, listing)
+        self.assertIn("LoRA adapter for org/base", drawn)
+        self.assertIn("Gated", drawn)
+
+    def test_nothing_chosen_says_how_to_choose(self):
+        head, precision, body, check = pane("")
+
+        self.assertIn("Select a model", head)
+        self.assertEqual(body, "")
+        self.assertFalse(check["visible"])
+
+    def test_a_result_is_described_from_the_search(self):
+        head, precision, body, check = pane(INSTRUCT.model_id, self.listing)
+
+        self.assertIn("https://huggingface.co/allenai/Olmo-3-7B-Instruct", head)
+        self.assertIn("281K downloads last month", head)
+        self.assertIn("apache-2.0 license", head)
+        self.assertIn("updated 2026-06-25", head)
+        self.assertNotIn("Gated", head)
+        self.assertTrue(precision["visible"])
+        self.assertIn("What you can do with it at full precision", body)
+        self.assertIn("Steering and probes", body)
+        self.assertIn("Memory when loaded", body)
+        self.assertIn("· fits", body)
+        # Not checked yet, so the size is not known and the check is offered.
+        self.assertIn("Check it on Hugging Face to see the size", body)
+        self.assertTrue(check["visible"])
+
+    def test_the_download_is_kept_apart_from_the_memory_a_precision_needs(self):
+        # 4-bit shrinks what the weights take in memory, not what is fetched.
+        repository = checked_repository(
+            INSTRUCT.model_id, status="found", format="Transformers",
+            compatibility="Repository existence is confirmed.", download_bytes=14_600_000_000,
+        )
+        _, _, full, check = pane(INSTRUCT.model_id, self.listing, repository, precision="full")
+        _, _, packed, _ = pane(INSTRUCT.model_id, self.listing, repository, precision="4-bit")
+
+        for body in (full, packed):
+            self.assertIn("14.6 GB", body)
+            self.assertIn("Precision changes memory, not the download", body)
+        self.assertIn("at 4-bit", packed)
+        self.assertNotEqual(full.split("Memory when loaded")[1][:80], packed.split("Memory when loaded")[1][:80])
+        self.assertFalse(check["visible"])
+
+    def test_a_quantized_load_loses_the_jacobian_lens(self):
+        _, _, full, _ = pane(INSTRUCT.model_id, self.listing, precision="full")
+        _, _, packed, _ = pane(INSTRUCT.model_id, self.listing, precision="8-bit")
+
+        self.assertIn("<li class='yes'>Jacobian lens", full)
+        self.assertIn("<li class='no'>Jacobian lens (full precision only)", packed)
+
+    def test_a_quantized_choice_this_device_ignores_is_not_claimed(self):
+        roomy(self, backend="cuda", dtype="bfloat16")
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing, precision="4-bit")
+
+        self.assertIn("at full precision", body)
+
+    def test_a_gated_result_says_a_token_is_needed(self):
+        head, _, _, _ = pane(GATED.model_id, self.listing)
+
+        self.assertIn("Gated.", head)
+        self.assertIn("Access token", head)
+
+    def test_an_mlx_conversion_says_what_it_gives_up(self):
+        mlx = HubModel(
+            model_id="mlx-community/Some-7B-4bit", parameters=7_000_000_000,
+            kind=model_cache.MLX_KIND, base_model="org/Some-7B",
+        )
+        listing = models_page.Listing({mlx.model_id: mlx}, models_page.HUB_HEADING)
+
+        _, precision, body, _ = pane(mlx.model_id, listing)
+
+        self.assertFalse(precision["visible"])
+        self.assertIn("as packed (4-bit)", body)
+        self.assertIn("Packed to 4 bits when it was converted", body)
+        self.assertIn("<li class='no'>Steering and probes (need a Transformers model)", body)
+        self.assertIn("<li class='no'>Activation patching", body)
+
+    def test_an_image_model_draws_on_the_images_page(self):
+        _, listing, _ = models_page.search_models("", "", kind=IMAGE_KIND)
+
+        _, precision, body, _ = pane("stabilityai/sd-turbo", listing)
+
+        self.assertFalse(precision["visible"])
+        self.assertIn("Images page", body)
+        self.assertNotIn("Steering", body)
+
+    def test_a_model_chatlab_cannot_load_lists_nothing_it_can_do(self):
+        repository = checked_repository(
+            "bartowski/Llama-GGUF", status="found", format="Format not confirmed",
+            compatibility="No supported weight files found.", unsupported=True,
+            download_bytes=1,
+        )
+
+        _, _, body, _ = pane("bartowski/Llama-GGUF", repository=repository)
+
+        self.assertIn("can't load this model", body)
+        self.assertNotIn("Steering", body)
+        self.assertIn("No supported weight files found.", body)
+
+    def test_a_check_that_could_not_reach_the_hub_offers_another(self):
+        repository = checked_repository(
+            INSTRUCT.model_id, status="error", detail="Could not reach Hugging Face."
+        )
+
+        _, _, body, check = pane(INSTRUCT.model_id, self.listing, repository)
+
+        self.assertIn("Could not reach Hugging Face.", body)
+        self.assertTrue(check["visible"])
+        self.assertEqual(check["value"], "Check again")
+
+    def test_a_check_for_another_token_is_not_shown(self):
+        repository = {**checked_repository(INSTRUCT.model_id, status="found"), "token_scope": "other"}
+
+        _, _, body, check = pane(INSTRUCT.model_id, self.listing, repository)
+
+        self.assertNotIn("Hugging Face check", body)
+        self.assertTrue(check["visible"])
+
+    def test_a_downloaded_model_says_so(self):
+        self.status = CacheStatus(cached_bytes=15_000_000_000)
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing)
+
+        self.assertIn("Downloaded · 15.0 GB cached", body)
+        self.assertIn("On disk", body)
+
+    def test_a_partly_downloaded_model_says_so(self):
+        self.status = CacheStatus(cached_bytes=100, missing_files=(MODEL_WEIGHTS,))
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing)
+
+        self.assertIn("Partly downloaded", body)
+
+    def test_an_unreadable_cache_leaves_the_model_undownloaded(self):
+        def refuse(model_id):
+            raise PermissionError(13, "Permission denied")
+
+        models_page.cache_status = refuse
+        self.addCleanup(lambda: setattr(models_page, "cache_status", lambda model_id: self.status))
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing)
+
+        self.assertNotIn("Downloaded", body)
+
+    def test_the_loaded_model_reads_its_memory_even_from_the_search(self):
+        # The search listing carries a parameter count for it too, but an
+        # estimate judged against what is left free would call the model in
+        # memory tight. Moving the radio asks about a reload, which is judged.
+        roomy(self, total_gb=24, available_gb=2)
+        self.status = CacheStatus(cached_bytes=15_000_000_000)
+        for name, value in (
+            ("model_id", INSTRUCT.model_id), ("precision", "full"), ("loaded_bytes", 15 * 1024**3),
+        ):
+            patch = mock.patch.object(runtime.MANAGER, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing, precision="full")
+        _, _, reload, _ = pane(INSTRUCT.model_id, self.listing, precision="4-bit")
+
+        self.assertIn("Memory now", body)
+        self.assertNotIn("Memory when loaded", body)
+        self.assertIn("Memory when loaded", reload)
+
+    def test_a_downloaded_row_chosen_in_my_models_leaves_the_disk_to_its_own_detail(self):
+        self.status = CacheStatus(cached_bytes=15_000_000_000)
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing, selected=INSTRUCT.model_id)
+
+        self.assertNotIn("On this computer", body)
+
+    def test_other_versions_open_in_the_pane(self):
+        mlx = HubModel(
+            model_id="mlx-community/Olmo-3-7B-Instruct-4bit", parameters=7_298_011_136,
+            downloads=1200, kind=model_cache.MLX_KIND,
+        )
+        related = {"model_id": INSTRUCT.model_id, "versions": [(mlx, False)]}
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing, related=related)
+
+        self.assertIn("Other versions", body)
+        self.assertIn("class='model-version' data-model='mlx-community/Olmo-3-7B-Instruct-4bit'", body)
+        self.assertIn("no steering, probes or patching", body)
+        # Opened, the version is described from what the lookup found.
+        head, _, body, _ = pane(mlx.model_id, self.listing, related=related)
+        self.assertIn("1.2K downloads", head)
+        self.assertIn("as packed (4-bit)", body)
+
+    def test_versions_found_for_another_model_are_not_shown(self):
+        mlx = HubModel(model_id="mlx-community/Other-4bit", kind=model_cache.MLX_KIND)
+        related = {"model_id": "org/other", "versions": [(mlx, False)]}
+
+        _, _, body, _ = pane(INSTRUCT.model_id, self.listing, related=related)
+
+        self.assertNotIn("Other versions", body)
+
+
+class FindVersionsTests(unittest.TestCase):
+    """Which other versions of a model the pane offers."""
+
+    def test_a_transformers_model_is_offered_its_mlx_conversions(self):
+        found = [HubModel(model_id="mlx-community/Olmo-4bit", kind=model_cache.MLX_KIND)]
+        with mock.patch.object(models_page, "mlx_versions", return_value=found) as lookup:
+            related = models_page.find_versions(INSTRUCT.model_id, "tok", None)
+
+        lookup.assert_called_once_with(INSTRUCT.model_id, "tok")
         self.assertEqual(
-            cells(table, "Model"),
-            [
-                "org/qwen-lora\nLoRA adapter for Qwen/Qwen2.5-7B-Instruct",
-                f"{untagged.model_id}\nLoRA adapter",
-            ],
+            related, {"model_id": INSTRUCT.model_id, "model": None, "versions": [(found[0], False)]}
         )
-        # The note sits under the ID, and the click still finds the model.
-        box, detail, _ = app.select_search_result(
-            state, None, picked(cells(table, "Model")[0])
-        )
-        self.assertEqual(box["value"], "org/qwen-lora")
-        self.assertIn("LoRA for `Qwen/Qwen2.5-7B-Instruct`", detail)
-        self.assertIn("full precision", detail)
-        self.assertIn("and the base model it was trained on", detail)
 
-        _, detail, _ = app.select_search_result(state, None, picked(untagged.model_id))
-        self.assertIn("LoRA for the model its config names", detail)
+    def test_a_conversion_without_a_count_takes_its_originals(self):
+        found = [HubModel(model_id="mlx-community/Olmo-4bit", kind=model_cache.MLX_KIND)]
+        listing = models_page.Listing({INSTRUCT.model_id: INSTRUCT}, models_page.HUB_HEADING)
 
-    def test_an_adapter_on_a_gated_base_says_the_base_needs_a_token(self):
-        # The adapter is public, but the download fetches the base beside it.
-        on_llama = HubModel(
-            model_id="org/llama-lora", adapter=True,
-            base_model="meta-llama/Llama-3.1-8B-Instruct", base_gated="manual",
-        )
-        both = HubModel(
-            model_id="org/gated-llama-lora", adapter=True, gated="auto",
-            base_model="meta-llama/Llama-3.1-8B-Instruct", base_gated="manual",
-        )
-        self.results = [on_llama, both]
-        _, _, state, _ = app.search_models("llama", "")
+        with mock.patch.object(models_page, "mlx_versions", return_value=found):
+            related = models_page.find_versions(INSTRUCT.model_id, "", listing)
 
-        _, detail, _ = app.select_search_result(state, None, picked(on_llama.model_id))
-        self.assertIn("accept its base's terms", detail)
-        self.assertIn("token", detail)
-        self.assertNotIn("No access approval", detail)
+        ((version, _),) = related["versions"]
+        self.assertEqual(version.parameters, INSTRUCT.parameters)
 
-        _, detail, _ = app.select_search_result(state, None, picked(both.model_id))
-        self.assertIn("accept its terms and its base's", detail)
+    def test_a_version_opened_from_the_pane_keeps_what_was_known_about_it(self):
+        # It is in no list, and its own lookup replaces the one that found it.
+        mlx = HubModel(
+            model_id="mlx-community/Olmo-4bit", downloads=1200, kind=model_cache.MLX_KIND,
+            base_model=INSTRUCT.model_id,
+        )
+        before = {"model_id": INSTRUCT.model_id, "model": INSTRUCT, "versions": [(mlx, False)]}
 
-    def test_choosing_nothing_leaves_the_id_box_alone(self):
-        self.assertEqual(
-            app.select_search_result({}, None, picked(None)),
-            (gr.skip(), app.NO_RESULT_SELECTED, None),
+        after = models_page.find_versions(mlx.model_id, "", None, before)
+
+        self.assertIs(after["model"], mlx)
+        self.assertIs(models_page.known_model(mlx.model_id, None, after), mlx)
+
+    def test_an_mlx_conversion_is_offered_the_model_it_came_from(self):
+        mlx = HubModel(
+            model_id="mlx-community/Olmo-4bit", parameters=7_000_000_000,
+            kind=model_cache.MLX_KIND, base_model="allenai/Olmo",
         )
-        self.assertEqual(
-            app.select_search_result({}, None, picked("stale/pick")),
-            (gr.skip(), app.NO_RESULT_SELECTED, None),
-        )
+        listing = models_page.Listing({mlx.model_id: mlx}, models_page.HUB_HEADING)
+
+        with mock.patch.object(models_page, "mlx_versions") as lookup:
+            related = models_page.find_versions(mlx.model_id, "", listing)
+
+        lookup.assert_not_called()
+        ((original, is_original),) = related["versions"]
+        self.assertTrue(is_original)
+        self.assertEqual(original.model_id, "allenai/Olmo")
+
+    def test_a_lookup_that_fails_offers_nothing(self):
+        with mock.patch.object(models_page, "mlx_versions", side_effect=ConnectionError("offline")):
+            with self.assertLogs("chatlab.ui.models_page", level="WARNING"):
+                related = models_page.find_versions(INSTRUCT.model_id, "", None)
+
+        self.assertEqual(related["versions"], [])
 
 
 class ModelSwitchTests(unittest.TestCase):
@@ -3029,25 +3261,24 @@ class MlxModelsPaneTests(unittest.TestCase):
         self.assertIsNone(models_page.cached_fit(MLX, "full", profile))
         self.assertIsNone(models_page.cached_fit(MLX, "8-bit", profile))
 
-    def test_mlx_recommendations_are_their_own_list_and_judged_at_their_width(self):
-        _, _, state, _ = app.search_models(
-            "", "", kind=model_cache.MLX_KIND, order="Recommended"
-        )
+    def test_mlx_picks_are_listed_with_the_text_ones_and_judged_at_their_width(self):
+        with mock.patch.object(models_page, "mlx_available", lambda: True):
+            _, listing, _ = app.search_models("", "")
+            _, precision, body, _ = models_page.model_pane(
+                "mlx-community/Qwen3-4B-4bit", None, None, "", listing, None, "full"
+            )
 
         self.assertEqual(
-            list(state),
+            [model for model in listing.results if model.startswith("mlx-community/")],
             [
                 "mlx-community/Qwen3-0.6B-4bit",
                 "mlx-community/Qwen3-4B-4bit",
                 "mlx-community/Olmo-3-7B-Think-4bit",
             ],
         )
-        self.assertEqual(models_page.results_kind(state), model_cache.MLX_KIND)
-        _, detail, _ = models_page.select_search_result(
-            state, "full", picked("mlx-community/Qwen3-4B-4bit")
-        )
-        self.assertIn("quantized already", detail)
-        self.assertNotIn("Choosing 4-bit or 8-bit", detail)
+        self.assertFalse(precision["visible"])
+        self.assertIn("of 4-bit weights", body)
+        self.assertNotIn("Precision changes memory", body)
 
     def test_an_mlx_result_is_sized_from_the_width_in_its_name(self):
         from chatlab.device_memory import DeviceProfile

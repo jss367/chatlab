@@ -1881,15 +1881,12 @@ class DefaultModelSelectionTests(unittest.TestCase):
         ):
             for _ in range(2):
                 result = app.select_default_model()
-                model_id, row, detail, search, search_detail = result[:5]
-                status, page, *panes = result[5:]
+                model_id, row, detail = result[:3]
+                status, page, *panes = result[3:]
                 self.assertEqual(model_id, settings.DEFAULT_MODEL_ID)
                 self.assertIsNone(row["value"])
                 self.assertEqual(app.chosen_model(model_id, row["value"]), model_id)
                 self.assertEqual(detail, app.NO_CACHED_MODEL_SELECTED)
-                # The search selection is a plain state, so it is just None.
-                self.assertIsNone(search)
-                self.assertEqual(search_detail, app.NO_RESULT_SELECTED)
                 self.assertEqual(page, app.MODELS_PAGE)
                 self.assertEqual(
                     [update["visible"] for update in panes],

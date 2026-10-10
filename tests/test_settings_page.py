@@ -594,7 +594,7 @@ class SavedSettingsTests(unittest.TestCase):
                         "Color theme",
                         "Light or dark",
                         "Hugging Face model ID",
-                        "Weight precision",
+                        "Load at",
                     ]
                 ),
                 self.labelled("Context limit (tokens)"),

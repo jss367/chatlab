@@ -4284,7 +4284,7 @@ class WeightPrecisionWiringTests(unittest.TestCase):
         return next(
             block
             for block in self.demo.blocks.values()
-            if isinstance(block, gr.Radio) and block.label == "Weight precision"
+            if isinstance(block, gr.Radio) and block.label == "Load at"
         )
 
     def test_both_load_handlers_read_the_radio_last(self):

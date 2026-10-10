@@ -14,10 +14,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 import gradio as gr
-import pandas as pd
 
 from chatlab import settings
-from chatlab.model_discovery import recommended_models
+from chatlab.model_discovery import STARTER_MODELS
 from chatlab.device_memory import (
     FITS,
     TIGHT,
@@ -30,10 +29,11 @@ from chatlab.device_memory import (
 )
 from chatlab.hub_search import (
     DISCOVERY_CANDIDATES,
-    SEARCH_IMAGE_PIPELINE_TAGS,
+    HUB_SORTS,
     SEARCH_LIMIT,
     HubModel,
-    search_hub_models,
+    mlx_versions,
+    search_hub_kinds,
 )
 from chatlab.model_cache import (
     BASE_MODEL,
@@ -44,13 +44,13 @@ from chatlab.model_cache import (
     TEXT_KIND,
     CachedModel,
     CacheStatus,
+    cache_folder,
     cache_root,
     cache_status,
     estimate_parameter_bytes,
     estimate_snapshot_bytes,
     folder_bytes,
     format_bytes,
-    format_count,
     is_adapter_snapshot,
     list_cached_models,
     mlx_available,
@@ -66,6 +66,18 @@ from chatlab.progress_bars import DownloadSnapshot, LoadProgress, LoadSnapshot
 from chatlab import adapters
 from chatlab.model_errors import ModelBusy, ModelDownloading, ModelLoaded
 from chatlab.ui import runtime
+from chatlab.ui.model_finder import (
+    DEFAULT_SEARCH_ORDER,
+    HUB_HEADING,
+    ORDER_NOTES,
+    PANE_EMPTY,
+    VISION_TAGS,
+    Listing,
+    model_kind,
+    pane_body,
+    pane_head,
+    results_list,
+)
 from chatlab.ui.model_repository import matching_repository
 from chatlab.ui.common import (
     DEFAULT_MODEL_DOWNLOAD,
@@ -1470,6 +1482,7 @@ def go_to_image_models(
     _search_kind: str | None,
     search_order: str,
     fits_only: bool,
+    _search_model_id: str | None = None,
 ):
     """Open Models with both lists scoped to image models.
 
@@ -1496,14 +1509,14 @@ def go_to_image_models(
         gr.update(value=""),
         *refresh_my_models(selected, order, precision, IMAGE_KIND, None, model_id),
         gr.update(value=IMAGE_KIND),
-        *search_models(query, hf_token, precision, IMAGE_KIND, search_order, fits_only),
+        *search_models(query, hf_token, precision, IMAGE_KIND, search_order, fits_only, model_id),
     )
 
 
 def select_model_to_load(model_id, title="Model selected", note=""):
-    """Put ``model_id`` in the ID box and open Models; loading stays a click away.
+    """Open ``model_id`` in the Models page's detail pane; loading stays a click away.
 
-    Update the ID and both model selections together.
+    Update the ID and the My Models selection together.
     Programmatic ID changes do not fire the typing listener that normally
     clears the selected row, which would otherwise override this ID.
 
@@ -1518,8 +1531,6 @@ def select_model_to_load(model_id, title="Model selected", note=""):
     return (
         model_id,
         *clear_my_model_selection(),
-        None,
-        NO_RESULT_SELECTED,
         status_card(
             title,
             f"`{model_id}` is selected. Choose **Load cached** to use local files, "
@@ -1541,7 +1552,9 @@ def select_default_model():
 
 
 # The side pane's model lists.
-NO_CACHED_MODEL_SELECTED = "Select a model to see its details and put it in the model ID box."
+# The My Models detail sits in the detail pane, under the model's own head,
+# and says nothing until a downloaded model is chosen there.
+NO_CACHED_MODEL_SELECTED = ""
 
 # The My Models filter. The list is built from the whole cache, so a reader
 # who never touches this sees every downloaded model; the other choices
@@ -1557,42 +1570,6 @@ MODEL_KIND_FILTERS = (
 # How the summary line names a narrowed list. KIND_NAMES words the same
 # kinds for a single model on the detail card, where the noun is singular.
 KIND_FILTER_NAMES = {TEXT_KIND: "text", IMAGE_KIND: "image", MLX_KIND: "MLX"}
-
-
-# The search is scoped to one kind at a time, because the hub files them
-# under different libraries: a Transformers query and a diffusers one are
-# different searches, not one search with a wider net.
-SEARCH_KINDS = (
-    ("Text models", TEXT_KIND),
-    ("Image models", IMAGE_KIND),
-    # Offered where the backend exists, which is Apple silicon with mlx-lm
-    # installed: elsewhere the search would find models that then land in
-    # the cache as unsupported.
-    *((("MLX models", MLX_KIND),) if mlx_available() else ()),
-)
-
-SEARCH_HINTS = {
-    TEXT_KIND: (
-        "Browse recommended starters, or choose Popular, Trending, or New to explore Hugging Face. "
-        "Click a column heading to sort. Selecting a row puts its ID in the model ID box; "
-        "**Download and load** fetches it."
-    ),
-    IMAGE_KIND: (
-        "Browse image starters, or choose Popular, Trending, or New for more text-to-image models. "
-        "Click a column heading to sort. Selecting a row puts its ID in the model ID box; "
-        "**Download and load** fetches it."
-    ),
-    MLX_KIND: (
-        "Browse language models quantized for MLX, which run on Apple silicon at the precision "
-        "they were converted to. Selecting a result puts its ID in the model ID box; "
-        "**Download and load** fetches it."
-    ),
-}
-
-SEARCH_HINT = SEARCH_HINTS[TEXT_KIND]
-
-
-NO_RESULT_SELECTED = "Select a result to see its details."
 
 
 def format_timestamp(stamp: float | None) -> str:
@@ -1711,6 +1688,22 @@ def packed_bits(
     return mlx_snapshot_bits(snapshot)
 
 
+def held_as_asked(
+    model_id: str, precision: str | None, profile: DeviceProfile, kind: str | None
+) -> bool:
+    """Whether ``model_id`` is the model in memory, read at the width the radio asks for.
+
+    Such a model has no verdict to give: its memory is a reading, not an
+    estimate. What the radio asks of a pipeline or an MLX repo is nothing,
+    so moving it asks nothing new of either, and neither is marked as about
+    to reload.
+    """
+
+    return runtime.MANAGER.model_id == model_id and requested_bits(
+        precision, profile, kind
+    ) == requested_bits(runtime.MANAGER.precision, profile, kind)
+
+
 def cached_fit(
     entry: CachedModel, precision: str | None, profile: DeviceProfile
 ) -> Fit | None:
@@ -1730,12 +1723,7 @@ def cached_fit(
     if entry.status.missing_files or entry.status.unsupported:
         return None
     kind = entry.status.kind
-    # What the radio asks of this kind, which for a pipeline and an MLX repo
-    # is nothing: moving it asks nothing new of either, so neither is marked
-    # as about to reload.
-    requested = requested_bits(precision, profile, kind)
-    reloading = requested != requested_bits(runtime.MANAGER.precision, profile, kind)
-    if runtime.MANAGER.model_id == entry.model_id and not reloading:
+    if held_as_asked(entry.model_id, precision, profile, kind):
         return None
     snapshot = snapshot_folder(entry.path) if entry.path is not None else None
     if snapshot is None:
@@ -1745,7 +1733,7 @@ def cached_fit(
     # already is. The pool is already the one for this kind - the caller
     # chose it, because choosing it here would re-read the device and
     # discard the memory the impending unload gives back.
-    bits = packed_bits(snapshot, kind, requested)
+    bits = packed_bits(snapshot, kind, requested_bits(precision, profile, kind))
     estimated = estimate_snapshot_bytes(
         snapshot, profile.dtype or ASSUMED_DTYPE, bits, kind
     )
@@ -1835,21 +1823,26 @@ def hub_fit(
 
 
 def hub_fits(
-    results: list[HubModel], precision: str | None, kind: str = TEXT_KIND
+    results: list[HubModel], precision: str | None, kind: str | None = None
 ) -> dict[str, Fit]:
-    """The fit verdict for each search result, by model ID, against one profile.
+    """The fit verdict for each search result, by model ID, one reading per kind.
 
-    ``kind`` because a search is scoped to one, and an image pipeline on CUDA
-    is judged against a different pool; see :meth:`DeviceProfile.for_kind`.
-    The estimate itself is from the parameter count either way, which says
-    nothing about how the weights are laid out.
+    A list holds text models and MLX conversions together, and an image
+    pipeline on CUDA is judged against a different pool, so each result is
+    judged as its own kind (see :meth:`DeviceProfile.for_kind`) unless
+    ``kind`` names one for them all. The estimate itself is from the
+    parameter count either way, which says nothing about how the weights
+    are laid out.
     """
 
-    profile = replacement_profile(kind)
-    return {
-        result.model_id: hub_fit(result, precision, profile, kind)
-        for result in results
-    }
+    profiles: dict[str, DeviceProfile] = {}
+    fits = {}
+    for result in results:
+        each = kind or model_kind(result)
+        if each not in profiles:
+            profiles[each] = replacement_profile(each)
+        fits[result.model_id] = hub_fit(result, precision, profiles[each], each)
+    return fits
 
 
 def cached_model_label(entry: CachedModel, fit: Fit | None = None) -> str:
@@ -1963,7 +1956,7 @@ def my_models_summary(
     if not models:
         return (
             f"No models in the Hugging Face cache yet ({root}). "
-            "Find one under **Discover models**."
+            "Find one under **Find a model**."
         )
     seen: set[Path] = set()
     total = format_bytes(sum(
@@ -1979,7 +1972,7 @@ def my_models_summary(
     matching = f"matching `{typed}`" if typed else ""
     if not shown:
         described = " ".join(filter(None, [kind_name, "models", matching]))
-        return f"No {described} among the {line}. Find one under **Discover models**."
+        return f"No {described} among the {line}. Find one under **Find a model**."
     described = " ".join(filter(None, [kind_name, matching])) or "matching"
     return f"Showing {len(shown)} {described} · {line}"
 
@@ -1994,7 +1987,7 @@ def refresh_my_models(
 ):
     """Rescan the cache; keep the selected row or typed ID, or the loaded model.
 
-    ``precision`` is the **Weight precision** choice, which decides what each
+    ``precision`` is the **Load at** choice, which decides what each
     model would take in memory and so whether it fits. The list is repainted
     when that choice changes, which is what makes the radio the first thing
     to try when a model will not load.
@@ -2065,7 +2058,7 @@ def clear_my_model_selection():
     return gr.update(value=None), NO_CACHED_MODEL_SELECTED
 
 
-NO_MODEL_TO_MANAGE = "Select a model under **My Models** first."
+NO_MODEL_TO_MANAGE = "Select a model under **Downloaded** first."
 
 
 def redownload_my_model(selected: str | None, hf_token: str):
@@ -2198,338 +2191,175 @@ def act_on_my_model(action: str | None, hf_token: str):
         yield gr.skip()
 
 
-# The columns a search result can fill, in the order they are shown. A column
-# is shown only when some result has something in it: the bundled starters
-# carry a download size, and hub results carry popularity and a date, so the
-# two browse modes get different tables rather than one table that is half
-# dashes. A starter's note goes under its name in the Model cell: the table
-# is narrow, and a column of prose would push the verdicts out of view.
-SEARCH_COLUMNS = (
-    "Model", "Params", "Download size", "Fit", "Downloads", "Likes", "Updated"
-)
-# The heading row of a table with nothing in it: what a hub search would show.
-EMPTY_SEARCH_COLUMNS = ("Model", "Params", "Fit", "Downloads", "Likes", "Updated")
-ALWAYS_SHOWN_COLUMNS = ("Model", "Fit")
-# How the width is shared between the columns shown, as relative weights:
-# the browser would otherwise size the Model column to its longest ID and
-# push the last columns out of view. A count or a date never wraps, so the
-# weights are also what keeps each on one line; see styles.py.
-COLUMN_WEIGHTS = {
-    "Model": 38, "Params": 11, "Download size": 15, "Fit": 10,
-    "Downloads": 14, "Likes": 10, "Updated": 17,
-}
+# -- finding a model ------------------------------------------------------------
 
-# How a row is tinted by its verdict, matching the .model-list rules in
-# styles.py, which tint the My Models list the same way. A model that cannot
-# fit is greyed rather than reddened: it is not an error, and the reader may
-# be looking at it to find that out. The tight colour is a variable because
-# it differs between the light and dark themes.
-FIT_STYLES = {
-    TIGHT: "color: var(--fit-tight)",
-    UNFIT: "color: var(--body-text-color-subdued)",
-}
-
-# How the numbers are shown: the hub's own ``7.3B`` and ``281K``, and a byte
-# size in the unit it is usually quoted in. The numbers underneath stay
-# numbers, so the browser sorts them as such.
-CELL_FORMATS = {
-    "Params": lambda count: format_count(int(count)),
-    "Downloads": lambda count: format_count(int(count)),
-    "Likes": lambda count: format_count(int(count)),
-    "Download size": lambda count: format_bytes(int(count)),
-}
+# The libraries each kind is searched under, as the results list names them.
+LIBRARY_NAMES = {TEXT_KIND: "Transformers", MLX_KIND: "MLX", IMAGE_KIND: "diffusers"}
 
 
-def hub_adapter_note(result: HubModel) -> str:
-    """What a search result that is a LoRA adapter says under its name."""
+def search_kinds_for(kind: str | None) -> tuple[str, ...]:
+    """The searches a choice of kind runs.
 
-    if result.base_model:
-        return f"LoRA adapter for {result.base_model}"
-    return "LoRA adapter"
-
-
-def search_row(result: HubModel, fit: Fit | None = None) -> dict:
-    note = result.summary or (hub_adapter_note(result) if result.adapter else None)
-    return {
-        "Model": f"{result.model_id}\n{note}" if note else result.model_id,
-        "Params": result.parameters or None,
-        "Download size": result.download_bytes or None,
-        "Fit": fit_word(fit),
-        "Downloads": result.downloads,
-        "Likes": result.likes,
-        "Updated": result.last_modified,
-    }
-
-
-def column_widths(shown: list[str]) -> list[str]:
-    """Each shown column's share of the table, as percentages summing to 100."""
-
-    total = sum(COLUMN_WEIGHTS[column] for column in shown)
-    return [f"{100 * COLUMN_WEIGHTS[column] / total:.0f}%" for column in shown]
-
-
-def search_table(results: list[HubModel], fits: dict[str, Fit] | None = None):
-    """The results as a table, one row each, which the browser sorts by column.
-
-    Returned as a component update: the table itself, and the widths of the
-    columns it has. The table is a pandas Styler: the numbers are kept as
-    numbers so a sort by downloads or size is numeric, and the Styler says
-    how each is displayed and which rows are tinted. The model ID is always
-    the first column, which is how a click on a sorted table is traced back
-    to its model; see :func:`picked_model`.
+    Text is two where MLX runs: the hub files MLX conversions under their
+    own library, and they are text models packed for Apple silicon, so they
+    belong in the same list. Elsewhere they would land in the cache as
+    unsupported, so they are not searched for.
     """
 
-    fits = fits or {}
-    rows = [search_row(result, fits.get(result.model_id)) for result in results]
-    if not rows:
-        shown = list(EMPTY_SEARCH_COLUMNS)
-        return gr.update(
-            value=pd.DataFrame(columns=shown).style, column_widths=column_widths(shown)
+    if kind == IMAGE_KIND:
+        return (IMAGE_KIND,)
+    return (TEXT_KIND, MLX_KIND) if mlx_available() else (TEXT_KIND,)
+
+
+def starter_picks(kind: str | None) -> list[HubModel]:
+    """ChatLab's own picks for a kind, MLX ones beside the text ones where MLX runs."""
+
+    return [model for each in search_kinds_for(kind) for model in STARTER_MODELS.get(each, ())]
+
+
+def downloaded_ids(results: list[HubModel]) -> set[str]:
+    """Which of ``results`` are fully on disk, so their rows can say so."""
+
+    downloaded = set()
+    for result in results:
+        try:
+            if cache_status(result.model_id).complete:
+                downloaded.add(result.model_id)
+        except (OSError, ValueError):
+            # A cache that cannot be read is simply nothing on disk: the
+            # search succeeded, so its rows must draw.
+            continue
+    return downloaded
+
+
+def draw_results(
+    listing: Listing | None, precision: str | None, fits_only: bool, selected: str | None
+) -> str:
+    """The results card for ``listing``, judged at ``precision`` and narrowed by the fit filter."""
+
+    if listing is None:
+        return results_list(
+            None, {}, selected=None, downloaded=set(), shown=[], hidden_by_fit=0, fits_only=False
         )
-    shown = [
-        column for column in SEARCH_COLUMNS
-        if column in ALWAYS_SHOWN_COLUMNS
-        or any(row[column] not in (None, "") for row in rows)
+    results = list(listing.results.values())
+    fits = hub_fits(results, precision)
+    visible = [
+        result for result in results
+        if not fits_only or (result.model_id in fits and fits[result.model_id].state == FITS)
     ]
-    # Object columns, so a missing number is None rather than NaN and reaches
-    # the browser as null.
-    frame = pd.DataFrame(rows, columns=shown).astype(object)
-    frame = frame.where(frame.notna(), None)
-    states = [
-        fits[result.model_id].state if result.model_id in fits else ""
-        for result in results
-    ]
-    table = (
-        frame.style
-        .format({name: fmt for name, fmt in CELL_FORMATS.items() if name in shown}, na_rep="—")
-        .apply(lambda row: [FIT_STYLES.get(states[row.name], "")] * len(row), axis=1)
-    )
-    return gr.update(value=table, column_widths=column_widths(shown))
-
-
-def picked_model(event: gr.SelectData | None) -> str | None:
-    """The model ID of the row a click landed on, or None for no row.
-
-    Read from the row's own cells rather than its position: the table sorts in
-    the browser, so where a row is says nothing about which model it is. The
-    first cell is the ID, with a starter's or an adapter's note under it; see
-    search_row.
-    """
-
-    row = getattr(event, "row_value", None)
-    return str(row[0]).split("\n", 1)[0] if row and row[0] else None
-
-
-def describe_hub_model(result: HubModel, fit: Fit | None = None) -> str:
-    name = html.escape(result.model_id)
-    lines = [f"[{name} on Hugging Face](https://huggingface.co/{name})"]
-    if result.summary:
-        lines.extend(["", html.escape(result.summary), ""])
-    facts = []
-    if result.parameters:
-        facts.append(("Parameters", format_count(result.parameters)))
-    if result.adapter:
-        base = (
-            f"`{html.escape(result.base_model)}`" if result.base_model
-            else "the model its config names"
-        )
-        facts.append(("Adapter", f"LoRA for {base}, merged in at full precision"))
-    if fit is not None and fit.known:
-        facts.append(("Memory", f"{fit.note} Estimated from the parameter count."))
-    elif result.adapter:
-        facts.append(("Memory", "The base model's at full precision; the adapter adds little."))
-    else:
-        facts.append(("Memory", "Unknown — there is not enough information to estimate a fit."))
-    if result.download_bytes:
-        precision_note = (
-            "The weights are quantized already, so the precision choice does not apply."
-            if result.kind == MLX_KIND
-            else "Choosing 4-bit or 8-bit reduces loaded memory, not this download."
-        )
-        facts.append((
-            "Full download",
-            f"About {format_bytes(result.download_bytes)} for all repository files "
-            f"(catalog estimate). {precision_note}",
-        ))
-    else:
-        facts.append(("Full download", "Size unavailable; see the files on Hugging Face."))
-    counts = []
-    if result.downloads is not None:
-        counts.append(f"{format_count(result.downloads)} downloads in the last month")
-    if result.likes is not None:
-        counts.append(f"{format_count(result.likes)} likes")
-    if counts:
-        facts.append(("Popularity", " · ".join(counts)))
-    if result.license:
-        facts.append(("License", html.escape(result.license)))
-    if result.last_modified:
-        facts.append(("Updated", result.last_modified))
-    # An adapter's download fetches its base too, so a gated base gates the
-    # adapter however open the adapter itself is.
-    base_gated = result.adapter and result.base_model and result.base_gated
-    if result.gated or base_gated:
-        whose = (
-            "its terms and its base's" if result.gated and base_gated
-            else "its base's terms" if base_gated
-            else "its terms"
-        )
-        facts.append(
-            ("Gated", f"accept {whose} on Hugging Face and enter a token first")
-        )
-    else:
-        facts.append(("Access", "No access approval indicated"))
-    # A cache that cannot be read (a permission, a drive that has gone away)
-    # is simply nothing on disk: the search succeeded, so the pick must too.
-    try:
-        cached = cache_status(result.model_id)
-    except (OSError, ValueError):
-        cached = CacheStatus()
-    if cached.complete:
-        facts.append(
-            (
-                "Already cached",
-                f"{describe_on_disk(cached)}, ready to load as "
-                f"{'an' if cached.kind == IMAGE_KIND else 'a'} "
-                f"{KIND_NAMES.get(cached.kind, 'model')}",
-            )
-        )
-    elif cached.unsupported:
-        facts.append(
-            ("Already cached", f"{describe_on_disk(cached)}, but not a model ChatLab can load")
-        )
-    elif cached.present:
-        facts.append(("Partly cached", describe_on_disk(cached)))
-    lines.extend(f"- **{label}:** {value}" for label, value in facts)
-    lines.append("")
-    if cached.unsupported:
-        lines.append(
-            "Its ID is in the model ID box, but downloading again would fetch the "
-            "same files: this repo is neither a Transformers language model nor "
-            "a diffusers pipeline."
-        )
-    elif cached.complete:
-        lines.append("Already downloaded: use **Load cached** to bring it into memory.")
-    elif result.adapter:
-        lines.append(
-            "Its ID is in the model ID box: use **Download and load** to fetch it "
-            "and the base model it was trained on."
-        )
-    else:
-        lines.append("Its ID is in the model ID box: use **Download and load** to fetch it.")
-    return "\n".join(lines)
-
-
-def refresh_after_device(
-    known: bool,
-    selected: str | None,
-    order: str | None = DEFAULT_MODEL_SORT,
-    precision: str | None = None,
-    kind: str | None = ALL_KINDS,
-    name: str | None = None,
-    model_id: str | None = None,
-    result: str | None = None,
-    results: dict | None = None,
-    fits_only: bool = False,
-):
-    """Repaint both model lists once the device is known, and only then.
-
-    The page is painted before torch has finished importing, so the first
-    verdicts are given without knowing the device: they assume half
-    precision and no quantization, which is the safe way to be wrong but is
-    wrong on a Mac with 4-bit chosen. A search run in those first seconds
-    carries the same provisional verdicts, so it is repainted here too,
-    from the results already in hand rather than by searching again. This
-    runs on the badge's timer, does nothing until the device can be read,
-    and repaints once - after which ``known`` keeps it quiet for the rest of
-    the session.
-    """
-
-    if known or imported_torch() is None:
-        return (gr.skip(),) * 7
-    return (
-        *refresh_my_models(selected, order, precision, kind, name, model_id),
-        *refresh_search_results(result, results or {}, precision, fits_only),
-        True,
+    shown = visible[:SEARCH_LIMIT]
+    return results_list(
+        listing,
+        fits,
+        selected=(selected or "").strip() or None,
+        downloaded=downloaded_ids(shown),
+        shown=shown,
+        hidden_by_fit=len(results) - len(visible) if fits_only else 0,
+        fits_only=fits_only,
     )
 
 
 def search_models(
-    query: str | None, hf_token: str, precision: str | None = None, kind: str = TEXT_KIND,
-    order: str = "Popular", fits_only: bool = False,
+    query: str | None,
+    hf_token: str,
+    precision: str | None = None,
+    kind: str = TEXT_KIND,
+    order: str = DEFAULT_SEARCH_ORDER,
+    fits_only: bool = False,
+    model_id: str | None = None,
 ):
-    """Browse or search; retain candidates so memory filtering needs no network.
+    """Show ChatLab's picks for an empty box, or search Hugging Face for what is typed.
 
-    ``order`` sorts a search of the whole Hub rather than narrowing what is
-    searched: an obscure repository comes back under Popular, Trending and New
-    alike, as long as the query matches its ID. The one place the sort does
-    decide what is seen is a query with more matches than SEARCH_SCAN_LIMIT,
-    which is where the paging stops; each sort reaches that limit over a
-    different part of the answer, so a narrower query finds a particular
-    repository where a different sort may not. Recommended is the same search
-    with ChatLab's starters pinned above it, and is the one view an empty query
-    can answer offline.
+    The picks need no network, which is what the page loads with. A search
+    keeps up to DISCOVERY_CANDIDATES results so the fit filter can narrow
+    them without searching again, and draws SEARCH_LIMIT of them. A pick the
+    search also finds is listed once, wearing both what the catalog and the
+    hub know about it; see merged_starter.
 
-    A search drops the previous selection along with the previous results.
+    Returns the results card, the listing behind it, and the sort control,
+    which is shown only for a search: picks have no sort.
     """
 
-    cleared = search_table([])
     cleaned = (query or "").strip()
-    # Recommended is a sort, not a filter. With something typed it puts the
-    # matching starters first and fills the rest from the Hub, so the "Search
-    # Hugging Face" box searches Hugging Face in every view. Only an empty box
-    # stays offline, and that is the view the page loads with.
-    starters = recommended_models(cleaned, kind) if order == "Recommended" else []
-    searched_hub = order != "Recommended" or bool(cleaned)
-    unreachable = None
-    found = []
-    if searched_hub:
-        try:
-            found = search_hub_models(
-                cleaned, hf_token, kind=kind,
-                order="Popular" if order == "Recommended" else order,
-                limit=DISCOVERY_CANDIDATES,
-            )
-        except Exception as error:
-            # Starters already in hand are worth showing without the Hub. With
-            # none there is nothing left to show, so the failure is the answer.
-            # With the stack, because this catches everything: a Hub that is
-            # simply unreachable, and a mistake in the search itself. The card
-            # already carries str(error), so a line without the traceback
-            # would only say again what the reader can already see.
-            logger.warning("Hub search for %r failed", cleaned, exc_info=True)
-            if not starters:
-                hint = (
-                    "Clear the search to see offline starters, or retry."
-                    if order == "Recommended"
-                    else "Choose Recommended for offline starters, or retry."
-                )
-                return (
-                    cleared,
-                    failure_card("Search failed", f"{html.escape(str(error))} {hint}"),
-                    {},
-                    None,
-                )
-            unreachable = error
-    # Starters first, and a starter the Hub also returned is listed once,
-    # wearing both sides of what is known about it; see merged_starter.
-    from_hub = {result.model_id: result for result in found}
-    named = {starter.model_id for starter in starters}
-    results = [
-        merged_starter(starter, from_hub.get(starter.model_id)) for starter in starters
-    ] + [result for result in found if result.model_id not in named]
-    if not results:
-        described = {IMAGE_KIND: "text-to-image models", MLX_KIND: "MLX models"}.get(
-            kind, "language models"
+    order = order if order in HUB_SORTS else DEFAULT_SEARCH_ORDER
+    sort_control = gr.update(visible=bool(cleaned))
+    picks = {model.model_id: model for model in starter_picks(kind)}
+    if not cleaned:
+        listing = Listing(picks)
+        return draw_results(listing, precision, fits_only, model_id), listing, sort_control
+    kinds = search_kinds_for(kind)
+    libraries = tuple(LIBRARY_NAMES[each] for each in kinds)
+    try:
+        found = search_hub_kinds(cleaned, hf_token, kinds, order, DISCOVERY_CANDIDATES)
+    except Exception as error:
+        # With the stack, because this catches everything: a Hub that is
+        # simply unreachable, and a mistake in the search itself.
+        logger.warning("Hub search for %r failed", cleaned, exc_info=True)
+        listing = Listing(
+            {}, HUB_HEADING, "", query=cleaned, libraries=libraries,
+            message=(
+                f"Could not search Hugging Face: {html.escape(str(error))}. "
+                "Clear the box to see ChatLab picks offline, or try again."
+            ),
         )
-        message = (
-            f"No {described} matched `{html.escape(cleaned)}`."
-            if cleaned else f"No {described} found in this browse window."
+        return draw_results(listing, precision, fits_only, model_id), listing, sort_control
+    results = {
+        result.model_id: (
+            merged_starter(picks[result.model_id], result) if result.model_id in picks else result
         )
-        return cleared, message, {}, None
-    state = {result.model_id: result for result in results}
-    table, detail, _ = refresh_search_results(None, state, precision, fits_only)
-    ordering = search_note(order, bool(starters), searched_hub, unreachable)
-    return table, f"{ordering} {detail}", state, None
+        for result in found.results
+    }
+    described = "image models" if kind == IMAGE_KIND else "language models"
+    listing = Listing(
+        results,
+        HUB_HEADING,
+        ORDER_NOTES[order],
+        found.exclusions,
+        found.scanned,
+        found.stopped_early,
+        cleaned,
+        "" if results else f"No {described} matched <code>{html.escape(cleaned)}</code>.",
+        libraries,
+    )
+    return draw_results(listing, precision, fits_only, model_id), listing, sort_control
+
+
+def search_and_open(
+    query: str | None,
+    hf_token: str,
+    precision: str | None = None,
+    kind: str = TEXT_KIND,
+    order: str = DEFAULT_SEARCH_ORDER,
+    fits_only: bool = False,
+    model_id: str | None = None,
+):
+    """Enter in the search box: search, and open the model if what was typed is an ID.
+
+    The model is opened through the pick bridge, the way a pressed row is,
+    so the same chain selects and checks it. A pasted ID opens even when the
+    search leaves it out, which is how a reader learns why it was left out.
+    """
+
+    drawn, listing, sort_control = search_models(
+        query, hf_token, precision, kind, order, fits_only, model_id
+    )
+    cleaned = (query or "").strip()
+    if "/" not in cleaned:
+        return drawn, listing, sort_control, gr.skip()
+    try:
+        opened = validate_model_id(cleaned)
+    except ValueError:
+        return drawn, listing, sort_control, gr.skip()
+    opened = next(
+        (found for found in listing.results if found.lower() == opened.lower()), opened
+    )
+    return drawn, listing, sort_control, pick_request(opened)
+
+
+def pick_request(model_id: str) -> str:
+    """What the pick bridge carries: the model, and a nonce so a repeat still changes it."""
+
+    return json.dumps({"model": model_id, "nonce": time.time_ns()})
 
 
 def merged_starter(starter: HubModel, live: HubModel | None) -> HubModel:
@@ -2539,7 +2369,7 @@ def merged_starter(starter: HubModel, live: HubModel | None) -> HubModel:
     curated note and the download estimate, which a search result never
     carries; the search has the downloads, the likes and the date, which the
     catalog cannot keep current. Keeping one and dropping the other would take
-    columns off the row that the same search shows for every other result, so
+    facts off the row that the same search shows for every other result, so
     the row is both: the live answer, with the catalog filling what the Hub
     left empty.
     """
@@ -2555,113 +2385,306 @@ def merged_starter(starter: HubModel, live: HubModel | None) -> HubModel:
         if getattr(live, name) is None
     }
     return replace(
-        live, **stale, summary=starter.summary, download_bytes=starter.download_bytes
+        live, **stale, summary=starter.summary, download_bytes=starter.download_bytes,
+        pick=True,
     )
 
 
-def search_note(
-    order: str, matched_starters: bool, searched_hub: bool, unreachable: Exception | None
-) -> str:
-    """The line above the results: where they came from, and how they are sorted.
+def select_search_result(pick: str | None):
+    """Open the model a row or an Other versions entry named.
 
-    Popular, Trending and New sort a search of the whole Hub, so each says
-    only what the sort is. Recommended also reaches the Hub once there is a
-    query, and says which part of the list is which.
+    ``pick`` is what the row script in ui.model_finder writes to its bridge:
+    the model's ID and a nonce. Anything else is ignored rather than guessed
+    at, and an ID is validated rather than trusted, since it came from the page.
+    Its row is marked by the redraw that follows the ID box, as every other
+    way of choosing a model is.
     """
 
-    if order != "Recommended":
-        return {
-            "Popular": "Most downloaded first.",
-            "Trending": "Trending on Hugging Face.",
-            "New": "Newest repositories first (not latest updates).",
-        }[order]
-    if not searched_hub:
-        return "Curated starters, available to browse offline."
-    if unreachable is not None:
-        return (
-            "Starters only: Hugging Face could not be reached "
-            f"({html.escape(str(unreachable))})."
-        )
-    if not matched_starters:
-        return "No starters matched; showing Hugging Face results, most downloaded first."
-    return "Starters first, then Hugging Face, most downloaded first."
-
-
-def select_search_result(results: dict, precision: str | None, event: gr.SelectData):
-    """Put the clicked result in the ID box, describe it, and remember which it was.
-
-    The selection is kept apart from the table because the table's own
-    highlight is a cell, and a sort moves it.
-    """
-
-    selected = picked_model(event)
-    result = results.get(selected) if selected else None
-    if result is None:
-        return gr.skip(), NO_RESULT_SELECTED, None
-    return (
-        gr.update(value=result.model_id),
-        describe_hub_model(
-            result,
-            hub_fit(
-                result,
-                precision,
-                replacement_profile(results_kind({result.model_id: result})),
-                results_kind({result.model_id: result}),
-            ),
-        ),
-        result.model_id,
-    )
-
-
-def results_kind(results: dict) -> str:
-    """Which kind a held set of search results is, read from their own tags.
-
-    Derived rather than passed in so a repaint cannot disagree with the
-    search that produced the list: the kind that decided the verdicts is the
-    one the results themselves carry.
-    """
-
-    if any(
-        getattr(result, "pipeline_tag", None) in SEARCH_IMAGE_PIPELINE_TAGS
-        for result in results.values()
-    ):
-        return IMAGE_KIND
-    if any(getattr(result, "kind", None) == MLX_KIND for result in results.values()):
-        return MLX_KIND
-    return TEXT_KIND
+    try:
+        request = json.loads(pick or "")
+        model = request["model"] if isinstance(request, dict) else None
+        if not isinstance(model, str):
+            raise ValueError("No model named")
+        model = validate_model_id(model)
+    except (ValueError, KeyError):
+        return gr.skip()
+    return model
 
 
 def refresh_search_results(
-    selected: str | None, results: dict, precision: str | None = None,
+    model_id: str | None, listing: Listing | None, precision: str | None = None,
     fits_only: bool = False,
 ):
-    """Recompute fit filtering from retained candidates, clearing hidden selections.
+    """Redraw the results from the listing in hand, for a new choice, precision or fit filter."""
 
-    Returns the table, the detail beside it, and the selection as it stands
-    after the filter: the model that was selected, or None if it is now hidden.
+    if listing is None:
+        return gr.skip()
+    return draw_results(listing, precision, fits_only, model_id)
+
+
+def known_model(
+    model_id: str, listing: Listing | None, related: dict | None
+) -> HubModel | None:
+    """What a search said about ``model_id``, from the list or from Other versions."""
+
+    if listing is not None and model_id in listing.results:
+        return listing.results[model_id]
+    if related and related.get("model_id") == model_id and related.get("model") is not None:
+        return related["model"]
+    for version, _ in related_versions(related, model_id, any_owner=True):
+        if version.model_id == model_id:
+            return version
+    return next((model for model in starter_picks(TEXT_KIND) + starter_picks(IMAGE_KIND)
+                 if model.model_id == model_id), None)
+
+
+def related_versions(
+    related: dict | None, model_id: str, *, any_owner: bool = False
+) -> list[tuple[HubModel, bool]]:
+    """The Other versions found for ``model_id``, or for whichever model they were found for."""
+
+    if not related or (not any_owner and related.get("model_id") != model_id):
+        return []
+    return [(version, original) for version, original in related.get("versions", [])]
+
+
+def find_versions(
+    model_id: str | None, hf_token: str, listing: Listing | None, related: dict | None = None
+):
+    """Look up the other versions of the opened model, for the pane.
+
+    A Transformers model is offered its MLX conversions from the publishers
+    in VERIFIED_CONVERTERS. An MLX conversion is offered the model it was
+    converted from, which its own tags name. Failure to reach the hub is no
+    reason to say anything: the section is left out.
+
+    What was known about the model itself is kept beside its versions: a
+    model opened from Other versions is in no list, and the lookup that
+    found it is the one this replaces.
     """
 
-    if not results:
-        return gr.skip(), gr.skip(), gr.skip()
-    fits = hub_fits(list(results.values()), precision, results_kind(results))
-    visible = [
-        result for model_id, result in results.items()
-        if not fits_only or (fits.get(model_id) and fits[model_id].state == FITS)
-    ][:SEARCH_LIMIT]
-    visible_ids = {result.model_id for result in visible}
-    selected = selected if selected in visible_ids else None
-    table = search_table(visible, fits)
-    if selected:
-        detail = describe_hub_model(results[selected], fits.get(selected))
+    chosen = (model_id or "").strip()
+    if not chosen:
+        return None
+    result = known_model(chosen, listing, related)
+    found = {"model_id": chosen, "model": result, "versions": []}
+    if result is not None and model_kind(result) == IMAGE_KIND:
+        return found
+    if result is not None and model_kind(result) == MLX_KIND:
+        if result.base_model:
+            original = HubModel(model_id=result.base_model, parameters=result.parameters)
+            found["versions"] = [(original, True)]
+        return found
+    try:
+        versions = mlx_versions(chosen, hf_token)
+    except Exception:
+        logger.warning("Could not look up MLX versions of %s", chosen, exc_info=True)
+        versions = []
+    # A conversion keeps the parameter count of the model it was packed
+    # from, which the hub often lists for the original alone.
+    if result is not None and result.parameters:
+        versions = [
+            version if version.parameters else replace(version, parameters=result.parameters)
+            for version in versions
+        ]
+    found["versions"] = [(version, False) for version in versions]
+    return found
+
+
+def pane_kind(result: HubModel | None, checked: dict, cached: CacheStatus) -> str:
+    """The kind the pane describes the chosen model as, from whatever has been learnt."""
+
+    # An empty cache reads as a text model, so only files on disk count.
+    if cached.complete and cached.kind:
+        return cached.kind
+    if checked.get("mlx"):
+        return MLX_KIND
+    if checked.get("format") == "Image model":
+        return IMAGE_KIND
+    if checked.get("status") == "found" and checked.get("config_verified") and checked.get("format") in ("Transformers", "LoRA adapter"):
+        return TEXT_KIND
+    if result is not None:
+        return model_kind(result)
+    return TEXT_KIND
+
+
+def pane_fit(
+    model_id: str, result: HubModel | None, cached: CacheStatus,
+    precision: str | None, profile: DeviceProfile, kind: str,
+) -> Fit | None:
+    """The memory verdict for the pane: from the files on disk if they are all there, else the hub's count."""
+
+    # The model in memory has none, and the search listing carrying it too
+    # must not give it one: the pane reads what it holds instead.
+    if held_as_asked(model_id, precision, profile, kind):
+        return None
+    if cached.complete:
+        entry = next(
+            (entry for entry in list_cached_models() if entry.model_id == model_id), None
+        )
+        if entry is not None:
+            fit = cached_fit(entry, precision, profile)
+            if fit is not None:
+                return fit
+    if result is not None and result.parameters:
+        return hub_fit(result, precision, profile, kind)
+    return None
+
+
+def repository_notes(checked: dict) -> list[str]:
+    """What checking the model on Hugging Face found, for the pane's last section."""
+
+    status = checked.get("status")
+    if not status or status == "checking":
+        return []
+    if status != "found":
+        return [html.escape(checked["detail"])]
+    notes = [
+        f"<b>Repository found</b> · {html.escape(checked['format'])}",
+        html.escape(checked["compatibility"]),
+    ]
+    if checked.get("access_restricted"):
+        notes.append(
+            "<b>Access required:</b> accept the model's terms on Hugging Face and "
+            "provide an authorized token under <b>Access token</b>."
+        )
+    elif checked.get("gated"):
+        notes.append(
+            "Gated repository · Access to the configuration was verified."
+            if checked.get("config_verified") else "Gated repository · File access has not been verified."
+        )
+    elif checked.get("private"):
+        notes.append("Private repository · your token provided access.")
+    return notes
+
+
+def pane_cache_note(cached: CacheStatus, kind: str) -> str:
+    """One line on what of the chosen model is on disk, for the pane."""
+
+    if cached.complete:
+        page = "the <b>Images</b> page" if kind == IMAGE_KIND else "the <b>Chat</b> page"
+        return f"Downloaded · {html.escape(describe_on_disk(cached))}. Load it to use it on {page}."
+    if cached.unsupported:
+        return (
+            f"Downloaded ({html.escape(describe_on_disk(cached))}), but not a model ChatLab can load."
+        )
+    if cached.present:
+        return (
+            f"Partly downloaded · {html.escape(describe_on_disk(cached))}. "
+            "<b>Download and load</b> fetches the rest."
+        )
+    return ""
+
+
+def model_pane(
+    model_id: str | None,
+    selected: str | None,
+    repository: dict | None,
+    hf_token: str | None,
+    listing: Listing | None,
+    related: dict | None,
+    precision: str | None,
+):
+    """The detail pane for the chosen model: what it is, what it needs, what works.
+
+    Drawn from whatever is known: the search result, the check on Hugging
+    Face, and the files on disk. Returns the pane's head, the precision
+    control (shown only where precision is a choice: a Transformers text
+    model), the pane's body, and the check button (shown until the model
+    has been checked, or when the check could not reach the hub).
+    """
+
+    chosen = chosen_model(model_id or "", selected)
+    if not chosen:
+        return PANE_EMPTY, gr.update(visible=True), "", gr.update(visible=False)
+    result = known_model(chosen, listing, related)
+    checked = matching_repository(chosen, repository, hf_token)
+    try:
+        cached = cache_status(chosen)
+    except (OSError, ValueError):
+        cached = CacheStatus()
+    # A cached MLX checkpoint says its own width, offline, and is packed at
+    # it whether or not this machine can run it.
+    snapshot = None
+    try:
+        snapshot = snapshot_folder(cache_folder(chosen)) if cached.present else None
+        local_bits = mlx_snapshot_bits(snapshot) if snapshot is not None else None
+    except (OSError, ValueError):
+        local_bits = None
+    kind = MLX_KIND if local_bits is not None else pane_kind(result, checked, cached)
+    adapter = bool(result is not None and result.adapter) or checked.get("format") == "LoRA adapter" or is_adapter_snapshot(snapshot)
+    effective_precision = "full" if adapter else precision
+    profile = replacement_profile(kind)
+    if kind == MLX_KIND:
+        bits = local_bits or checked.get("bits") or mlx_bits_from_id(chosen)
     else:
-        detail = f"{len(visible)} results shown from {len(results)} candidates. "
-        if fits_only:
-            detail += (
-                "Only estimated fits at the selected precision; tight, too large, "
-                "and unknown sizes are hidden. "
-            )
-        if not visible:
-            detail += "No estimated fits in these candidates. Turn off the filter or narrow your search."
-        else:
-            detail += NO_RESULT_SELECTED
-    return table, detail, selected
+        bits = requested_bits(effective_precision, profile, kind)
+    loaded = runtime.MANAGER.model_id == chosen
+    fit = pane_fit(chosen, result, cached, effective_precision, profile, kind)
+    status = checked.get("status")
+    download = checked.get("download_bytes") or (result.download_bytes if result else None)
+    versions = [
+        (version, hub_fit(version, precision, replacement_profile(model_kind(version)), model_kind(version)), original)
+        for version, original in related_versions(related, chosen)
+    ]
+    gated = bool(
+        (result is not None and (result.gated or result.base_gated)) or checked.get("gated")
+        or checked.get("access_restricted") or status == "restricted"
+    )
+    head = pane_head(chosen, result, gated=gated, loaded=loaded)
+    body = pane_body(
+        kind=kind,
+        bits=bits,
+        vision=result is not None and result.pipeline_tag in VISION_TAGS,
+        download_bytes=download,
+        checking=status == "checking",
+        checked=status == "found",
+        fit=fit,
+        loaded_bytes=runtime.MANAGER.loaded_bytes if loaded else None,
+        on_disk_bytes=cached.cached_bytes if cached.complete else None,
+        versions=versions,
+        notes=repository_notes(checked) + (["LoRA adapter · Downloading also fetches its base model; ChatLab merges it into full-precision weights regardless of Load at."] if adapter else []) + (["Accept the base model's terms on Hugging Face and provide an authorized token."] if result is not None and result.base_gated else []),
+        on_disk="" if selected else pane_cache_note(cached, kind),
+        blocked=bool(
+            checked.get("unsupported") or checked.get("architecture_unavailable")
+            or cached.unsupported
+        ),
+    )
+    check = gr.update(
+        visible=status in (None, "error"),
+        value="Check again" if status == "error" else "Check on Hugging Face",
+    )
+    return head, gr.update(visible=kind == TEXT_KIND), body, check
+
+
+def refresh_after_device(
+    known: bool,
+    selected: str | None,
+    order: str | None = DEFAULT_MODEL_SORT,
+    precision: str | None = None,
+    kind: str | None = ALL_KINDS,
+    name: str | None = None,
+    model_id: str | None = None,
+    listing: Listing | None = None,
+    fits_only: bool = False,
+):
+    """Repaint both model lists once the device is known, and only then.
+
+    The page is painted before torch has finished importing, so the first
+    verdicts are given without knowing the device: they assume half
+    precision and no quantization, which is the safe way to be wrong but is
+    wrong on a Mac with 4-bit chosen. A search run in those first seconds
+    carries the same provisional verdicts, so it is repainted here too,
+    from the results already in hand rather than by searching again. This
+    runs on the badge's timer, does nothing until the device can be read,
+    and repaints once - after which ``known`` keeps it quiet for the rest of
+    the session. The pane follows from ``device_read`` changing.
+    """
+
+    if known or imported_torch() is None:
+        return (gr.skip(),) * 5
+    return (
+        *refresh_my_models(selected, order, precision, kind, name, model_id),
+        draw_results(listing, precision, fits_only, model_id) if listing is not None else gr.skip(),
+        True,
+    )
