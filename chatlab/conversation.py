@@ -894,16 +894,21 @@ def family_head(forks: dict, name: str, listed) -> str:
     A fork belongs to the family of the conversation it was forked from,
     followed back through each parent still in the list. A fork whose
     parent was deleted, or sits in the other list, heads a family of its own.
+    Origins are validated one at a time, so a file can carry a loop of
+    parents; every branch on or behind it is headed by whichever branch of
+    the loop the list holds first, so each lands in the list exactly once.
     """
 
     origins = forks.get("origins") or {}
-    seen = {name}
+    chain = [name]
     while True:
-        parent = (origins.get(name) or {}).get("parent")
-        if parent not in listed or parent in seen:
-            return name
-        seen.add(parent)
-        name = parent
+        parent = (origins.get(chain[-1]) or {}).get("parent")
+        if parent not in listed:
+            return chain[-1]
+        if parent in chain:
+            order = list(listed)
+            return min(chain[chain.index(parent):], key=order.index)
+        chain.append(parent)
 
 
 def branch_choices(

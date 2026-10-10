@@ -780,6 +780,21 @@ class ConversationListTests(unittest.TestCase):
         self.assertEqual([name for _label, name in choices], [MAIN_BRANCH, "Fork 1"])
         self.assertFalse(choices[1][0].startswith("↳"))
 
+    def test_a_loop_of_parents_lists_each_branch_once(self):
+        # Each origin is valid on its own, so a file can name A as B's parent
+        # and B as A's; a fork of either still joins the one family.
+        forks = self.family(2)
+        forks[FAMILY_VIEW] = {MAIN_BRANCH: True, "Fork 1": True, "Fork 2": True}
+        forks["origins"]["Fork 1"]["parent"] = "Fork 2"
+        forks["origins"]["Fork 2"]["parent"] = "Fork 1"
+        forks["branches"]["Fork 3"] = [make_turn("user", "bored")]
+        forks["origins"]["Fork 3"] = {"parent": "Fork 2", "kind": "copy"}
+        choices = branch_choices(forks, forks["branches"][MAIN_BRANCH])
+        self.assertEqual(
+            [name for _label, name in choices], [MAIN_BRANCH, "Fork 1", "Fork 2", "Fork 3"]
+        )
+        self.assertIn("2 forks", choices[1][0])
+
     def test_a_hidden_fork_answering_is_named_on_its_head(self):
         forks = self.family()
         choices = branch_choices(forks, forks["branches"][MAIN_BRANCH], running="Fork 3")
