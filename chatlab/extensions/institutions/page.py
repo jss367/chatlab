@@ -764,15 +764,15 @@ def build_page(context):
     # ---- into Chat ------------------------------------------------------------------------------------
 
     def chat_conversation(loaded, chosen, index, attempt_value, with_reply):
-        _, _, game = opened(loaded, chosen)
-        return conversation(game, index, attempt_value, bool(with_reply))
+        run, _, game = opened(loaded, chosen)
+        return conversation(game, index, attempt_value, bool(with_reply), manifest=run.manifest)
 
     context.navigation.open_chat(to_chat, chat_conversation, [runs, current, turn_index, attempt, include])
 
     def download_conversation(loaded, chosen, index, attempt_value, with_reply):
         try:
-            _, _, game = opened(loaded, chosen)
-            value = conversation(game, index, attempt_value, bool(with_reply))
+            run, _, game = opened(loaded, chosen)
+            value = conversation(game, index, attempt_value, bool(with_reply), manifest=run.manifest)
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
         if staging["directory"] is None or not Path(staging["directory"].name).is_dir():

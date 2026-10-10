@@ -247,9 +247,9 @@ class NamedTeamTests(unittest.TestCase):
             support.validate_game(plain, entry, g)
 
     def test_open_in_chat_keeps_reasoning_out_of_the_answer(self):
-        _, _, g = self.game('cheater-s0-peer')
+        run, _, g = self.game('cheater-s0-peer')
         index = next(i for i, t in enumerate(g['turns']) if '</think>' in t['raw_reply'])
-        exported = bundles.conversation(g, index, include_reply=True)
+        exported = bundles.conversation(g, index, include_reply=True, manifest=run.manifest)
         reply = exported['turns'][-1]
         raw = g['turns'][index]['raw_reply']
         self.assertEqual(reply['content'], raw.rsplit('</think>', 1)[1].strip())
@@ -285,6 +285,102 @@ class NamedTeamTests(unittest.TestCase):
         for manifest in manifests:
             with self.subTest(manifest=manifest.get('exporter_version')), self.assertRaises(ValueError):
                 support.validate_manifest(manifest)
+
+
+class SupportContractRegressionTests(unittest.TestCase):
+    def manifest(self):
+        # Inert index only: two cheater seats and three base seats, ten turns
+        # per seat, with three rejected cheater turns. No game is replayed.
+        m = json.loads((FIXTURES / NAMED / 'manifest.json').read_text())
+        entry = next(e for e in m['games'] if e['composition'] == 'mixed')
+        m['games'] = [entry]
+        entry.update(phases=10, turns=50)
+        entry['scores']['invalid_turns'] = 3
+        for agent in entry['scores']['per_agent']:
+            agent['invalid_turns'] = 3 if agent['agent'] == 0 else 0
+        m['validation'].update(games=1, turns=50, invalid_turns=3, invalid_fraction=3 / 50,
+                               per_profile_invalid_fraction={'base': 0, 'cheater': 3 / 20},
+                               reliability_gate_passed=False)
+        return m
+
+    def test_absent_profile_gate_uses_only_the_aggregate_gate(self):
+        m = self.manifest()
+        m['validation'].pop('per_profile_invalid_fraction')
+        m['validation']['reliability_gate_passed'] = True
+        support.validate_manifest(m)
+
+    def test_present_profile_gate_requires_exact_used_profiles_and_actual_rates(self):
+        m = self.manifest()
+        support.validate_manifest(m)  # The unused honest profile needs no rate.
+        for rates in ({}, {'base': 0}, {'base': 0, 'cheater': .05},
+                      {'base': 0, 'cheater': 3 / 20, 'honest': 0}, None):
+            with self.subTest(rates=rates):
+                damaged = copy.deepcopy(m)
+                damaged['validation'].update(per_profile_invalid_fraction=rates,
+                                             reliability_gate_passed=True)
+                with self.assertRaises(ValueError):
+                    support.validate_manifest(damaged)
+
+    def test_present_gate_reconciles_per_agent_counts_and_team_seats(self):
+        for change in ('count', 'seat'):
+            with self.subTest(change=change):
+                m = self.manifest()
+                agent = m['games'][0]['scores']['per_agent'][0]
+                agent['invalid_turns' if change == 'count' else 'model'] = 2 if change == 'count' else 'base'
+                with self.assertRaises(ValueError):
+                    support.validate_manifest(m)
+
+    def test_profile_rates_pool_turn_opportunities_across_different_teams(self):
+        m = self.manifest()
+        extra = copy.deepcopy(m['games'][0])
+        extra.update(game_id='extra', file='games/extra.json.gz', composition='cheater',
+                     phases=20, turns=100)
+        extra['scores']['invalid_turns'] = 0
+        for agent in extra['scores']['per_agent']:
+            agent.update(model='cheater', invalid_turns=0)
+        m['games'].append(extra)
+        m['validation'].update(games=2, turns=150, invalid_fraction=3 / 150,
+                               per_profile_invalid_fraction={'base': 0, 'cheater': 3 / 120},
+                               reliability_gate_passed=True)
+        support.validate_manifest(m)
+
+    def test_reasoning_export_uses_the_declared_last_closing_boundary(self):
+        profile = self.manifest()['model_profiles']['base']
+        game = dict(scenario='customer_support', run_id='inert', game_id='inert',
+                    model_profiles={'base': profile}, turns=[dict(
+                        turn_id='inert', model_profile='base', accepted=True, error=None,
+                        messages=[dict(role='system', content='System'), dict(role='user', content='Question')])])
+        for raw in ('prefilled reasoning</think>{"ok": true}',
+                    'prefix <think>reasoning</think>{"ok": true}',
+                    '<think>first</think>more reasoning</think>{"ok": true}',
+                    '<think>unfinished', '{"ok": true}'):
+            with self.subTest(raw=raw):
+                game['turns'][0]['raw_reply'] = raw
+                manifest = {'reply_format': 'reasoning_then_json'}
+                reply = bundles.conversation(game, 0, include_reply=True, manifest=manifest)['turns'][-1]
+                self.assertEqual(reply['content'], (support.answer(manifest, raw) or '').strip())
+                if '</think>' in raw:
+                    self.assertEqual(reply['reasoning'], raw.rsplit('</think>', 1)[0].replace('<think>', '', 1).strip())
+                plain = bundles.conversation(game, 0, include_reply=True, manifest={'reply_format': 'json'})['turns'][-1]
+                self.assertEqual(plain['content'], raw)
+                self.assertNotIn('reasoning', plain)
+
+
+class SupportExportCallbackTests(unittest.TestCase):
+    setUp = invoice_tests.PageTests.setUp
+
+    def test_named_export_callback_passes_the_manifest_without_opening_chat(self):
+        runs, _, _ = self.fn['load_source'](str(FIXTURES), NAMED)
+        run = next(r for r in runs if r.run_id == NAMED)
+        entry = next(e for e in run.games if e['game_id'] == 'cheater-s0-peer')
+        game = bundles.read_game(run, entry)
+        index = next(i for i, t in enumerate(game['turns']) if '</think>' in t['raw_reply'])
+        chosen = {'run': run.run_id, 'file': entry['file']}
+        payload = self.chats[0][1](runs, chosen, index, None, True)
+        self.assertEqual(payload['turns'][-1]['content'],
+                         support.answer(run.manifest, game['turns'][index]['raw_reply']).strip())
+        self.assertTrue(payload['turns'][-1]['reasoning'])
+        self.assertEqual(self.manager.calls, [])
 
 
 class SupportPageTests(unittest.TestCase):

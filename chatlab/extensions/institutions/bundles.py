@@ -551,12 +551,12 @@ def phase_state(game, arm_spec, index):
 
 # ---- a turn as a Chat conversation ----------------------------------------------------------------------
 
-def conversation(game, turn_index, attempt_index=None, include_reply=False):
+def conversation(game, turn_index, attempt_index=None, include_reply=False, *, manifest=None):
     """One attempt of one turn as a ``chatlab-conversation-1`` object: the agent's system prompt, the user
     prompt it was given and, when asked for, the reply it recorded. The last attempt by default."""
     if game.get("scenario") == "customer_support":
         from .adapters import adapter
-        return adapter(game["scenario"]).conversation(game, turn_index, include_reply)
+        return adapter(game["scenario"]).conversation(game, turn_index, include_reply, manifest=manifest)
     turns = game["turns"]
     if not isinstance(turn_index, int) or not 0 <= turn_index < len(turns):
         raise ValueError("Select a turn first.")

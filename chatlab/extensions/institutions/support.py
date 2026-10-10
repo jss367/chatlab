@@ -105,6 +105,7 @@ def validate_manifest(m):
     require(isinstance(v, dict) and v.get('replay_verified') is True
             and type(v.get('reliability_gate_passed')) is bool, 'partial or unverified runs are unsupported')
     profiles(m.get('model_profiles'))
+    per_profile = None
     if version == 3:
         teams = m.get('compositions')
         require(isinstance(teams, dict) and teams and all(
@@ -112,9 +113,11 @@ def validate_manifest(m):
             and isinstance(c['label'], str) and c['label'] and isinstance(c['roster'], list) and len(c['roster']) == 5
             and all(p in m['model_profiles'] for p in c['roster']) for k, c in teams.items()), 'invalid team compositions')
         require(m.get('reply_format') in REPLY_FORMATS, 'unknown reply format')
-        per_profile = v.get('per_profile_invalid_fraction')
-        require(isinstance(per_profile, dict) and set(per_profile) <= set(m['model_profiles'])
-                and all(type(x) in (int, float) and 0 <= x <= 1 for x in per_profile.values()), 'invalid per-profile rejection rates')
+        if 'per_profile_invalid_fraction' in v:
+            per_profile = v['per_profile_invalid_fraction']
+            require(isinstance(per_profile, dict)
+                    and all(type(x) in (int, float) and 0 <= x <= 1 for x in per_profile.values()),
+                    'invalid per-profile rejection rates')
     else:
         require('compositions' not in m and 'reply_format' not in m, 'version 2 manifests count organisms')
     teams = compositions(m)
@@ -134,10 +137,26 @@ def validate_manifest(m):
         scores(e.get('scores'), m['model_profiles'])
     require(v.get('turns') == sum(e['turns'] for e in entries.values()), 'validation turn count disagrees')
     require(v.get('invalid_turns') == sum(e['scores']['invalid_turns'] for e in entries.values()), 'validation rejection count disagrees')
+    if per_profile is not None:
+        profile_turns, profile_invalid = defaultdict(int), defaultdict(int)
+        for e in entries.values():
+            # Each phase holds one turn per seat. Check the indexed scores
+            # against those seats before using their profile denominators.
+            require(e['phases'] > 0 and e['turns'] == e['phases'] * 5, 'invalid profile turn denominator')
+            agents = unique(e['scores']['per_agent'], 'agent')
+            require([agents[a]['model'] for a in range(5)] == teams[e['composition']][1],
+                    'profile score roster disagrees')
+            require(sum(a['invalid_turns'] for a in agents.values()) == e['scores']['invalid_turns'],
+                    'per-agent rejection count disagrees')
+            for a in agents.values():
+                profile_turns[a['model']] += e['phases']
+                profile_invalid[a['model']] += a['invalid_turns']
+        expected = {p: profile_invalid[p] / turns for p, turns in profile_turns.items()}
+        require(per_profile == expected, 'per-profile rejection rates disagree with indexed scores')
     require(v.get('invalid_fraction') == v['invalid_turns'] / v['turns']
             and v.get('reliability_gate') == {'max_invalid_fraction': .1}
             and v['reliability_gate_passed'] == (v['invalid_fraction'] <= .1
-                                                 and all(x <= .1 for x in v.get('per_profile_invalid_fraction', {}).values())),
+                                                 and all(x <= .1 for x in (per_profile or {}).values())),
             'reliability gate disagrees')
 
 
@@ -473,17 +492,17 @@ def case_history(game, case_id, index):
     return past, future
 
 
-def conversation(game, index, include_reply=False):
+def conversation(game, index, include_reply=False, *, manifest=None):
     require(type(index) is int and 0 <= index < len(game['turns']), 'select a turn first')
     t = game['turns'][index]
     messages = copy.deepcopy(t['messages'])
     if include_reply:
         raw = t['raw_reply']
         # A thinking model's reasoning goes in Chat's reasoning block; an unclosed block has no answer.
-        if raw.lstrip().startswith('<think>'):
-            body = raw.lstrip()[len('<think>'):]
-            reasoning, content = body.rsplit('</think>', 1) if '</think>' in body else (body, '')
-            messages.append(dict(role='assistant', content=content.strip(), reasoning=reasoning.strip()))
+        if (manifest or {}).get('reply_format', 'json') == 'reasoning_then_json' and ('</think>' in raw or '<think>' in raw):
+            reasoning = raw.rsplit('</think>', 1)[0] if '</think>' in raw else raw
+            messages.append(dict(role='assistant', content=(answer(manifest, raw) or '').strip(),
+                                 reasoning=reasoning.replace('<think>', '', 1).strip()))
         else:
             messages.append(dict(role='assistant', content=raw))
     provenance = dict(run_id=game['run_id'], game_id=game['game_id'], turn_id=t['turn_id'],

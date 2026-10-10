@@ -96,7 +96,9 @@ counts as an organism, in `organism_slots` and the organism score counts, when i
 `reply_format` is `json` or `reasoning_then_json`. Under `reasoning_then_json` the JSON is read from the text
 after the last `</think>`, and a reply whose reasoning never closed has no parsed object. **Open in Chat**
 puts that reasoning in Chat's reasoning block. Validation may add `per_profile_invalid_fraction`, and
-the reliability gate then also needs each profile at or below 10%.
+the reliability gate then also needs each profile at or below 10%. When present, that map must cover
+exactly the profiles used by the indexed teams, with each rate matching the indexed per-agent rejection
+counts divided by its recorded turn opportunities (one turn per seat per phase).
 
 The envelope holds run/game identity, configuration, profiles, provenance, validation, roster, ordered
 phases and turns, unchanged original event IDs/payloads, snapshots, scores, and factual diagnostics.
