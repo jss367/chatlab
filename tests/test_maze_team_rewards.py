@@ -140,6 +140,40 @@ class RewardRunTests(unittest.TestCase):
         self.assertNotIn("vector", ep.config["taste_prompt"].lower())
         self.assertNotIn("activation", ep.config["taste_prompt"].lower())
 
+    def test_a_run_records_its_message_rules_and_each_reads_back(self):
+        # Agent-2's second message carries a call: rule 2 takes it out, rule 1 sends it whole.
+        script = list(SCRIPT)
+        script[7] = move("east", "Exit B felt wonderful.")
+        for rules in (1, 2):
+            with self.subTest(rules=rules):
+                ep, _ = run(script, message_rules=rules)
+                sent = ep.mail[2]["text"]
+                self.assertEqual("<tool_call>" in sent, rules == 1)
+                self.assertEqual(saved(from_payload(saved(ep))), saved(ep))
+        ep, _ = run(script)
+        self.assertEqual(ep.config["message_rules"], 2)
+        with self.assertRaisesRegex(ValueError, "1 or 2"):
+            run(message_rules=3)
+
+    def test_a_file_saved_before_the_rules_were_recorded_reads_under_the_rules_it_agrees_with(self):
+        script = list(SCRIPT)
+        script[7] = move("east", "Exit B felt wonderful.")
+        for rules in (1, 2):
+            with self.subTest(rules=rules):
+                ep, _ = run(script, message_rules=rules)
+                old = saved(ep)
+                del old["config"]["message_rules"]
+                loaded = from_payload(old)
+                self.assertEqual(loaded.config["message_rules"], rules)
+                self.assertEqual(saved(loaded)["mail"], old["mail"])
+        # A file that neither rule reproduces is refused.
+        ep, _ = run(script, message_rules=1)
+        old = saved(ep)
+        del old["config"]["message_rules"]
+        old["mail"][2]["text"] = "Something else."
+        with self.assertRaisesRegex(ValueError, "messages do not match"):
+            from_payload(old)
+
     def test_long_message_after_arriving_is_cut_to_the_limit(self):
         script = list(SCRIPT)
         script[7] = say("y" * 290)
