@@ -483,14 +483,16 @@ def build_page(context):
         found = find_run(loaded, run_id)
         if found and found.scenario == "customer_support":
             games = [g for g in found.games if g['closure_rule'] == arm_name]
-            conditions = sorted({g['composition'] for g in games})
-            cond = cond if type(cond) is int and cond in conditions else (conditions[0] if conditions else None)
+            order = list(support.compositions(found.manifest))
+            conditions = sorted({g['composition'] for g in games}, key=order.index)
+            # True == 1, so a value of the wrong type must not select a version-2 team.
+            cond = cond if any(type(cond) is type(c) and cond == c for c in conditions) else (conditions[0] if conditions else None)
             games = [g for g in games if g['composition'] == cond]
             seeds = sorted({g['event_seed'] for g in games})
             seed_value = seed_value if seed_value in seeds else (seeds[0] if seeds else None)
             entry = next((g for g in games if g['event_seed'] == seed_value), None)
             chosen = {'run': found.run_id, 'file': entry['file']} if entry else None
-            return (gr.update(choices=[(support.COMPOSITIONS[c], c) for c in conditions], value=cond),
+            return (gr.update(choices=[(support.composition_label(found.manifest, c), c) for c in conditions], value=cond),
                     gr.update(choices=seeds, value=seed_value), gr.update(choices=[], value=None, visible=False), chosen)
         games = [g for g in found.games if g["split"] == split_name and g["arm"] == arm_name] if found else []
         conditions = sorted({g["condition"] for g in games}, key=["red", "honest"].index)
@@ -762,15 +764,15 @@ def build_page(context):
     # ---- into Chat ------------------------------------------------------------------------------------
 
     def chat_conversation(loaded, chosen, index, attempt_value, with_reply):
-        _, _, game = opened(loaded, chosen)
-        return conversation(game, index, attempt_value, bool(with_reply))
+        run, _, game = opened(loaded, chosen)
+        return conversation(game, index, attempt_value, bool(with_reply), manifest=run.manifest)
 
     context.navigation.open_chat(to_chat, chat_conversation, [runs, current, turn_index, attempt, include])
 
     def download_conversation(loaded, chosen, index, attempt_value, with_reply):
         try:
-            _, _, game = opened(loaded, chosen)
-            value = conversation(game, index, attempt_value, bool(with_reply))
+            run, _, game = opened(loaded, chosen)
+            value = conversation(game, index, attempt_value, bool(with_reply), manifest=run.manifest)
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
         if staging["directory"] is None or not Path(staging["directory"].name).is_dir():

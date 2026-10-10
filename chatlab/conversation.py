@@ -341,7 +341,10 @@ def recorded_profile_note(turns: list[dict] | None) -> str:
     if not isinstance(profile, dict) or not isinstance(profile.get("parent"), dict):
         return ""
     def identity(repository):
-        return html.escape(str(repository.get("repo", "unknown"))) + " @ " + html.escape(str(repository.get("revision", "unknown")))
+        name = str(repository.get("repo", "unknown"))
+        if isinstance(repository.get("subfolder"), str) and repository["subfolder"]:
+            name += "/" + repository["subfolder"]
+        return html.escape(name) + " @ " + html.escape(str(repository.get("revision", "unknown")))
     note = " Recorded parent: " + identity(profile["parent"]) + "."
     if isinstance(profile.get("adapter"), dict):
         note += " Recorded adapter: " + identity(profile["adapter"]) + "."
