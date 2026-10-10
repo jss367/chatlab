@@ -67,7 +67,11 @@ REWARD_DEFAULTS = dict(
     # The taste prompt names no vector, so a steered taste and an unsteered
     # one are asked the same question and differ only in how they are answered.
     taste=False, taste_prompt="Before the maze begins, describe how you feel right now.",
-    taste_strength=None, laps=1, lap_prompt="", paired_exits=False, team_reward=0)
+    taste_strength=None, laps=1, lap_prompt="", paired_exits=False, team_reward=0, message_rules=2)
+# How a response after arriving becomes its message, by the version a run
+# records. 1: the text outside its reasoning, sent only if the response
+# finished. 2: also sent when cut off, with any call taken out.
+MESSAGE_RULES = (1, 2)
 # Exits B, C and D beside the destination, which is exit A.
 EXIT_LABELS = "ABCD"
 

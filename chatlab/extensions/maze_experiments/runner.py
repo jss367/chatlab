@@ -28,7 +28,7 @@ from .history import (CONTENT as CONTENT_HISTORY, FIELD as HISTORY_FIELD, REASON
 from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, MARKS, check_insert, render_insert
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call, unavoidable_cells
 from .team import (DROPPED, EXIT_LABELS, FORMAT as TEAM_FORMAT, LEGACY_FORMAT as LEGACY_TEAM_FORMAT, LIMITED,
-                   MAX_AGENTS, MESSAGE_LIMIT, REWARD_DEFAULTS, REWARD_FORMAT, agent_names, arrival_text,
+                   MAX_AGENTS, MESSAGE_LIMIT, MESSAGE_RULES, REWARD_DEFAULTS, REWARD_FORMAT, agent_names, arrival_text,
                    check_config as check_team_config, exit_cells, lap_text, rewarded, targeted, team_paragraph,
                    team_tools)
 from chatlab.extension_api import normalize_steering, write_private_text
@@ -259,6 +259,8 @@ def check_rewards(config, maze):
     for name in ("taste", "paired_exits"):
         if type(config[name]) is not bool:
             raise ValueError(f"{name} is either true or false.")
+    if config["message_rules"] not in MESSAGE_RULES or type(config["message_rules"]) is not int:
+        raise ValueError("message_rules names how a response after arriving becomes a message: 1 or 2.")
     if config["paired_exits"]:
         distances = maze.distances(maze.start)
         if len(cells) != 1 or distances[cells[0]] != distances[maze.goal]:
@@ -1767,8 +1769,13 @@ def take_action(episode, turn, index):
     if turn.get("kind", "move") != "move":
         # The taste, or a response after arriving: no call is read from it,
         # and the agent stays in the run whatever it wrote or however it
-        # ended. What it wrote outside its reasoning is its message.
-        message = spoken_text(assistant_content(turn))
+        # ended. What it wrote outside its reasoning is its message, read by
+        # the rules the run records.
+        content = assistant_content(turn)
+        if episode.config.get("message_rules", MESSAGE_RULES[-1]) >= 2:
+            message = spoken_text(content)
+        else:
+            message = visible_text(content).strip()[:MESSAGE_LIMIT] if turn["finish_reason"] == "stop" else ""
         return dict(agent=turn["agent"], turn=index, talk=turn["kind"], message=message or None)
     if turn["finish_reason"] != "stop":
         turn["outcome"] = "cut_off"
@@ -3002,6 +3009,28 @@ def replay_rounds(result, turns, rounds, updates, by_answer, manual, queued=(), 
 
 
 def team_from_payload(data, read_prompt=None):
+    """A saved team run, rebuilt for replay; see :func:`replay_team_payload`.
+
+    A run with exits and rewards saved before runs recorded ``message_rules``
+    was written under one of the two rules, the original or the one that also
+    sends cut-off messages with calls taken out, and its file does not say
+    which. It is read under each in turn, the later first, and loads under the
+    one its record agrees with everywhere, which then joins its configuration.
+    A file neither rule reproduces is refused with the later rule's reason.
+    """
+    if (isinstance(data, dict) and data.get("format") == REWARD_FORMAT and isinstance(data.get("config"), dict)
+            and rewarded(data["config"]) and "message_rules" not in data["config"]):
+        refusal = None
+        for rules in reversed(MESSAGE_RULES):
+            try:
+                return replay_team_payload({**data, "config": {**data["config"], "message_rules": rules}}, read_prompt)
+            except ValueError as error:
+                refusal = refusal or error
+        raise refusal
+    return replay_team_payload(data, read_prompt)
+
+
+def replay_team_payload(data, read_prompt=None):
     """A saved team run, rebuilt for replay from the responses it records.
 
     Nothing the run derived is taken as written. Every recorded response is
