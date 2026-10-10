@@ -33,6 +33,23 @@ def tearDownModule():
 
 
 class FamilyUnreadTests(unittest.TestCase):
+    def test_cyclic_family_hidden_unread_uses_the_visible_head_in_both_branch_orders(self):
+        for head, child in (("Cycle A", "Cycle B"), ("Cycle B", "Cycle A")):
+            with self.subTest(head=head):
+                forks = new_forks()
+                forks["branches"].update({head: [], child: []})
+                forks["origins"] = {head: {"parent": child}, child: {"parent": head}}
+                closed = conversations.conversation_list_update(forks, [], unread=frozenset({child}))
+                labels = {name: label for label, name in closed["choices"]}
+                self.assertEqual(list(labels), [MAIN_BRANCH, head])
+                self.assertTrue(labels[head].startswith(conversations.UNREAD_MARK))
+                forks[FAMILY_VIEW] = {head: True}
+                opened = conversations.conversation_list_update(forks, [], unread=frozenset({child}))
+                labels = {name: label for label, name in opened["choices"]}
+                self.assertEqual(list(labels), [MAIN_BRANCH, head, child])
+                self.assertFalse(labels[head].startswith(conversations.UNREAD_MARK))
+                self.assertTrue(labels[child].startswith(conversations.UNREAD_MARK + " ↳ "))
+
     def test_hidden_unread_child_marks_head_and_open_child_marks_itself(self):
         forks = new_forks()
         forks["branches"].update({"Fork 1": [], "Fork 2": []})

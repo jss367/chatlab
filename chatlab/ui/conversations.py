@@ -91,7 +91,9 @@ def conversation_list_update(
 
     choices = branch_choices(forks, turns, running)
     shown = {name for _label, name in choices}
-    family_names = {name for name in forks.get("branches", {})
+    # Cyclic ancestry selects the first eligible branch, exactly as choices
+    # does. Preserve insertion order rather than passing an unordered set.
+    family_names = {name: None for name in forks.get("branches", {})
                     if branch_archived(forks, name) == bool(forks.get(ARCHIVED_VIEW))}
     hidden_unread_heads = {
         family_head(forks, name, family_names)
