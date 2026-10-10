@@ -52,7 +52,9 @@ from chatlab.ui.common import (
     QUIET_TICK,
     show_page,
 )
-from chatlab.ui.conversation_rows import ARCHIVE_BRIDGE_ID, CONVERSATION_ROWS_JS, DELETE_BRIDGE_ID
+from chatlab.ui.conversation_rows import (
+    ARCHIVE_BRIDGE_ID, CONVERSATION_ROWS_JS, DELETE_BRIDGE_ID, FAMILY_BRIDGE_ID,
+)
 from chatlab.ui.conversations import (
     archive_conversation,
     delete_conversation,
@@ -201,6 +203,7 @@ class ConversationPane:
     # The bridges a row's Archive, Restore and Delete write into.
     archive_action: gr.Textbox
     delete_action: gr.Textbox
+    family_action: gr.Textbox
     clear_button: gr.Button
     clear_confirm: gr.Column
     clear_question: gr.Markdown
@@ -518,6 +521,7 @@ def _build_conversation_pane() -> ConversationPane:
         # them out of the DOM where the page script has to find them.
         archive_action = gr.Textbox(elem_id=ARCHIVE_BRIDGE_ID, elem_classes=[MENU_BRIDGE_CLASS])
         delete_action = gr.Textbox(elem_id=DELETE_BRIDGE_ID, elem_classes=[MENU_BRIDGE_CLASS])
+        family_action = gr.Textbox(elem_id=FAMILY_BRIDGE_ID, elem_classes=[MENU_BRIDGE_CLASS])
         # Named for what it takes: this empties the conversation on
         # screen and deletes every other one with it. It stands under
         # the list of everything it would take rather than under one
@@ -545,6 +549,7 @@ def _build_conversation_pane() -> ConversationPane:
         archive_button=archive_button,
         archive_action=archive_action,
         delete_action=delete_action,
+        family_action=family_action,
         clear_button=clear_button,
         clear_confirm=clear_confirm,
         clear_question=clear_question,
@@ -1058,6 +1063,12 @@ def _wire_conversations(
     pane.archive_button.click(
         conversation_events.toggle_archive,
         [states.conversation, states.forks, background_state],
+        [pane.conversation_list, states.forks],
+        concurrency_id=CONVERSATION_PANE_QUEUE,
+    )
+    pane.family_action.input(
+        conversation_events.toggle_family,
+        [pane.family_action, states.conversation, states.forks, background_state],
         [pane.conversation_list, states.forks],
         concurrency_id=CONVERSATION_PANE_QUEUE,
     )

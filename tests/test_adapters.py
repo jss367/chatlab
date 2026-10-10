@@ -263,6 +263,7 @@ class AdapterLoadTests(unittest.TestCase):
     def build(
         self, root: Path, extra_token: str | None = None,
         padding: int = 0, trained_rows: int | None = None,
+        saved_modules: tuple[str, ...] = ("embed_tokens", "lm_head"),
     ) -> tuple[Path, object]:
         """``padding`` pads the base's embeddings past the tokenizer, and
         ``trained_rows`` resizes them before training and saves them whole
@@ -285,7 +286,7 @@ class AdapterLoadTests(unittest.TestCase):
         saved = {}
         if trained_rows is not None:
             base.resize_token_embeddings(trained_rows)
-            saved = {"modules_to_save": ["embed_tokens", "lm_head"]}
+            saved = {"modules_to_save": list(saved_modules)}
         # Nonzero B matrices, so the merge visibly changes the weights.
         lora = get_peft_model(base, LoraConfig(
             r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"],
@@ -366,6 +367,8 @@ class AdapterLoadTests(unittest.TestCase):
 
         self.assertIn("<persona>", tokenizer.get_vocab())
         self.assertEqual(model.get_input_embeddings().weight.shape[0], len(tokenizer))
+        # The grown rows are drawn afresh on each load, so no reload matches it.
+        self.assertTrue(model.chatlab_unsaved_weights)
 
     def test_saved_embeddings_set_the_base_size_in_either_direction(self):
         import torch
@@ -384,6 +387,21 @@ class AdapterLoadTests(unittest.TestCase):
 
                 self.assertEqual(model.get_input_embeddings().weight.shape[0], rows)
                 torch.testing.assert_close(logits, expected)
+                self.assertFalse(model.chatlab_unsaved_weights)
+
+    def test_a_grown_matrix_the_adapter_did_not_save_keeps_fresh_rows(self):
+        import torch
+
+        tokenizer = tiny_tokenizer.build()
+        for kept in ("embed_tokens", "lm_head"):
+            with self.subTest(kept=kept), tempfile.TemporaryDirectory() as root:
+                path, _ = self.build(
+                    Path(root), trained_rows=len(tokenizer) + 8, saved_modules=(kept,)
+                )
+                model, _tokenizer, _pipeline, _device = model_loading._read_text_model(
+                    path, torch, "cpu", torch.float32, None, "full"
+                )
+                self.assertTrue(model.chatlab_unsaved_weights)
 
     def test_a_quantized_choice_loads_the_adapter_at_full_precision(self):
         import torch

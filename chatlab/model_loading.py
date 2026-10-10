@@ -312,6 +312,22 @@ def adapter_base_for_load(adapter_path: Path) -> Path:
     return snapshot
 
 
+def _from_checkpoint(model_class, local_path: Path, **options):
+    """``model_class.from_pretrained``, marked when the checkpoint fell short.
+
+    A tensor the checkpoint lacks, or holds at another shape, is initialized
+    afresh from whatever the random state is, so two loads of the same
+    snapshot differ there. Such a model is marked ``chatlab_unsaved_weights``
+    and no reload is taken to hold the same weights as it.
+    """
+
+    model, info = model_class.from_pretrained(
+        local_path, local_files_only=True, output_loading_info=True, **options
+    )
+    model.chatlab_unsaved_weights = bool(info.get("missing_keys") or info.get("mismatched_keys"))
+    return model
+
+
 def _read_text_model(
     local_path: Path, torch, backend: str, dtype, bits: int | None, precision: str
 ) -> ReadWeights:
@@ -371,9 +387,9 @@ def _read_text_model(
         revision = f"{revision}+{own}" if revision and own else None
 
     if backend == "cuda":
-        model = merged(model_class.from_pretrained(
+        model = merged(_from_checkpoint(
+            model_class,
             local_path,
-            local_files_only=True,
             dtype=dtype,
             device_map="auto",
             low_cpu_mem_usage=True,
@@ -401,9 +417,9 @@ def _read_text_model(
             ) from error
 
         try:
-            model = model_class.from_pretrained(
+            model = _from_checkpoint(
+                model_class,
                 local_path,
-                local_files_only=True,
                 dtype=dtype,
                 device_map="mps",
                 quantization_config=MetalConfig(
@@ -424,17 +440,17 @@ def _read_text_model(
         # to read and convert, 3 to copy across) and had not finished after
         # seven minutes the other way. An adapter is merged before the copy
         # too, in host memory, for the same reason.
-        model = merged(model_class.from_pretrained(
+        model = merged(_from_checkpoint(
+            model_class,
             local_path,
-            local_files_only=True,
             dtype=dtype,
             low_cpu_mem_usage=True,
         )).to("mps")
         device_name = "Apple Metal (MPS)"
     else:
-        model = merged(model_class.from_pretrained(
+        model = merged(_from_checkpoint(
+            model_class,
             local_path,
-            local_files_only=True,
             dtype=dtype,
             low_cpu_mem_usage=True,
         ))
@@ -784,10 +800,21 @@ class LoadingMixin:
         self.precision = precision
         self.loaded_bytes = estimated
         self.load_count += 1
+        load_id = f"{model_id}#{self.load_count}"
+        # A Transformers model knows the revision it was read at, both halves
+        # of a merged adapter included; the other kinds are their snapshot. An
+        # adapter that grew the embeddings without saving them has rows no
+        # other load shares, as does a checkpoint short of a tensor, so it is
+        # recorded as matching nothing.
+        revision = (
+            checkpoint_revision(model) if kind == TEXT_KIND else snapshot_revision(local_path)
+        )
+        if getattr(model, "chatlab_unsaved_weights", False):
+            revision = None
         with self._loaded_lock:
-            self._loaded = LoadedModel(
-                model_id, device_name, precision, f"{model_id}#{self.load_count}"
-            )
+            self._loaded = LoadedModel(model_id, device_name, precision, load_id)
+            if revision is not None:
+                self._load_weights[load_id] = (kind, model_id, revision, precision, device_name)
         if adapter:
             logger.info(
                 "Merged LoRA adapter %s into %s",

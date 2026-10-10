@@ -14,7 +14,9 @@ import gradio as gr
 
 from chatlab import app
 from chatlab.ui import common, icons, models_page, runtime
-from chatlab.ui.conversation_rows import ARCHIVE_BRIDGE_ID, CONVERSATION_ROWS_JS, DELETE_BRIDGE_ID
+from chatlab.ui.conversation_rows import (
+    ARCHIVE_BRIDGE_ID, CONVERSATION_ROWS_JS, DELETE_BRIDGE_ID, FAMILY_BRIDGE_ID,
+)
 from chatlab.ui.model_finder import PICK_BRIDGE_ID
 from chatlab.ui.model_rows import MODEL_ACTION_BRIDGE_ID, MODEL_LIST_ID, MODEL_ROWS_JS
 from chatlab import settings
@@ -891,6 +893,7 @@ class PageLayoutTests(unittest.TestCase):
         for elem_id, handler in (
             (ARCHIVE_BRIDGE_ID, "archive_conversation"),
             (DELETE_BRIDGE_ID, "delete_conversation"),
+            (FAMILY_BRIDGE_ID, "toggle_family"),
         ):
             with self.subTest(bridge=elem_id):
                 bridge = self.by_id(elem_id)
@@ -899,6 +902,10 @@ class PageLayoutTests(unittest.TestCase):
                 self.assertIn(json.dumps(elem_id), CONVERSATION_ROWS_JS)
                 ((block_id, event),) = listeners_named(self.demo, handler)[0].targets
                 self.assertEqual((block_id, event), (bridge._id, "input"))
+
+    def test_a_family_toggle_redraws_the_list(self):
+        (toggle,) = listeners_named(self.demo, "toggle_family")
+        self.assertIn(self.by_id("conversation-list"), toggle.outputs)
 
     def test_the_archived_button_turns_the_list(self):
         (toggle,) = listeners_named(self.demo, "toggle_archive")

@@ -113,6 +113,10 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
         # can be told from state produced under the next even when both came
         # from the same repository ID (a re-download at a newer revision).
         self.load_count = 0
+        # The weights each load of this session held, by load ID, so a reply
+        # stamped with an earlier load can still be continued after the same
+        # weights are loaded again; see :meth:`load_for`.
+        self._load_weights: dict[str, tuple] = {}
         # A fitted lens belongs to one load, including its exact checkpoint.
         # The opaque import ID prevents another browser tab using its replacement.
         self._jacobian_lens = None
@@ -246,6 +250,26 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
         if not self.in_memory:
             return None
         return f"{self.model_id}#{self.load_count}"
+
+    def load_for(self, load_id: str | None) -> str | None:
+        """The load in memory if it holds the weights ``load_id`` held, else ``load_id``.
+
+        A load ID changes on every load, even of the same snapshot, so a reply
+        written before a reload would otherwise never match the model again.
+        Two loads hold the same weights when they read the same model at the
+        same revision, precision and device; anything stamped with the
+        earlier one can be read back by the later. A load whose revision went
+        unrecorded matches nothing but itself. The caller still hands the
+        result down to be compared under the model lock, so a load landing
+        after this call is refused there as it always was.
+        """
+
+        with self._loaded_lock:
+            current = self._loaded.load_id
+            weights = self._load_weights.get(load_id)
+            if current is not None and weights is not None and weights == self._load_weights.get(current):
+                return current
+        return load_id
 
     @property
     def busy(self) -> bool:

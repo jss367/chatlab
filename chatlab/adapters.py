@@ -159,39 +159,53 @@ def has_tokenizer(snapshot: Path) -> bool:
     return (snapshot / "tokenizer_config.json").is_file()
 
 
-def saved_embedding_rows(model, adapter_path: Path) -> int | None:
-    """How many token rows the adapter saved its own embedding matrix with.
+def embedding_names(model) -> list[str]:
+    """The names of the model's embedding matrices, each weight once.
+
+    The input side and the output side, or the input side alone when the
+    output head is tied to it and so holds no rows of its own.
+    """
+
+    names = {module: name for name, module in model.named_modules()}
+    found, weights = [], []
+    for module in (model.get_input_embeddings(), model.get_output_embeddings()):
+        weight = getattr(module, "weight", None)
+        if module in names and not any(weight is seen for seen in weights):
+            found.append(names[module])
+            weights.append(weight)
+    return found
+
+
+def saved_embeddings(model, adapter_path: Path) -> dict[str, int]:
+    """The embedding matrices the adapter saved whole, by name, with their rows.
 
     An adapter trained with the embeddings in ``modules_to_save``, or with
     LoRA on them, saves the whole matrix, input side or output side, keyed
     by the module's name in the model under PEFT's ``base_model.model.``
     prefix (``.base_layer`` between the two for the LoRA case). Only the
-    shapes are read, not the tensors. ``None`` when it saved neither.
+    shapes are read, not the tensors. Empty when it saved neither.
     """
 
-    names = {module: name for name, module in model.named_modules()}
-    keys = set()
-    for module in (model.get_input_embeddings(), model.get_output_embeddings()):
-        if module in names:
-            prefix = f"base_model.model.{names[module]}"
-            keys.update((f"{prefix}.weight", f"{prefix}.base_layer.weight"))
+    keys = {}
+    for name in embedding_names(model):
+        prefix = f"base_model.model.{name}"
+        keys.update({f"{prefix}.weight": name, f"{prefix}.base_layer.weight": name})
     safetensors = Path(adapter_path) / ADAPTER_WEIGHTS[0]
     if safetensors.is_file():
         from safetensors import safe_open
 
         with safe_open(str(safetensors), framework="pt") as weights:
-            for key in keys.intersection(weights.keys()):
-                return weights.get_slice(key).get_shape()[0]
-        return None
+            return {
+                keys[key]: weights.get_slice(key).get_shape()[0]
+                for key in keys.keys() & set(weights.keys())
+            }
     import torch
 
     weights = torch.load(
         Path(adapter_path) / ADAPTER_WEIGHTS[1], map_location="cpu",
         weights_only=True, mmap=True,
     )
-    for key in keys.intersection(weights):
-        return weights[key].shape[0]
-    return None
+    return {keys[key]: weights[key].shape[0] for key in keys.keys() & set(weights)}
 
 
 def merge_adapter(model, adapter_path: Path, vocabulary: int | None = None):
@@ -209,16 +223,29 @@ def merge_adapter(model, adapter_path: Path, vocabulary: int | None = None):
     embedding matrix. Then the base is resized only ever upwards: many
     checkpoints pad the matrix past the tokenizer's length, and cutting
     those rows off, with nothing saved to put in their place, would break
-    the model.
+    the model. The rows added then are initialized afresh on every load, as
+    are those added to a matrix the adapter did not save beside one it did,
+    so the merged model is marked ``chatlab_unsaved_weights``: two loads of it
+    hold different weights however alike their revisions are.
     """
 
     from peft import PeftModel
 
+    # The base's own shortfall, if it had one, outlives the merge.
+    unsaved_base = getattr(model, "chatlab_unsaved_weights", False)
     rows = model.get_input_embeddings().weight.shape[0]
-    saved = saved_embedding_rows(model, adapter_path)
+    matrices = saved_embeddings(model, adapter_path)
+    saved = max(matrices.values(), default=None)
+    unsaved_rows = False
     if saved is not None and saved != rows:
         model.resize_token_embeddings(saved)
+        # Growing adds rows to every matrix; one the adapter did not save
+        # keeps the fresh ones.
+        unsaved_rows = saved > rows and len(matrices) < len(embedding_names(model))
     elif saved is None and vocabulary is not None and vocabulary > rows:
         model.resize_token_embeddings(vocabulary)
+        unsaved_rows = True
     wrapped = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
-    return wrapped.merge_and_unload()
+    merged = wrapped.merge_and_unload()
+    merged.chatlab_unsaved_weights = unsaved_base or unsaved_rows
+    return merged

@@ -31,7 +31,7 @@ from chatlab.conversation import (
     display_messages, put_branch, put_branch_sampling,
 )
 from chatlab.ui.common import STOP_LABEL, finalize_partial
-from chatlab.ui.conversations import conversation_list_update, show_archive
+from chatlab.ui.conversations import conversation_list_update, open_family, show_archive
 from chatlab.ui.outputs import (
     COMPOSER_OUTPUT_NAMES, EDITOR_OUTPUT_NAMES, POLL_OUTPUT_NAMES, positional, skipped,
 )
@@ -80,6 +80,9 @@ class ConversationJob:
         self.new_branch = None
         self.save_receipt = None
         self.save_names = set()
+        # Conversations whose reply finished and the reader has not opened
+        # since. Outlives a run, so starting another keeps the earlier dots.
+        self.unread = set()
         with _JOBS_LOCK:
             _JOBS.add(self)
 
@@ -204,6 +207,11 @@ class ConversationJob:
                 frame["status"] = error or "Stopped. Any partial response was kept."
             self._publish(frame)
             receipt = self.save_receipt
+            # A run the reader stopped is one they already know about.
+            # Marked before the flush below, so opening the conversation
+            # while it saves takes the mark off for good.
+            if not self.cancel.is_set():
+                self.unread.add(self.owner)
         # Disk latency must not hold the job lock or block UI polling/Stop.
         if receipt is not None and not library_writer.flush(receipt):
             logger.warning("Final conversation save failed for %s", self.owner)
@@ -214,6 +222,8 @@ class ConversationJob:
         with self.lock:
             if self.running:
                 self.cancel.set()
+                # Stop can land after _finish marked the run, during its save.
+                self.unread.discard(self.owner)
 
     def merge(self, forks, turns):
         """Bring the source transcript up to date without claiming another branch."""
@@ -261,7 +271,9 @@ class ConversationJob:
     def choices(self, forks, turns):
         with self.lock:
             running = self.owner if self.running else None
-        return conversation_list_update(forks, turns, running)
+            self.unread.discard(forks["active"])
+            unread = frozenset(self.unread)
+        return conversation_list_update(forks, turns, running, unread)
 
     def render(self, forks, turns, scale):
         with self.lock:
@@ -384,6 +396,9 @@ class ConversationEvents:
             forks, turns = job.merge(data[self.forks], data[self.turns])
             active_before = forks["active"]
             with job.lock:
+                # A reply that finished in view is read, even when the reader
+                # leaves before a poll has redrawn the list.
+                job.unread.discard(active_before)
                 owns_source = (
                     job.saved is not None
                     and job.owner in forks["branches"]
@@ -535,4 +550,10 @@ class ConversationEvents:
         """Turn the list to the archive, or back to the conversations in use."""
 
         forks = show_archive(forks, not (forks or {}).get(ARCHIVED_VIEW))
+        return job.choices(forks, turns), forks
+
+    def toggle_family(self, action, turns, forks, job):
+        """Open or close the family a row's toggle named."""
+
+        forks = open_family(forks, action)
         return job.choices(forks, turns), forks

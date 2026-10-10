@@ -70,6 +70,11 @@ FORK_PREFIX = "Fork"
 CHAT_PREFIX = "Chat"
 # The key in the forks that says the pane is showing the archive.
 ARCHIVED_VIEW = "_archived_view"
+# The key in the forks that names the families the reader has opened in the
+# list, by the conversation at their head. A page's view, never saved.
+FAMILY_VIEW = "_family_view"
+# Leads a fork's row in the list, where it sits under its family's head.
+FORK_ROW_MARK = "↳ "
 
 # How much of a conversation's first message the list shows as its title.
 TITLE_LIMIT = 40
@@ -552,6 +557,7 @@ def copy_forks(forks: dict | None) -> dict:
         **({"_steering_requests": forks["_steering_requests"]} if "_steering_requests" in forks else {}),
         # Which of its two lists the pane is showing. A page's view, never saved.
         **({ARCHIVED_VIEW: True} if forks.get(ARCHIVED_VIEW) else {}),
+        **({FAMILY_VIEW: dict(forks[FAMILY_VIEW])} if forks.get(FAMILY_VIEW) else {}),
         "active": forks.get("active", MAIN_BRANCH),
         "branches": {
             name: copy_turns(turns) for name, turns in forks.get("branches", {}).items()
@@ -858,24 +864,124 @@ def branch_label(name: str, turns: list[dict] | None) -> str:
     return f"{head}\n{detail}"
 
 
-def branch_choices(forks: dict | None, turns: list[dict] | None) -> list[tuple[str, str]]:
+def fork_row_label(name: str, turns: list[dict] | None, head: list[dict] | None) -> str:
+    """The one-line entry for a fork, under its family's head ``head``.
+
+    The title and models are left out where the head's entry already says
+    them, which is nearly always: a fork starts as a copy of where it came
+    from, and five forks of one question would otherwise repeat that
+    question and its model five times.
+    """
+
+    summary, above = describe_branch(turns), describe_branch(head)
+    parts = [name]
+    if summary["title"] != above["title"]:
+        parts.append(summary["title"] or "No messages yet")
+    if not summary["replies"]:
+        if summary["title"]:
+            parts.append("No replies yet")
+    else:
+        if summary["models"] != above["models"]:
+            parts.append(" + ".join(summary["models"]) or "Model not recorded")
+        if summary["tokens"] is not None:
+            parts.append(f"{summary['tokens']:,} tokens")
+    return FORK_ROW_MARK + " · ".join(parts)
+
+
+def family_head(
+    forks: dict, name: str, listed, heads: dict | None = None, order: dict | None = None,
+) -> str:
+    """The conversation at the head of ``name``'s family among the ``listed`` ones.
+
+    A fork belongs to the family of the conversation it was forked from,
+    followed back through each parent still in the list. A fork whose
+    parent was deleted, or sits in the other list, heads a family of its own.
+    Origins are validated one at a time, so a file can carry a loop of
+    parents; every branch on or behind it is headed by whichever branch of
+    the loop the list holds first, so each lands in the list exactly once.
+
+    ``heads`` caches the answer for every branch walked through, for a caller
+    resolving the whole list: the list is redrawn on every streaming frame,
+    and a long chain of forks of forks walked afresh from each of its
+    branches would make that redraw quadratic in the chain.
+    ``order`` shares the insertion-order ranks across that same pass; it is
+    filled only when a cycle needs a canonical head.
+    """
+
+    heads = {} if heads is None else heads
+    origins = forks.get("origins") or {}
+    chain = [name]
+    position = {name: 0}
+    while chain[-1] not in heads:
+        parent = (origins.get(chain[-1]) or {}).get("parent")
+        if parent not in listed:
+            head = chain[-1]
+            break
+        if parent in position:
+            if order is None:
+                order = {}
+            if not order:
+                order.update((branch, index) for index, branch in enumerate(listed))
+            head = min(chain[position[parent]:], key=order.__getitem__)
+            break
+        position[parent] = len(chain)
+        chain.append(parent)
+    else:
+        head = heads[chain[-1]]
+    for branch in chain:
+        heads[branch] = head
+    return head
+
+
+def branch_choices(
+    forks: dict | None, turns: list[dict] | None, running: str | None = None,
+) -> list[tuple[str, str]]:
     """``(label, name)`` for every branch in the list on show, the active one read from ``turns``.
 
     The pane shows either the branches in use or, with ``ARCHIVED_VIEW`` set,
     the archived ones. The active branch's entry in ``forks`` is stale by
     design (see the forks section above), so its turns come from the
     conversation state instead.
+
+    Forks sit under the head of their family (see :func:`family_head`),
+    which says how many there are. A family is closed until the reader opens
+    it (``FAMILY_VIEW``), and a closed one still shows the fork on screen.
+    ``running`` names a branch answering in the background, which the list
+    marks as generating, on its family's head when its own row is hidden.
     """
 
     forks = forks or new_forks()
     active = forks.get("active", MAIN_BRANCH)
     archive = bool(forks.get(ARCHIVED_VIEW))
+    listed = {
+        name: turns if name == active else stored
+        for name, stored in forks.get("branches", {}).items()
+        if branch_archived(forks, name) == archive
+    }
+    heads: dict[str, str] = {}
+    order: dict[str, int] = {}
+    families: dict[str, list[str]] = {}
+    for name in listed:
+        families.setdefault(family_head(forks, name, listed, heads, order), [])
+    for name in listed:
+        head = heads[name]
+        if name != head:
+            families[head].append(name)
+    opened = forks.get(FAMILY_VIEW) or {}
     choices = []
-    for name, stored in forks.get("branches", {}).items():
-        if branch_archived(forks, name) != archive:
-            continue
-        branch = turns if name == active else stored
-        choices.append((branch_label(name, branch), name))
+    for head, members in families.items():
+        shown = members if opened.get(head) else [name for name in members if name == active]
+        label = branch_label(head, listed[head])
+        if members:
+            label += f" · {len(members)} fork{'' if len(members) == 1 else 's'}"
+        if running == head:
+            label += " · Generating…"
+        elif running in members and running not in shown:
+            label += f" · {running} generating…"
+        choices.append((label, head))
+        for name in shown:
+            row = fork_row_label(name, listed[name], listed[head])
+            choices.append((f"{row} · Generating…" if name == running else row, name))
     return choices
 
 
