@@ -110,10 +110,12 @@ The manifest can declare:
   pilot's columns are used.
 
 `model_profiles` name each profile's parent `repo` and `revision`, and an optional `adapter` with its own
-`repo`, `revision` and `subfolder`. `validation` must record `replay_verified: true` and
+`repo`, `revision` and `subfolder`; either side may name a `subfolder`, which must be a string. `validation` must record `replay_verified: true` and
 `reliability_gate_passed`; ChatLab shows the gate result and does not recompute it. `exporter_version`,
-`scenario_version` and `reply_format` are recorded for provenance. **Open in Chat** puts a reply's leading
-`<think>` block in Chat's reasoning block.
+`scenario_version` are recorded for provenance, and each game's `scenario_version` must equal the
+manifest's. Under `reply_format: reasoning_then_json`, **Open in Chat** puts the text before the last
+`</think>` in Chat's reasoning block. The optional boolean `reasoning_prefilled` defaults to `true`: a reply
+with no closing marker is then unfinished reasoning, even if it contains JSON.
 
 The envelope holds run/game identity, configuration, profiles, provenance, validation, roster, ordered
 phases and turns, unchanged original event IDs/payloads, snapshots, scores, and factual diagnostics.

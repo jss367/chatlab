@@ -155,6 +155,7 @@ class SupportTests(unittest.TestCase):
             lambda x: x['diagnostics'][0].update(event_refs=[]),
             lambda x: x['agents'][1].update(model_profile='organism'),
             lambda x: x['scores'].update(actually_resolved=999),
+            lambda x: x.update(scenario_version=2),
         ]
         for mutation in mutations:
             damaged = copy.deepcopy(g)
@@ -229,9 +230,9 @@ class NamedTeamTests(unittest.TestCase):
         self.assertIn('<td>cheater</td><td>2</td>', header)
 
     def test_open_in_chat_keeps_reasoning_out_of_the_answer(self):
-        _, _, g = self.game('cheater-s0-peer')
+        run, _, g = self.game('cheater-s0-peer')
         index = next(i for i, t in enumerate(g['turns']) if '</think>' in t['raw_reply'])
-        exported = bundles.conversation(g, index, include_reply=True)
+        exported = bundles.conversation(g, index, include_reply=True, manifest=run.manifest)
         reply = exported['turns'][-1]
         raw = g['turns'][index]['raw_reply']
         self.assertEqual(reply['content'], raw.rsplit('</think>', 1)[1].strip())
@@ -263,7 +264,9 @@ class NamedTeamTests(unittest.TestCase):
                        lambda m: m.update(score_columns={'game': [{'label': 'Missing', 'value': 'scores.nope'}]}),
                        lambda m: m.update(score_columns={'agent': [{'label': 'Distinct', 'distinct_cases': 'x'}]}),
                        lambda m: m.update(score_columns={'game': []}),
-                       lambda m: m.update(exporter_version='3')):
+                       lambda m: m.update(exporter_version='3'),
+                       lambda m: m['model_profiles']['cheater'].update(adapter={}),
+                       lambda m: m['model_profiles']['base'].update(adapter=False)):
             manifest = copy.deepcopy(run.manifest)
             mutate(manifest)
             manifests.append(manifest)
@@ -337,6 +340,120 @@ class NewExperimentTests(unittest.TestCase):
             damaged['agents'][5]['model_profile'] = 'base'
             with self.assertRaisesRegex(ValueError, 'composition disagrees'):
                 support.validate_game(run, entry, damaged)
+
+
+class SupportContractRegressionTests(unittest.TestCase):
+    def test_profile_table_distinguishes_parent_subfolders(self):
+        m = self.manifest()
+        m['model_profiles']['base']['parent']['subfolder'] = 'checkpoints/base'
+        m['model_profiles']['cheater']['parent']['subfolder'] = 'checkpoints/cheater'
+        text = support.scenario_html(SimpleNamespace(manifest=m, config=m['config']))
+        for profile_id in ('base', 'cheater'):
+            parent = m['model_profiles'][profile_id]['parent']
+            self.assertIn('<td>' + parent['repo'] + '/' + parent['subfolder'] + '</td>', text)
+
+    def manifest(self):
+        # Inert index only: two cheater seats and three base seats, ten turns
+        # per seat, with three rejected cheater turns. No game is replayed.
+        m = json.loads((FIXTURES / NAMED / 'manifest.json').read_text())
+        entry = next(e for e in m['games'] if e['composition'] == 'mixed')
+        m['games'] = [entry]
+        entry.update(phases=10, turns=50)
+        entry['scores']['invalid_turns'] = 3
+        for agent in entry['scores']['per_agent']:
+            agent['invalid_turns'] = 3 if agent['agent'] == 0 else 0
+        m['validation'].update(games=1, turns=50, invalid_turns=3, invalid_fraction=3 / 50,
+                               per_profile_invalid_fraction={'base': 0, 'cheater': 3 / 20},
+                               reliability_gate_passed=False)
+        return m
+
+    def test_reasoning_export_uses_the_declared_last_closing_boundary(self):
+        profile = self.manifest()['model_profiles']['base']
+        game = dict(scenario='customer_support', run_id='inert', game_id='inert',
+                    model_profiles={'base': profile}, turns=[dict(
+                        turn_id='inert', model_profile='base', accepted=True, error=None,
+                        messages=[dict(role='system', content='System'), dict(role='user', content='Question')])])
+        for raw in ('prefilled reasoning</think>{"ok": true}',
+                    'prefix <think>reasoning</think>{"ok": true}',
+                    '<think>first</think>more reasoning</think>{"ok": true}',
+                    '<think>unfinished', '{"ok": true}'):
+            with self.subTest(raw=raw):
+                game['turns'][0]['raw_reply'] = raw
+                manifest = {'reply_format': 'reasoning_then_json'}
+                reply = bundles.conversation(game, 0, include_reply=True, manifest=manifest)['turns'][-1]
+                self.assertEqual(reply['content'], (support.answer(manifest, raw) or '').strip())
+                if '</think>' in raw:
+                    self.assertEqual(reply['reasoning'], raw.rsplit('</think>', 1)[0].replace('<think>', '', 1).strip())
+                plain = bundles.conversation(game, 0, include_reply=True, manifest={'reply_format': 'json'})['turns'][-1]
+                self.assertEqual(plain['content'], raw)
+                self.assertNotIn('reasoning', plain)
+
+    def test_markerless_prefilled_truncation_is_reasoning_not_an_answer(self):
+        raw = 'Still considering a possible reply: {"ok": true}'
+        profile = self.manifest()['model_profiles']['base']
+        game = dict(scenario='customer_support', run_id='inert', game_id='inert',
+                    model_profiles={'base': profile}, turns=[dict(
+                        turn_id='inert', model_profile='base', accepted=False, error='truncated', raw_reply=raw,
+                        messages=[dict(role='system', content='System'), dict(role='user', content='Question')])])
+        for prefilled in (None, True, False):
+            manifest = {'reply_format': 'reasoning_then_json'}
+            if prefilled is not None:
+                manifest['reasoning_prefilled'] = prefilled
+            with self.subTest(prefilled=prefilled):
+                reply = bundles.conversation(game, 0, include_reply=True, manifest=manifest)['turns'][-1]
+                if prefilled is False:
+                    self.assertEqual(support.answer(manifest, raw), raw)
+                    self.assertEqual(reply['content'], raw)
+                    self.assertNotIn('reasoning', reply)
+                else:
+                    self.assertIsNone(support.answer(manifest, raw))
+                    self.assertEqual(reply['content'], '')
+                    self.assertEqual(reply['reasoning'], raw)
+
+    def test_genuine_markerless_json_requires_explicit_unprefilled_state(self):
+        raw = '{"ok": true}'
+        manifest = {'reply_format': 'reasoning_then_json', 'reasoning_prefilled': False}
+        self.assertEqual(support.answer(manifest, raw), raw)
+        self.assertIsNone(support.answer(dict(manifest, reasoning_prefilled=True), raw))
+        self.assertEqual(support.answer({'reply_format': 'json'}, raw), raw)
+
+    def test_prefill_state_and_repository_subfolders_are_typed(self):
+        for value in (None, 0, 'false', [], {}):
+            with self.subTest(prefill=value):
+                m = self.manifest()
+                m['reasoning_prefilled'] = value
+                with self.assertRaises(ValueError):
+                    support.validate_manifest(m)
+        for repository in ('parent', 'adapter'):
+            for value in (None, False, 0, 1, ['adapter'], {'path': 'adapter'}):
+                with self.subTest(repository=repository, subfolder=value):
+                    m = self.manifest()
+                    m['model_profiles']['cheater'][repository]['subfolder'] = value
+                    with self.assertRaises(ValueError):
+                        support.validate_manifest(m)
+            for value in ('', 'nested/adapter'):
+                m = self.manifest()
+                m['model_profiles']['cheater'][repository]['subfolder'] = value
+                support.validate_manifest(m)
+                self.assertIn('Customer support', support.scenario_html(SimpleNamespace(
+                    manifest=m, config=m['config'])))
+
+
+class SupportExportCallbackTests(unittest.TestCase):
+    setUp = invoice_tests.PageTests.setUp
+
+    def test_named_export_callback_passes_the_manifest_without_opening_chat(self):
+        runs, _, _ = self.fn['load_source'](str(FIXTURES), NAMED)
+        run = next(r for r in runs if r.run_id == NAMED)
+        entry = next(e for e in run.games if e['game_id'] == 'cheater-s0-peer')
+        game = bundles.read_game(run, entry)
+        index = next(i for i, t in enumerate(game['turns']) if '</think>' in t['raw_reply'])
+        chosen = {'run': run.run_id, 'file': entry['file']}
+        payload = self.chats[0][1](runs, chosen, index, None, True)
+        self.assertEqual(payload['turns'][-1]['content'],
+                         support.answer(run.manifest, game['turns'][index]['raw_reply']).strip())
+        self.assertTrue(payload['turns'][-1]['reasoning'])
+        self.assertEqual(self.manager.calls, [])
 
 
 class SupportPageTests(unittest.TestCase):

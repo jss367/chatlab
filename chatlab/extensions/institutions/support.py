@@ -72,9 +72,12 @@ def profiles(value):
     require(isinstance(value, dict) and value, 'missing model profiles')
     for key, p in value.items():
         require(isinstance(p, dict) and p.get('profile_id') == key, 'invalid model profile identity')
-        for repository in [p.get('parent')] + ([p['adapter']] if p.get('adapter') else []):
+        # An adapter is absent or null, or a full repository; {} must not read as original parent weights.
+        for repository in [p.get('parent')] + ([p['adapter']] if p.get('adapter') is not None else []):
             require(isinstance(repository, dict) and all(text(repository.get(k)) for k in ('repo', 'revision')),
                     'missing model repository or revision')
+            require('subfolder' not in repository or isinstance(repository['subfolder'], str),
+                    'invalid model repository subfolder')
 
 
 def compositions(m):
@@ -107,6 +110,17 @@ def score_columns(m):
 def organism(game, actor):
     """A seat whose recorded weights carry an adapter. Says nothing about how it behaves."""
     return bool(game['model_profiles'][game['agents'][actor]['model_profile']].get('adapter'))
+
+
+def answer(manifest, raw):
+    """The answer after a reply's reasoning, or None when its reasoning never closed."""
+    if manifest.get('reply_format', 'json') == 'json':
+        return raw
+    if '</think>' in raw:
+        return raw.rsplit('</think>', 1)[1]
+    # A prefilled opening is absent from generated text. Without a closing
+    # marker even a JSON fragment can still be unfinished reasoning.
+    return None if '<think>' in raw or manifest.get('reasoning_prefilled', True) else raw
 
 
 def paths(column):
@@ -150,6 +164,7 @@ def validate_manifest(m):
     require(isinstance(v, dict) and v.get('replay_verified') is True
             and type(v.get('reliability_gate_passed')) is bool, 'partial or unverified runs are unsupported')
     profiles(m.get('model_profiles'))
+    require('reasoning_prefilled' not in m or type(m['reasoning_prefilled']) is bool, 'invalid reasoning prefill state')
     if 'compositions' in m:
         teams = m['compositions']
         require(isinstance(teams, dict) and teams and all(
@@ -201,7 +216,8 @@ def validate_game(run, entry, game):
 
 def _validate_game(run, entry, game):
     require(isinstance(game, dict) and game.get('format') == 'chatlab-institutions-game-2', 'invalid game format')
-    require(game.get('scenario') == SCENARIO and integer(game.get('scenario_version')), 'unsupported game scenario')
+    require(game.get('scenario') == SCENARIO and game.get('scenario_version') == run.manifest['scenario_version']
+            and type(game.get('scenario_version')) is int, 'game scenario disagrees with manifest')
     for k in ('game_id', 'closure_rule', 'composition', 'event_seed', 'scores'):
         require(game.get(k) == entry[k], f'{k} disagrees with index')
     require(game.get('run_id') == run.run_id and game.get('model_profiles') == run.manifest['model_profiles'], 'manifest identity disagrees')
@@ -322,17 +338,19 @@ def case_history(game, case_id, index):
     return past, future
 
 
-def conversation(game, index, include_reply=False):
+def conversation(game, index, include_reply=False, *, manifest=None):
     require(type(index) is int and 0 <= index < len(game['turns']), 'select a turn first')
     t = game['turns'][index]
     messages = copy.deepcopy(t['messages'])
     if include_reply:
         raw = t['raw_reply']
         # A thinking model's reasoning goes in Chat's reasoning block; an unclosed block has no answer.
-        if raw.lstrip().startswith('<think>'):
-            body = raw.lstrip()[len('<think>'):]
-            reasoning, content = body.rsplit('</think>', 1) if '</think>' in body else (body, '')
-            messages.append(dict(role='assistant', content=content.strip(), reasoning=reasoning.strip()))
+        if (manifest or {}).get('reply_format', 'json') == 'reasoning_then_json' and (
+            '</think>' in raw or answer(manifest, raw) is None
+        ):
+            reasoning = raw.rsplit('</think>', 1)[0] if '</think>' in raw else raw
+            messages.append(dict(role='assistant', content=(answer(manifest, raw) or '').strip(),
+                                 reasoning=reasoning.replace('<think>', '', 1).strip()))
         else:
             messages.append(dict(role='assistant', content=raw))
     provenance = dict(run_id=game['run_id'], game_id=game['game_id'], turn_id=t['turn_id'],
@@ -370,9 +388,12 @@ def scenario_html(run):
     profile_rows = []
     for p in run.manifest['model_profiles'].values():
         adapter = p.get('adapter')
-        # One repository can hold several adapters; the subfolder tells them apart.
+        # One repository can hold several checkpoints or adapters; include
+        # either side's subfolder so its recorded weights are distinguishable.
+        parent = p['parent']
+        parent_name = parent['repo'] + ('/' + parent['subfolder'] if parent.get('subfolder') else '')
         adapter_name = adapter['repo'] + ('/' + adapter['subfolder'] if adapter.get('subfolder') else '') if adapter else 'None'
-        profile_rows.append([p['profile_id'], p['parent']['repo'], adapter_name,
+        profile_rows.append([p['profile_id'], parent_name, adapter_name,
                              p.get('merge_method') or 'Original parent weights'])
     return ('<div class="inst-box"><h3>' + html.escape(run.manifest['scenario_label']) + '</h3><p>Replay verified · Reliability gate '
             + ('passed' if v['reliability_gate_passed'] else 'failed — diagnostic run')
