@@ -661,7 +661,9 @@ def wire_model_choice(
     # Separate always_last listeners can replay an old Text query after a
     # newer Image event, even when their server concurrency group is shared.
     gr.on(
-        triggers=[demo.load, models.search_query.input, models.search_kind.input, models.search_order.input],
+        # change also observes the Images button's programmatic kind update,
+        # replacing any deferred Text payload with the newest Image search.
+        triggers=[demo.load, models.search_query.input, models.search_kind.change, models.search_order.input],
         fn=search_models, inputs=models.search_inputs, outputs=models.search_outputs,
         show_progress="hidden", trigger_mode="always_last", concurrency_id="model-search",
     )

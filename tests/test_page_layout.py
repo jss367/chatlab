@@ -1306,6 +1306,8 @@ class PageLayoutTests(unittest.TestCase):
         target_ids = {target[0] for target in shared.targets}
         self.assertIn(self.by_id("search-kind")._id, target_ids)
         self.assertIn(self.by_id("model-search-order")._id, target_ids)
+        self.assertIn((self.by_id("search-kind")._id, "change"), shared.targets)
+        self.assertNotIn((self.by_id("search-kind")._id, "input"), shared.targets)
         (enter,) = listeners_named(self.demo, "search_and_open")
         self.assertEqual(enter.trigger_mode, "multiple")
 
