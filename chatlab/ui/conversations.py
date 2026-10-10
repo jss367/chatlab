@@ -70,18 +70,25 @@ from chatlab.ui.pictures import strip_html as picture_strip
 # record of the sequence that led there.
 logger = logging.getLogger(__name__)
 
+# Prefixes a conversation whose reply finished while the reader was elsewhere.
+UNREAD_MARK = "●"
 
-def conversation_list_update(forks: dict, turns: list[dict] | None, running: str | None = None):
+
+def conversation_list_update(
+    forks: dict, turns: list[dict] | None, running: str | None = None, unread: frozenset = frozenset(),
+):
     """Redraw the list, with the active branch's turns read from ``turns``.
 
     ``running`` names a branch answering in the background, which the list
-    marks as generating. The active branch is selected only where the list
-    shows it: an archived conversation opened from the archive is not in the
-    list of those in use.
+    marks as generating. ``unread`` names branches whose reply finished while
+    the reader was elsewhere, which the list marks with a dot. The active
+    branch is selected only where the list shows it: an archived conversation
+    opened from the archive is not in the list of those in use.
     """
 
     choices = [
-        (f"{label} · Generating…" if name == running else label, name)
+        (f"{label} · Generating…" if name == running
+         else f"{UNREAD_MARK} {label}" if name in unread else label, name)
         for label, name in branch_choices(forks, turns)
     ]
     listed = forks["active"] in {name for _label, name in choices}

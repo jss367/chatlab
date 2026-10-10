@@ -205,6 +205,43 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertIn("Generating", choices["choices"][0][0])
         self.assertEqual(choices["choices"][0][1], MAIN_BRANCH)
 
+    def labels(self):
+        choices = self.job.choices(self.state[self.forks._id], self.state[self.turns._id])
+        return dict((name, label) for label, name in choices["choices"])
+
+    def test_reply_finished_while_away_is_marked_until_opened(self):
+        self.start()
+        self.switch("Chat 1")
+        self.finish()
+        self.call("poll")
+        self.assertTrue(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+        self.assertFalse(self.labels()["Chat 1"].startswith(conversations.UNREAD_MARK))
+        self.switch(MAIN_BRANCH)
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+        self.switch("Chat 1")
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
+    def test_reply_finished_in_view_is_not_marked(self):
+        self.start()
+        self.finish()
+        self.call("poll")
+        self.switch("Chat 1")
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
+    def test_reply_finished_in_view_is_not_marked_when_left_before_a_poll(self):
+        self.start()
+        self.finish()
+        self.switch("Chat 1")
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
+    def test_reply_stopped_while_away_is_not_marked(self):
+        self.start()
+        self.switch("Chat 1")
+        self.call("stop_generation")
+        self.finish()
+        self.call("poll")
+        self.assertFalse(self.labels()[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
     def test_state_is_independent_between_browser_sessions(self):
         other = SessionState(self.demo)[self.job_state._id]
         self.start()
@@ -630,6 +667,57 @@ class BackgroundSnapshotTests(unittest.TestCase):
                 worker.join(5)
             self.assertFalse(worker.is_alive())
             self.assertFalse(job.running)
+
+    def test_reply_opened_during_the_final_flush_stays_read(self):
+        job = ConversationJob()
+        job.owner = MAIN_BRANCH
+        job.saved = new_forks()
+        job.running = True
+        entered, release = threading.Event(), threading.Event()
+
+        def flush(receipt):
+            entered.set()
+            return release.wait(5)
+
+        with mock.patch.object(library_writer, "submit"), mock.patch.object(library_writer, "flush", flush):
+            job._publish({"turns": [make_turn("assistant", "partial")]})
+            worker = threading.Thread(target=job._finish)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                job.choices(job.saved, None)
+            finally:
+                release.set()
+                worker.join(5)
+        other = new_forks()
+        put_branch(other, "Chat 1", [])
+        other["active"] = "Chat 1"
+        put_branch(other, MAIN_BRANCH, [make_turn("assistant", "partial")])
+        labels = {name: label for label, name in job.choices(other, [])["choices"]}
+        self.assertFalse(labels[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+
+    def test_reply_stopped_during_the_final_flush_is_not_marked(self):
+        job = ConversationJob()
+        job.owner = MAIN_BRANCH
+        job.saved = new_forks()
+        job.running = True
+        entered, release = threading.Event(), threading.Event()
+
+        def flush(receipt):
+            entered.set()
+            return release.wait(5)
+
+        with mock.patch.object(library_writer, "submit"), mock.patch.object(library_writer, "flush", flush):
+            job._publish({"turns": [make_turn("assistant", "partial")]})
+            worker = threading.Thread(target=job._finish)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                job.stop()
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertNotIn(MAIN_BRANCH, job.unread)
 
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):
         class ImmutableMetric(dict):
