@@ -228,6 +228,9 @@ class FakeManager:
     def _stop_token_ids(self):
         return {0}
 
+    def load_for(self, load_id):
+        return load_id
+
     def encode_replacement(self, kept_ids, text, *, literal_prefill_tokens=0, load_id=None):
         return [ord(character) for character in text]
 
