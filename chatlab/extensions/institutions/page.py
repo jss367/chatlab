@@ -531,7 +531,9 @@ def build_page(context):
             return "", [], [], None
         if found.scenario == "customer_support":
             state = support.phase_state(game, index)
-            return support.phase_html(game, state), support.turn_rows(game, state), list(state['turns']), state['turns'][0]
+            # A phase may hold only boundary events and no turns.
+            return (support.phase_html(game, state), support.turn_rows(game, state), list(state['turns']),
+                    state['turns'][0] if state['turns'] else None)
         state = phase_state(game, found.arms.get(game["arm"], {}), index)
         return phase_html(game, state), turn_rows(game, state), list(state["turns"]), (
             state["turns"][0] if state["turns"] else None)

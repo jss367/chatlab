@@ -274,7 +274,9 @@ def _validate_game(run, entry, game):
         require(text(e.get('kind')) and isinstance(e.get('payload'), dict), 'invalid event')
         require(e.get('actor') is None or e['actor'] in agents, 'unknown event actor')
         require(e.get('case_id') is None or text(e['case_id']), 'invalid case reference')
-        require(e.get('turn_id') is None or (e['turn_id'] in turns and turns[e['turn_id']]['actor'] == e.get('actor')),
+        # The page opens an event's turn from the event's phase, so both must be the same phase.
+        require(e.get('turn_id') is None or (e['turn_id'] in turns and turns[e['turn_id']]['actor'] == e.get('actor')
+                                             and turns[e['turn_id']]['phase_id'] == e['phase_id']),
                 'invalid originating turn')
     diagnostics = game.get('diagnostics')
     require(isinstance(diagnostics, list), 'invalid diagnostics')

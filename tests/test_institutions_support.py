@@ -22,6 +22,15 @@ SYNTHETIC = 'synthetic-support-evidence'
 NAMED = 'support-reward-hacking-20261010T001335Z-smoke'
 
 
+def move_event_to_next_phase(game, event_id):
+    """Keep the event's turn link and actor but file it, and its phase list entry, under the next phase."""
+    event = game['events'][event_id]
+    index = next(i for i, p in enumerate(game['phases']) if p['phase_id'] == event['phase_id'])
+    game['phases'][index]['event_refs'].remove(event_id)
+    game['phases'][index + 1]['event_refs'].insert(0, event_id)
+    event['phase_id'] = game['phases'][index + 1]['phase_id']
+
+
 class SupportTests(unittest.TestCase):
     def run_bundle(self, name=FULL):
         return bundles.read_run(FIXTURES / name)[0]
@@ -156,6 +165,7 @@ class SupportTests(unittest.TestCase):
             lambda x: x['agents'][1].update(model_profile='organism'),
             lambda x: x['scores'].update(actually_resolved=999),
             lambda x: x.update(scenario_version=2),
+            lambda x: move_event_to_next_phase(x, 106),
         ]
         for mutation in mutations:
             damaged = copy.deepcopy(g)
@@ -299,6 +309,9 @@ def six_seat_bundle(root):
         seat.update(turn_id=phase['phase_id'] + '-a5', actor=5, model_profile='judge', event_refs=[])
         game['turns'].append(seat)
         phase['turn_refs'].append(seat['turn_id'])
+    # A phase with no turns, such as a briefing the scenario plays before anyone acts.
+    first = game['phases'][0]
+    game['phases'].insert(0, dict(first, phase_id='briefing', kind='briefing', turn_refs=[], event_refs=[], after=first['before']))
     scores = game['scores']
     scores['per_agent'].append(dict(copy.deepcopy(scores['per_agent'][-1]), agent=5, model='judge'))
     for a in scores['per_agent']:
@@ -308,7 +321,7 @@ def six_seat_bundle(root):
     path = root / entry['file']
     path.parent.mkdir(parents=True)
     path.write_bytes(data)
-    entry.update(closure_rule='jury', composition='six', turns=len(game['turns']), scores=scores,
+    entry.update(closure_rule='jury', composition='six', turns=len(game['turns']), phases=len(game['phases']), scores=scores,
                  sha256=hashlib.sha256(data).hexdigest())
     manifest['games'] = [entry]
     manifest['validation'].update(games=1, turns=entry['turns'])
@@ -532,3 +545,6 @@ class SupportPageTests(unittest.TestCase):
             _, turns, _, _ = self.fn['show_phase'](runs, picked[3], 1)
             self.assertEqual([row[1] for row in turns], [0, 1, 2, 3, 4, 5])
             self.assertTrue(self.fn['support_phase'](runs, picked[3], 1)[0])
+            # The leading phase holds no turns; it renders with no turn selected.
+            _, turns, keys, first = self.fn['show_phase'](runs, picked[3], 0)
+            self.assertEqual((turns, keys, first), ([], [], None))
