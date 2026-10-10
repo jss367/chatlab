@@ -2605,6 +2605,7 @@ def model_pane(
         cached = CacheStatus()
     # A cached MLX checkpoint says its own width, offline, and is packed at
     # it whether or not this machine can run it.
+    snapshot = None
     try:
         snapshot = snapshot_folder(cache_folder(chosen)) if cached.present else None
         local_bits = mlx_snapshot_bits(snapshot) if snapshot is not None else None

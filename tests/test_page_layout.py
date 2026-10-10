@@ -1297,10 +1297,17 @@ class PageLayoutTests(unittest.TestCase):
 
     def test_all_search_triggers_share_the_group_so_old_queries_cannot_overtake_kind_or_sort(self):
         searches = listeners_named(self.demo, "search_models") + listeners_named(self.demo, "search_and_open")
-        self.assertEqual(len(searches), 5)
+        self.assertEqual(len(searches), 2)
         for fn in searches:
             self.assertEqual(fn.concurrency_id, "model-search")
-            self.assertEqual(fn.trigger_mode, "always_last")
+        (shared,) = listeners_named(self.demo, "search_models")
+        self.assertEqual(shared.trigger_mode, "always_last")
+        self.assertEqual(len(shared.targets), 4)
+        target_ids = {target[0] for target in shared.targets}
+        self.assertIn(self.by_id("search-kind")._id, target_ids)
+        self.assertIn(self.by_id("model-search-order")._id, target_ids)
+        (enter,) = listeners_named(self.demo, "search_and_open")
+        self.assertEqual(enter.trigger_mode, "multiple")
 
     def test_the_marked_search_result_follows_the_id_box(self):
         # A row of My Models, the default or an extension writes the box

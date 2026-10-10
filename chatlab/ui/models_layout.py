@@ -657,19 +657,19 @@ def wire_model_choice(
     # The page loads with an empty box, which shows ChatLab's picks without
     # going online. Typing searches as it goes; only the last keystroke of a
     # burst is answered.
-    search_options = dict(show_progress="hidden", trigger_mode="always_last", concurrency_id="model-search")
-    demo.load(search_models, models.search_inputs, models.search_outputs, **search_options)
-    models.search_query.input(
-        search_models, models.search_inputs, models.search_outputs,
+    # One dependency owns the deferred payload across all these controls.
+    # Separate always_last listeners can replay an old Text query after a
+    # newer Image event, even when their server concurrency group is shared.
+    gr.on(
+        triggers=[demo.load, models.search_query.input, models.search_kind.input, models.search_order.input],
+        fn=search_models, inputs=models.search_inputs, outputs=models.search_outputs,
         show_progress="hidden", trigger_mode="always_last", concurrency_id="model-search",
     )
     # Enter searches too, and opens the model when what was typed is an ID.
     models.search_query.submit(
         search_and_open, models.search_inputs, [*models.search_outputs, models.search_pick],
-        show_progress="hidden", trigger_mode="always_last", concurrency_id="model-search",
+        show_progress="hidden", trigger_mode="multiple", concurrency_id="model-search",
     )
-    models.search_kind.input(search_models, models.search_inputs, models.search_outputs, **search_options)
-    models.search_order.input(search_models, models.search_inputs, models.search_outputs, **search_options)
     # The Images page's own way in. It is wired here rather than beside
     # the button because it sets both of this page's kind controls and
     # repaints both lists from them, which needs the two input lists

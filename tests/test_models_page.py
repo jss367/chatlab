@@ -2142,6 +2142,17 @@ class ModelPaneTests(unittest.TestCase):
         self.assertIn("<li class='yes'>Steering and probes", body)
         self.assertNotIn("as packed", body)
 
+    def test_unreadable_snapshot_still_draws_the_pane(self):
+        self.status = CacheStatus(cached_bytes=100, kind=TEXT_KIND)
+        for error in (OSError("snapshot unavailable"), ValueError("invalid snapshot")):
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                models_page, "snapshot_folder", side_effect=error
+            ):
+                head, precision, body, _ = pane("org/model")
+            self.assertIn("org/model", head)
+            self.assertTrue(precision["visible"])
+            self.assertIn("What you can do", body)
+
     def test_cached_adapter_ignores_quantized_radio_and_keeps_full_tools(self):
         self.status = CacheStatus(cached_bytes=100, kind=TEXT_KIND)
         with (mock.patch.object(models_page, "snapshot_folder", return_value=Path("/offline/fake")),
