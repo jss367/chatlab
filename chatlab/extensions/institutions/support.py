@@ -115,7 +115,8 @@ def validate_manifest(m):
         require(isinstance(teams, dict) and teams and all(
             isinstance(k, str) and k and isinstance(c, dict) and set(c) == {'label', 'roster'}
             and isinstance(c['label'], str) and c['label'] and isinstance(c['roster'], list) and len(c['roster']) == 5
-            and all(p in m['model_profiles'] for p in c['roster']) for k, c in teams.items()), 'invalid team compositions')
+            and all(isinstance(p, str) and p in m['model_profiles'] for p in c['roster'])
+            for k, c in teams.items()), 'invalid team compositions')
         require(m.get('reply_format') in REPLY_FORMATS, 'unknown reply format')
         require('reasoning_prefilled' not in m or type(m['reasoning_prefilled']) is bool,
                 'invalid reasoning prefill state')

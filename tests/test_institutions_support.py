@@ -288,6 +288,26 @@ class NamedTeamTests(unittest.TestCase):
 
 
 class SupportContractRegressionTests(unittest.TestCase):
+    def test_malformed_roster_ids_are_reported_as_contract_errors(self):
+        for profile_id in ([], ['base'], {}, {'profile': 'base'}, None, True, 0):
+            with self.subTest(profile_id=profile_id):
+                manifest = self.manifest()
+                manifest['compositions']['mixed']['roster'][0] = profile_id
+                with self.assertRaisesRegex(ValueError, 'invalid team compositions'):
+                    support.validate_manifest(manifest)
+                # A bad external manifest is skipped with a warning rather
+                # than aborting the whole bundle-root load.
+                with tempfile.TemporaryDirectory() as folder:
+                    valid = Path(folder) / 'valid'
+                    shutil.copytree(FIXTURES / NAMED, valid)
+                    run = Path(folder) / 'malformed'
+                    run.mkdir()
+                    (run / 'manifest.json').write_text(json.dumps(manifest))
+                    loaded, warnings = bundles.load_bundles(folder)
+                    self.assertEqual(len(loaded), 1)
+                    self.assertEqual(len(warnings), 1)
+                    self.assertIn('invalid team compositions', warnings[0])
+
     def test_version_two_keeps_the_fixed_profile_vocabulary(self):
         original = json.loads((FIXTURES / SMOKE / 'manifest.json').read_text())
         support.validate_manifest(original)
