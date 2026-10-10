@@ -4713,6 +4713,21 @@ class LoadWeightsTests(unittest.TestCase):
         self.assertEqual(self.manager.load_for(earlier), earlier)
         self.assertEqual(self.manager.load_for(later), later)
 
+    def test_weights_with_unsaved_rows_match_nothing_else(self):
+        # An adapter that grew the embeddings without saving them draws the
+        # new rows afresh on every load, whatever the revisions say.
+        read = model_loading._read_text_model
+
+        def unsaved(*args):
+            model, *rest = read(*args)
+            model.chatlab_unsaved_rows = True
+            return (model, *rest)
+
+        with mock.patch.object(model_loading, "_read_text_model", unsaved):
+            earlier = self.load(self.first)
+            self.load(self.first)
+        self.assertEqual(self.manager.load_for(earlier), earlier)
+
     def test_nothing_in_memory_continues_nothing(self):
         earlier = self.load(self.first)
         self.manager.unload()

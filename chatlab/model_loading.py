@@ -786,10 +786,14 @@ class LoadingMixin:
         self.load_count += 1
         load_id = f"{model_id}#{self.load_count}"
         # A Transformers model knows the revision it was read at, both halves
-        # of a merged adapter included; the other kinds are their snapshot.
+        # of a merged adapter included; the other kinds are their snapshot. An
+        # adapter that grew the embeddings without saving them has rows no
+        # other load shares, so it is recorded as matching nothing.
         revision = (
             checkpoint_revision(model) if kind == TEXT_KIND else snapshot_revision(local_path)
         )
+        if getattr(model, "chatlab_unsaved_rows", False):
+            revision = None
         with self._loaded_lock:
             self._loaded = LoadedModel(model_id, device_name, precision, load_id)
             if revision is not None:

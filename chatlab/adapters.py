@@ -209,16 +209,22 @@ def merge_adapter(model, adapter_path: Path, vocabulary: int | None = None):
     embedding matrix. Then the base is resized only ever upwards: many
     checkpoints pad the matrix past the tokenizer's length, and cutting
     those rows off, with nothing saved to put in their place, would break
-    the model.
+    the model. The rows added then are initialized afresh on every load, so
+    the merged model is marked ``chatlab_unsaved_rows``: two loads of it
+    hold different weights however alike their revisions are.
     """
 
     from peft import PeftModel
 
     rows = model.get_input_embeddings().weight.shape[0]
     saved = saved_embedding_rows(model, adapter_path)
+    unsaved_rows = False
     if saved is not None and saved != rows:
         model.resize_token_embeddings(saved)
     elif saved is None and vocabulary is not None and vocabulary > rows:
         model.resize_token_embeddings(vocabulary)
+        unsaved_rows = True
     wrapped = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
-    return wrapped.merge_and_unload()
+    merged = wrapped.merge_and_unload()
+    merged.chatlab_unsaved_rows = unsaved_rows
+    return merged
