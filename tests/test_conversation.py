@@ -19,6 +19,7 @@ from chatlab.conversation import (
     describe_branch,
     display_messages,
     drop_branch,
+    family_head,
     forget_measurements,
     fork_at,
     from_json,
@@ -779,6 +780,28 @@ class ConversationListTests(unittest.TestCase):
         choices = branch_choices(forks, forks["branches"][MAIN_BRANCH])
         self.assertEqual([name for _label, name in choices], [MAIN_BRANCH, "Fork 1"])
         self.assertFalse(choices[1][0].startswith("↳"))
+
+    def test_a_long_chain_of_forks_resolves_each_branch_once(self):
+        # The list is grouped on every streaming frame, so a chain of forks of
+        # forks must not be walked again from each of its branches.
+        forks, parent = new_forks(), MAIN_BRANCH
+        for index in range(1, 201):
+            forks["branches"][f"Fork {index}"] = []
+            forks["origins"][f"Fork {index}"] = {"parent": parent, "kind": "copy"}
+            parent = f"Fork {index}"
+        reads = []
+        origins = forks["origins"]
+
+        class Counted(dict):
+            def get(self, key, default=None):
+                reads.append(key)
+                return super().get(key, default)
+
+        forks["origins"] = Counted(origins)
+        heads = {}
+        for name in forks["branches"]:
+            self.assertEqual(family_head(forks, name, forks["branches"], heads), MAIN_BRANCH)
+        self.assertLessEqual(len(reads), 2 * len(forks["branches"]))
 
     def test_a_loop_of_parents_lists_each_branch_once(self):
         # Each origin is valid on its own, so a file can name A as B's parent

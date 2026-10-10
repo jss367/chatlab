@@ -95,8 +95,9 @@ def conversation_list_update(
     # does. Preserve insertion order rather than passing an unordered set.
     family_names = {name: None for name in forks.get("branches", {})
                     if branch_archived(forks, name) == bool(forks.get(ARCHIVED_VIEW))}
+    heads = {}
     hidden_unread_heads = {
-        family_head(forks, name, family_names)
+        family_head(forks, name, family_names, heads)
         for name in unread.intersection(family_names).difference(shown)
     }
     choices = [

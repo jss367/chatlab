@@ -888,7 +888,7 @@ def fork_row_label(name: str, turns: list[dict] | None, head: list[dict] | None)
     return FORK_ROW_MARK + " · ".join(parts)
 
 
-def family_head(forks: dict, name: str, listed) -> str:
+def family_head(forks: dict, name: str, listed, heads: dict | None = None) -> str:
     """The conversation at the head of ``name``'s family among the ``listed`` ones.
 
     A fork belongs to the family of the conversation it was forked from,
@@ -897,18 +897,33 @@ def family_head(forks: dict, name: str, listed) -> str:
     Origins are validated one at a time, so a file can carry a loop of
     parents; every branch on or behind it is headed by whichever branch of
     the loop the list holds first, so each lands in the list exactly once.
+
+    ``heads`` caches the answer for every branch walked through, for a caller
+    resolving the whole list: the list is redrawn on every streaming frame,
+    and a long chain of forks of forks walked afresh from each of its
+    branches would make that redraw quadratic in the chain.
     """
 
+    heads = {} if heads is None else heads
     origins = forks.get("origins") or {}
     chain = [name]
-    while True:
+    position = {name: 0}
+    while chain[-1] not in heads:
         parent = (origins.get(chain[-1]) or {}).get("parent")
         if parent not in listed:
-            return chain[-1]
-        if parent in chain:
-            order = list(listed)
-            return min(chain[chain.index(parent):], key=order.index)
+            head = chain[-1]
+            break
+        if parent in position:
+            order = {branch: index for index, branch in enumerate(listed)}
+            head = min(chain[position[parent]:], key=order.__getitem__)
+            break
+        position[parent] = len(chain)
         chain.append(parent)
+    else:
+        head = heads[chain[-1]]
+    for branch in chain:
+        heads[branch] = head
+    return head
 
 
 def branch_choices(
@@ -936,11 +951,12 @@ def branch_choices(
         for name, stored in forks.get("branches", {}).items()
         if branch_archived(forks, name) == archive
     }
+    heads: dict[str, str] = {}
     families: dict[str, list[str]] = {}
     for name in listed:
-        families.setdefault(family_head(forks, name, listed), [])
+        families.setdefault(family_head(forks, name, listed, heads), [])
     for name in listed:
-        head = family_head(forks, name, listed)
+        head = heads[name]
         if name != head:
             families[head].append(name)
     opened = forks.get(FAMILY_VIEW) or {}
