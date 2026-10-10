@@ -872,6 +872,8 @@ The token count is the size of the conversation as the model last saw it: every 
 
 Click a message before pressing Fork to fork at that point. Forking at a reply keeps the conversation through that reply, ready for a different next question. Forking at one of your own messages keeps what came before it and puts the message back in the input box so it can be reworded, the same shape **Undo** gives.
 
+Forks sit in the list under the conversation they came from, and a fork of a fork joins the same family. The family's first conversation says how many forks it has, and the arrow on its row shows or hides them. A hidden family still shows the fork on screen, and names a hidden fork that is generating. Each fork takes one line, naming only what differs from the conversation above it: its token count, and its first message or model where those changed.
+
 Each conversation carries its own token view, since the measurements live on the replies themselves; what switching conversations does clear is the prompt strip, the charts and the export, which describe one reply at a time. **Save conversation** writes the conversation on screen.
 
 Every conversation in the pane is kept between sessions, its own sampling

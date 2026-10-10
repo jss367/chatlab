@@ -31,7 +31,7 @@ from chatlab.conversation import (
     display_messages, put_branch, put_branch_sampling,
 )
 from chatlab.ui.common import STOP_LABEL, finalize_partial
-from chatlab.ui.conversations import conversation_list_update, show_archive
+from chatlab.ui.conversations import conversation_list_update, open_family, show_archive
 from chatlab.ui.outputs import (
     COMPOSER_OUTPUT_NAMES, EDITOR_OUTPUT_NAMES, POLL_OUTPUT_NAMES, positional, skipped,
 )
@@ -550,4 +550,10 @@ class ConversationEvents:
         """Turn the list to the archive, or back to the conversations in use."""
 
         forks = show_archive(forks, not (forks or {}).get(ARCHIVED_VIEW))
+        return job.choices(forks, turns), forks
+
+    def toggle_family(self, action, turns, forks, job):
+        """Open or close the family a row's toggle named."""
+
+        forks = open_family(forks, action)
         return job.choices(forks, turns), forks

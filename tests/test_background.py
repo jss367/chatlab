@@ -15,7 +15,7 @@ from chatlab import library
 from chatlab import library_writer
 import settings_sandbox
 from chatlab.ui import conversations
-from chatlab.conversation import ARCHIVED_VIEW, MAIN_BRANCH, make_turn, new_forks, put_branch
+from chatlab.conversation import ARCHIVED_VIEW, FAMILY_VIEW, MAIN_BRANCH, make_turn, new_forks, put_branch
 from chatlab.ui import runtime
 from chatlab.ui.background import ConversationJob
 from fakes import THINK_EOS, THINK_PIECES
@@ -30,6 +30,88 @@ def setUpModule():
 
 def tearDownModule():
     settings_sandbox.stop()
+
+
+class FamilyUnreadTests(unittest.TestCase):
+    def test_many_cycles_build_one_rank_map_per_grouping_and_unread_pass(self):
+        for count in (16, 32, 64, 128):
+            for reverse in (False, True):
+                with self.subTest(count=count, reverse=reverse):
+                    forks = new_forks()
+                    heads, children = [], []
+                    for index in range(count // 2):
+                        pair = [f"Cycle {index} A", f"Cycle {index} B"]
+                        if reverse:
+                            pair.reverse()
+                        head, child = pair
+                        heads.append(head)
+                        children.append(child)
+                        forks["branches"].update({head: [], child: []})
+                        forks["origins"].update({head: {"parent": child}, child: {"parent": head}})
+                    ranks = []
+
+                    def counted(values, start=0):
+                        for index, value in enumerate(values, start):
+                            ranks.append(value)
+                            yield index, value
+
+                    with mock.patch("chatlab.conversation.enumerate", counted, create=True):
+                        result = conversations.conversation_list_update(
+                            forks, [], unread=frozenset(children)
+                        )
+                    labels = {name: label for label, name in result["choices"]}
+                    self.assertEqual(list(labels), [MAIN_BRANCH, *heads])
+                    self.assertTrue(all(labels[head].startswith(conversations.UNREAD_MARK)
+                                        for head in heads))
+                    self.assertLessEqual(len(ranks), 2 * len(forks["branches"]))
+
+    def test_cyclic_family_hidden_unread_uses_the_visible_head_in_both_branch_orders(self):
+        for head, child in (("Cycle A", "Cycle B"), ("Cycle B", "Cycle A")):
+            with self.subTest(head=head):
+                forks = new_forks()
+                forks["branches"].update({head: [], child: []})
+                forks["origins"] = {head: {"parent": child}, child: {"parent": head}}
+                closed = conversations.conversation_list_update(forks, [], unread=frozenset({child}))
+                labels = {name: label for label, name in closed["choices"]}
+                self.assertEqual(list(labels), [MAIN_BRANCH, head])
+                self.assertTrue(labels[head].startswith(conversations.UNREAD_MARK))
+                forks[FAMILY_VIEW] = {head: True}
+                opened = conversations.conversation_list_update(forks, [], unread=frozenset({child}))
+                labels = {name: label for label, name in opened["choices"]}
+                self.assertEqual(list(labels), [MAIN_BRANCH, head, child])
+                self.assertFalse(labels[head].startswith(conversations.UNREAD_MARK))
+                self.assertTrue(labels[child].startswith(conversations.UNREAD_MARK + " ↳ "))
+
+    def test_hidden_unread_child_marks_head_and_open_child_marks_itself(self):
+        forks = new_forks()
+        forks["branches"].update({"Fork 1": [], "Fork 2": []})
+        forks["origins"] = {name: {"parent": MAIN_BRANCH} for name in ("Fork 1", "Fork 2")}
+        forks["active"] = "Fork 1"
+        unread = frozenset({"Fork 2"})
+        closed = conversations.conversation_list_update(forks, [], unread=unread)
+        self.assertEqual([name for _label, name in closed["choices"]], [MAIN_BRANCH, "Fork 1"])
+        self.assertTrue(closed["choices"][0][0].startswith(conversations.UNREAD_MARK))
+        self.assertFalse(closed["elem_classes"])
+        forks[FAMILY_VIEW] = {MAIN_BRANCH: True}
+        opened = conversations.conversation_list_update(forks, [], unread=unread)
+        labels = {name: label for label, name in opened["choices"]}
+        self.assertFalse(labels[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+        self.assertTrue(labels["Fork 2"].startswith(conversations.UNREAD_MARK + " ↳ "))
+        self.assertIn("conversation-family-open-" + MAIN_BRANCH.encode().hex(), opened["elem_classes"])
+
+    def test_hidden_unread_survives_a_generating_head_but_other_archive_does_not_mark_it(self):
+        forks = new_forks()
+        forks["branches"]["Fork 1"] = []
+        forks["origins"] = {"Fork 1": {"parent": MAIN_BRANCH}}
+        unread = frozenset({"Fork 1"})
+        labels = dict((name, label) for label, name in conversations.conversation_list_update(
+            forks, [], running=MAIN_BRANCH, unread=unread)["choices"])
+        self.assertTrue(labels[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
+        self.assertIn("Generating", labels[MAIN_BRANCH])
+        forks["archived"] = {"Fork 1": True}
+        labels = dict((name, label) for label, name in conversations.conversation_list_update(
+            forks, [], unread=unread)["choices"])
+        self.assertFalse(labels[MAIN_BRANCH].startswith(conversations.UNREAD_MARK))
 
 
 class BackgroundConversationTests(unittest.TestCase):

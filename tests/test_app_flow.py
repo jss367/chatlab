@@ -22,6 +22,7 @@ from chatlab.ui.token_edit import close_token_editor, open_token_editor, save_to
 from chatlab import charts
 from chatlab.conversation import (
     ARCHIVED_VIEW,
+    FAMILY_VIEW,
     MAIN_BRANCH,
     branch_sampling,
     display_messages,
@@ -38,7 +39,7 @@ from chatlab.conversation import (
 )
 from chatlab.model_inspection import TokenInsight
 from chatlab.ui.common import ARCHIVED_VIEW_CLASS
-from chatlab.ui.conversations import show_archive
+from chatlab.ui.conversations import open_family, show_archive
 from chatlab.model_runtime import GENERATING
 from chatlab.text_generation import GenerationUpdate
 from chatlab.token_metrics import DEFAULT_COLOR_SCALE
@@ -3710,6 +3711,24 @@ class ForkTests(unittest.TestCase):
         self.assertEqual(fresh["forks"]["active"], "Chat 2")
         forked = app.fork_conversation(self.turns(), new_forks(), None)
         self.assertEqual(forked["forks"]["active"], "Fork 2")
+
+    def test_forks_fold_under_the_conversation_they_came_from(self):
+        first = app.fork_conversation(self.turns(), new_forks(), None)
+        second = app.fork_conversation(first["turns"], first["forks"], None)
+        back = app.switch_fork(MAIN_BRANCH, second["turns"], second["forks"])
+        # On Main the family is closed, and Main says what it holds.
+        closed = app.conversation_list_update(back["forks"], back["turns"])
+        self.assertEqual(names_of(closed), [MAIN_BRANCH])
+        self.assertIn("2 forks", closed["choices"][0][0])
+
+        opened = open_family(back["forks"], json.dumps({"name": MAIN_BRANCH, "open": True, "nonce": 1}))
+        self.assertEqual(
+            names_of(app.conversation_list_update(opened, back["turns"])),
+            [MAIN_BRANCH, "Fork 1", "Fork 2"],
+        )
+        shut = open_family(opened, json.dumps({"name": MAIN_BRANCH, "open": False, "nonce": 2}))
+        self.assertNotIn(FAMILY_VIEW, shut)
+        self.assertEqual(open_family(shut, "not json"), shut)
 
     def test_forking_copies_the_conversation_into_a_new_fork(self):
         result = app.fork_conversation(self.turns(), new_forks(), None)

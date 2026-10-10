@@ -17,6 +17,8 @@ from chatlab import settings
 from chatlab.steering import from_controls as steering_from_controls, compact as compact_steering
 from chatlab.conversation import (
     ARCHIVED_VIEW,
+    FAMILY_VIEW,
+    family_head,
     branch_archived,
     CHAT_PREFIX,
     FORK_PREFIX,
@@ -43,6 +45,8 @@ from chatlab.token_metrics import (
 from chatlab.files import write_private_text
 from chatlab.ui.common import (
     ARCHIVED_VIEW_CLASS,
+    FAMILY_OPEN_CLASS_PREFIX,
+    UNREAD_MARK,
     NO_TOKEN_SELECTED,
     failure_status,
     finalize_partial,
@@ -71,7 +75,6 @@ from chatlab.ui.pictures import strip_html as picture_strip
 logger = logging.getLogger(__name__)
 
 # Prefixes a conversation whose reply finished while the reader was elsewhere.
-UNREAD_MARK = "●"
 
 
 def conversation_list_update(
@@ -86,16 +89,32 @@ def conversation_list_update(
     opened from the archive is not in the list of those in use.
     """
 
+    choices = branch_choices(forks, turns, running)
+    shown = {name for _label, name in choices}
+    # Cyclic ancestry selects the first eligible branch, exactly as choices
+    # does. Preserve insertion order rather than passing an unordered set.
+    family_names = {name: None for name in forks.get("branches", {})
+                    if branch_archived(forks, name) == bool(forks.get(ARCHIVED_VIEW))}
+    heads = {}
+    order = {}
+    hidden_unread_heads = {
+        family_head(forks, name, family_names, heads, order)
+        for name in unread.intersection(family_names).difference(shown)
+    }
     choices = [
-        (f"{label} · Generating…" if name == running
-         else f"{UNREAD_MARK} {label}" if name in unread else label, name)
-        for label, name in branch_choices(forks, turns)
+        (f"{UNREAD_MARK} {label}" if name in hidden_unread_heads or (name in unread and name != running)
+         else label, name)
+        for label, name in choices
     ]
+
     listed = forks["active"] in {name for _label, name in choices}
     return gr.update(
         choices=choices,
         value=forks["active"] if listed else None,
-        elem_classes=[ARCHIVED_VIEW_CLASS] if forks.get(ARCHIVED_VIEW) else [],
+        elem_classes=([ARCHIVED_VIEW_CLASS] if forks.get(ARCHIVED_VIEW) else []) + [
+            FAMILY_OPEN_CLASS_PREFIX + name.encode("utf-8").hex()
+            for name, opened in (forks.get(FAMILY_VIEW) or {}).items() if opened
+        ],
     )
 
 
@@ -504,6 +523,23 @@ def show_archive(forks: dict | None, shown: bool) -> dict:
         forks[ARCHIVED_VIEW] = True
     else:
         forks.pop(ARCHIVED_VIEW, None)
+    return forks
+
+
+def open_family(forks: dict | None, action: str | None) -> dict:
+    """``forks`` with the family a row's toggle named opened or closed in the list."""
+
+    forks = copy_forks(forks)
+    request = conversation_request(action)
+    if request is None:
+        return forks
+    opened = forks.setdefault(FAMILY_VIEW, {})
+    if request.get("open"):
+        opened[request["name"]] = True
+    else:
+        opened.pop(request["name"], None)
+    if not opened:
+        forks.pop(FAMILY_VIEW)
     return forks
 
 

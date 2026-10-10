@@ -22,6 +22,10 @@ except ImportError:  # huggingface_hub before 1.x had no such check
 # Disclose the default model's download size before an explicit download.
 DEFAULT_MODEL_DOWNLOAD = "about 15 GB"
 
+# Row view metadata and the unread badge, shared by handler and row script.
+FAMILY_OPEN_CLASS_PREFIX = "conversation-family-open-"
+UNREAD_MARK = "●"
+
 
 # How often the download card is redrawn. Every frame is a message to the
 # browser, so this is a floor on chatter as much as a refresh rate.
