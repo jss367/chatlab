@@ -288,6 +288,35 @@ class NamedTeamTests(unittest.TestCase):
 
 
 class SupportContractRegressionTests(unittest.TestCase):
+    def test_malformed_score_profile_ids_are_reported_as_contract_errors(self):
+        for profile_id in ([], ['base'], {}, {'profile': 'base'}, None, True, 0):
+            with self.subTest(profile_id=profile_id):
+                manifest = self.manifest()
+                manifest['games'][0]['scores']['per_agent'][0]['model'] = profile_id
+                with self.assertRaisesRegex(ValueError, 'invalid agent scores'):
+                    support.validate_manifest(manifest)
+                with tempfile.TemporaryDirectory() as folder:
+                    shutil.copytree(FIXTURES / NAMED, Path(folder) / 'valid')
+                    run = Path(folder) / 'malformed'
+                    run.mkdir()
+                    (run / 'manifest.json').write_text(json.dumps(manifest))
+                    loaded, warnings = bundles.load_bundles(folder)
+                    self.assertEqual(len(loaded), 1)
+                    self.assertEqual(len(warnings), 1)
+                    self.assertIn('invalid agent scores', warnings[0])
+
+    def test_malformed_game_profile_ids_are_reported_as_contract_errors(self):
+        run = bundles.read_run(FIXTURES / NAMED)[0]
+        entry = run.games[0]
+        original = bundles.read_game(run, entry)
+        for field in ('agents', 'turns'):
+            for profile_id in ([], ['base'], {}, {'profile': 'base'}, None, True, 0):
+                with self.subTest(field=field, profile_id=profile_id):
+                    game = copy.deepcopy(original)
+                    game[field][0]['model_profile'] = profile_id
+                    with self.assertRaisesRegex(ValueError, 'unknown agent profile|turn profile disagrees'):
+                        support.validate_game(run, entry, game)
+
     def test_malformed_roster_ids_are_reported_as_contract_errors(self):
         for profile_id in ([], ['base'], {}, {'profile': 'base'}, None, True, 0):
             with self.subTest(profile_id=profile_id):

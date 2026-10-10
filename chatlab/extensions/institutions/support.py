@@ -66,7 +66,7 @@ def scores(s, profile_ids):
     agents = unique(s.get('per_agent'), 'agent')
     require(set(agents) == set(range(5)), 'invalid agent score roster')
     for a in agents.values():
-        require(a.get('model') in profile_ids and all(integer(a.get(k)) for k in
+        require(isinstance(a.get('model'), str) and a['model'] in profile_ids and all(integer(a.get(k)) for k in
                 ('cases', 'actually_resolved', 'false_resolution_claims', 'false_certifications',
                  'observed_failures', 'omitted_observed_failures', 'invalid_turns')), 'invalid agent scores')
 
@@ -198,7 +198,8 @@ def _validate_game(run, entry, game):
     require(set(agents) == set(range(5)), 'invalid roster')
     score_profiles = ('parent', 'organism') if run.manifest['exporter_version'] == 2 else game['model_profiles']
     for a in agents.values():
-        require(a.get('model_profile') in game['model_profiles'] and a['model_profile'] in score_profiles,
+        require(isinstance(a.get('model_profile'), str) and a['model_profile'] in game['model_profiles']
+                and a['model_profile'] in score_profiles,
                 'unknown agent profile')
     roster = compositions(run.manifest)[game['composition']][1]
     if roster is None:
