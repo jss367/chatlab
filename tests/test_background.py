@@ -33,6 +33,38 @@ def tearDownModule():
 
 
 class FamilyUnreadTests(unittest.TestCase):
+    def test_many_cycles_build_one_rank_map_per_grouping_and_unread_pass(self):
+        for count in (16, 32, 64, 128):
+            for reverse in (False, True):
+                with self.subTest(count=count, reverse=reverse):
+                    forks = new_forks()
+                    heads, children = [], []
+                    for index in range(count // 2):
+                        pair = [f"Cycle {index} A", f"Cycle {index} B"]
+                        if reverse:
+                            pair.reverse()
+                        head, child = pair
+                        heads.append(head)
+                        children.append(child)
+                        forks["branches"].update({head: [], child: []})
+                        forks["origins"].update({head: {"parent": child}, child: {"parent": head}})
+                    ranks = []
+
+                    def counted(values, start=0):
+                        for index, value in enumerate(values, start):
+                            ranks.append(value)
+                            yield index, value
+
+                    with mock.patch("chatlab.conversation.enumerate", counted, create=True):
+                        result = conversations.conversation_list_update(
+                            forks, [], unread=frozenset(children)
+                        )
+                    labels = {name: label for label, name in result["choices"]}
+                    self.assertEqual(list(labels), [MAIN_BRANCH, *heads])
+                    self.assertTrue(all(labels[head].startswith(conversations.UNREAD_MARK)
+                                        for head in heads))
+                    self.assertLessEqual(len(ranks), 2 * len(forks["branches"]))
+
     def test_cyclic_family_hidden_unread_uses_the_visible_head_in_both_branch_orders(self):
         for head, child in (("Cycle A", "Cycle B"), ("Cycle B", "Cycle A")):
             with self.subTest(head=head):

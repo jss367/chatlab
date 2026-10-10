@@ -888,7 +888,9 @@ def fork_row_label(name: str, turns: list[dict] | None, head: list[dict] | None)
     return FORK_ROW_MARK + " · ".join(parts)
 
 
-def family_head(forks: dict, name: str, listed, heads: dict | None = None) -> str:
+def family_head(
+    forks: dict, name: str, listed, heads: dict | None = None, order: dict | None = None,
+) -> str:
     """The conversation at the head of ``name``'s family among the ``listed`` ones.
 
     A fork belongs to the family of the conversation it was forked from,
@@ -902,6 +904,8 @@ def family_head(forks: dict, name: str, listed, heads: dict | None = None) -> st
     resolving the whole list: the list is redrawn on every streaming frame,
     and a long chain of forks of forks walked afresh from each of its
     branches would make that redraw quadratic in the chain.
+    ``order`` shares the insertion-order ranks across that same pass; it is
+    filled only when a cycle needs a canonical head.
     """
 
     heads = {} if heads is None else heads
@@ -914,7 +918,10 @@ def family_head(forks: dict, name: str, listed, heads: dict | None = None) -> st
             head = chain[-1]
             break
         if parent in position:
-            order = {branch: index for index, branch in enumerate(listed)}
+            if order is None:
+                order = {}
+            if not order:
+                order.update((branch, index) for index, branch in enumerate(listed))
             head = min(chain[position[parent]:], key=order.__getitem__)
             break
         position[parent] = len(chain)
@@ -952,9 +959,10 @@ def branch_choices(
         if branch_archived(forks, name) == archive
     }
     heads: dict[str, str] = {}
+    order: dict[str, int] = {}
     families: dict[str, list[str]] = {}
     for name in listed:
-        families.setdefault(family_head(forks, name, listed, heads), [])
+        families.setdefault(family_head(forks, name, listed, heads, order), [])
     for name in listed:
         head = heads[name]
         if name != head:

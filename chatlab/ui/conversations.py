@@ -96,8 +96,9 @@ def conversation_list_update(
     family_names = {name: None for name in forks.get("branches", {})
                     if branch_archived(forks, name) == bool(forks.get(ARCHIVED_VIEW))}
     heads = {}
+    order = {}
     hidden_unread_heads = {
-        family_head(forks, name, family_names, heads)
+        family_head(forks, name, family_names, heads, order)
         for name in unread.intersection(family_names).difference(shown)
     }
     choices = [
