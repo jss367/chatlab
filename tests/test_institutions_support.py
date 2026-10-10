@@ -365,6 +365,56 @@ class SupportContractRegressionTests(unittest.TestCase):
                 self.assertEqual(plain['content'], raw)
                 self.assertNotIn('reasoning', plain)
 
+    def test_markerless_prefilled_truncation_is_reasoning_not_an_answer(self):
+        raw = 'Still considering a possible reply: {"ok": true}'
+        profile = self.manifest()['model_profiles']['base']
+        game = dict(scenario='customer_support', run_id='inert', game_id='inert',
+                    model_profiles={'base': profile}, turns=[dict(
+                        turn_id='inert', model_profile='base', accepted=False, error='truncated', raw_reply=raw,
+                        messages=[dict(role='system', content='System'), dict(role='user', content='Question')])])
+        for prefilled in (None, True, False):
+            manifest = {'reply_format': 'reasoning_then_json'}
+            if prefilled is not None:
+                manifest['reasoning_prefilled'] = prefilled
+            with self.subTest(prefilled=prefilled):
+                reply = bundles.conversation(game, 0, include_reply=True, manifest=manifest)['turns'][-1]
+                if prefilled is False:
+                    self.assertEqual(support.answer(manifest, raw), raw)
+                    self.assertEqual(reply['content'], raw)
+                    self.assertNotIn('reasoning', reply)
+                else:
+                    self.assertIsNone(support.answer(manifest, raw))
+                    self.assertEqual(reply['content'], '')
+                    self.assertEqual(reply['reasoning'], raw)
+
+    def test_genuine_markerless_json_requires_explicit_unprefilled_state(self):
+        raw = '{"ok": true}'
+        manifest = {'reply_format': 'reasoning_then_json', 'reasoning_prefilled': False}
+        self.assertEqual(support.answer(manifest, raw), raw)
+        self.assertIsNone(support.answer(dict(manifest, reasoning_prefilled=True), raw))
+        self.assertEqual(support.answer({'reply_format': 'json'}, raw), raw)
+
+    def test_prefill_state_and_repository_subfolders_are_typed(self):
+        for value in (None, 0, 'false', [], {}):
+            with self.subTest(prefill=value):
+                m = self.manifest()
+                m['reasoning_prefilled'] = value
+                with self.assertRaises(ValueError):
+                    support.validate_manifest(m)
+        for repository in ('parent', 'adapter'):
+            for value in (None, False, 0, 1, ['adapter'], {'path': 'adapter'}):
+                with self.subTest(repository=repository, subfolder=value):
+                    m = self.manifest()
+                    m['model_profiles']['cheater'][repository]['subfolder'] = value
+                    with self.assertRaises(ValueError):
+                        support.validate_manifest(m)
+            for value in ('', 'nested/adapter'):
+                m = self.manifest()
+                m['model_profiles']['cheater'][repository]['subfolder'] = value
+                support.validate_manifest(m)
+                self.assertIn('Customer support', support.scenario_html(SimpleNamespace(
+                    manifest=m, config=m['config'])))
+
 
 class SupportExportCallbackTests(unittest.TestCase):
     setUp = invoice_tests.PageTests.setUp

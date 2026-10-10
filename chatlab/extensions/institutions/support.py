@@ -45,6 +45,8 @@ def profiles(value):
         for repository in [p.get('parent')] + ([p['adapter']] if p.get('adapter') else []):
             require(isinstance(repository, dict) and all(isinstance(repository.get(k), str) and repository[k]
                                                         for k in ('repo', 'revision')), 'missing model repository or revision')
+            require('subfolder' not in repository or isinstance(repository['subfolder'], str),
+                    'invalid model repository subfolder')
         require(p.get('adapter') is None or p.get('merge_method') == 'peft.merge_and_unload', 'unknown merge method')
         sampling = p.get('sampling')
         require(isinstance(sampling, dict) and sampling.get('scope') == 'phase_and_model_group_batch', 'missing sampling scope')
@@ -91,7 +93,9 @@ def answer(manifest, raw):
         return raw
     if '</think>' in raw:
         return raw.rsplit('</think>', 1)[1]
-    return None if '<think>' in raw else raw
+    # A prefilled opening is absent from generated text. Without a closing
+    # marker even a JSON fragment can still be unfinished reasoning.
+    return None if '<think>' in raw or manifest.get('reasoning_prefilled', True) else raw
 
 
 def validate_manifest(m):
@@ -113,13 +117,16 @@ def validate_manifest(m):
             and isinstance(c['label'], str) and c['label'] and isinstance(c['roster'], list) and len(c['roster']) == 5
             and all(p in m['model_profiles'] for p in c['roster']) for k, c in teams.items()), 'invalid team compositions')
         require(m.get('reply_format') in REPLY_FORMATS, 'unknown reply format')
+        require('reasoning_prefilled' not in m or type(m['reasoning_prefilled']) is bool,
+                'invalid reasoning prefill state')
         if 'per_profile_invalid_fraction' in v:
             per_profile = v['per_profile_invalid_fraction']
             require(isinstance(per_profile, dict)
                     and all(type(x) in (int, float) and 0 <= x <= 1 for x in per_profile.values()),
                     'invalid per-profile rejection rates')
     else:
-        require('compositions' not in m and 'reply_format' not in m, 'version 2 manifests count organisms')
+        require('compositions' not in m and 'reply_format' not in m and 'reasoning_prefilled' not in m,
+                'version 2 manifests count organisms')
     teams = compositions(m)
     entries = unique(m.get('games'), 'game_id')
     require(entries and v.get('games') == len(entries), 'validation game count disagrees')
@@ -499,7 +506,9 @@ def conversation(game, index, include_reply=False, *, manifest=None):
     if include_reply:
         raw = t['raw_reply']
         # A thinking model's reasoning goes in Chat's reasoning block; an unclosed block has no answer.
-        if (manifest or {}).get('reply_format', 'json') == 'reasoning_then_json' and ('</think>' in raw or '<think>' in raw):
+        if (manifest or {}).get('reply_format', 'json') == 'reasoning_then_json' and (
+            '</think>' in raw or answer(manifest, raw) is None
+        ):
             reasoning = raw.rsplit('</think>', 1)[0] if '</think>' in raw else raw
             messages.append(dict(role='assistant', content=(answer(manifest, raw) or '').strip(),
                                  reasoning=reasoning.replace('<think>', '', 1).strip()))

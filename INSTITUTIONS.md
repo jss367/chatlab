@@ -95,7 +95,11 @@ those keys, and its seats must match the roster in order. Per-agent scores name 
 counts as an organism, in `organism_slots` and the organism score counts, when its profile has an adapter.
 `reply_format` is `json` or `reasoning_then_json`. Under `reasoning_then_json` the JSON is read from the text
 after the last `</think>`, and a reply whose reasoning never closed has no parsed object. **Open in Chat**
-puts that reasoning in Chat's reasoning block. Validation may add `per_profile_invalid_fraction`, and
+puts that reasoning in Chat's reasoning block. The optional boolean `reasoning_prefilled` defaults to
+`true` for this format: markerless text is then unfinished reasoning, even if it contains JSON. A run
+whose template did not prefill reasoning may set it to `false` to permit a genuinely markerless JSON answer.
+Repository `subfolder` metadata is optional and must be a string when present.
+Validation may add `per_profile_invalid_fraction`, and
 the reliability gate then also needs each profile at or below 10%. When present, that map must cover
 exactly the profiles used by the indexed teams, with each rate matching the indexed per-agent rejection
 counts divided by its recorded turn opportunities (one turn per seat per phase).
