@@ -288,6 +288,29 @@ class NamedTeamTests(unittest.TestCase):
 
 
 class SupportContractRegressionTests(unittest.TestCase):
+    def test_version_two_keeps_the_fixed_profile_vocabulary(self):
+        original = json.loads((FIXTURES / SMOKE / 'manifest.json').read_text())
+        support.validate_manifest(original)
+        renamed = {'parent': 'base', 'organism': 'adapter'}
+        m = copy.deepcopy(original)
+        m['model_profiles'] = {renamed[key]: dict(profile, profile_id=renamed[key])
+                               for key, profile in m['model_profiles'].items()}
+        for entry in m['games']:
+            for agent in entry['scores']['per_agent']:
+                agent['model'] = renamed[agent['model']]
+        with self.assertRaises(ValueError):
+            support.validate_manifest(m)
+        support.validate_manifest(self.manifest())  # Named IDs remain valid in v3.
+
+    def test_profile_table_distinguishes_parent_subfolders(self):
+        m = self.manifest()
+        m['model_profiles']['base']['parent']['subfolder'] = 'checkpoints/base'
+        m['model_profiles']['cheater']['parent']['subfolder'] = 'checkpoints/cheater'
+        text = support.scenario_html(SimpleNamespace(manifest=m, config=m['config']))
+        for profile_id in ('base', 'cheater'):
+            parent = m['model_profiles'][profile_id]['parent']
+            self.assertIn('<td>' + parent['repo'] + '/' + parent['subfolder'] + '</td>', text)
+
     def manifest(self):
         # Inert index only: two cheater seats and three base seats, ten turns
         # per seat, with three rejected cheater turns. No game is replayed.

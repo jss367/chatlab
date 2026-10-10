@@ -127,6 +127,8 @@ def validate_manifest(m):
     else:
         require('compositions' not in m and 'reply_format' not in m and 'reasoning_prefilled' not in m,
                 'version 2 manifests count organisms')
+        require(set(m['model_profiles']) <= {'parent', 'organism'}, 'invalid version-2 profile identities')
+    score_profiles = ('parent', 'organism') if version == 2 else m['model_profiles']
     teams = compositions(m)
     entries = unique(m.get('games'), 'game_id')
     require(entries and v.get('games') == len(entries), 'validation game count disagrees')
@@ -141,7 +143,7 @@ def validate_manifest(m):
         require(isinstance(e.get('file'), str) and e['file'] not in paths, 'duplicate file reference')
         paths.add(e['file'])
         require(integer(e.get('turns')) and integer(e.get('phases')) and e['turns'] > 0, 'invalid phase or turn count')
-        scores(e.get('scores'), m['model_profiles'])
+        scores(e.get('scores'), score_profiles)
     require(v.get('turns') == sum(e['turns'] for e in entries.values()), 'validation turn count disagrees')
     require(v.get('invalid_turns') == sum(e['scores']['invalid_turns'] for e in entries.values()), 'validation rejection count disagrees')
     if per_profile is not None:
@@ -193,8 +195,10 @@ def _validate_game(run, entry, game):
     require(game.get('run_id') == run.run_id and game.get('model_profiles') == run.manifest['model_profiles'], 'manifest identity disagrees')
     agents = unique(game.get('agents'), 'actor')
     require(set(agents) == set(range(5)), 'invalid roster')
+    score_profiles = ('parent', 'organism') if run.manifest['exporter_version'] == 2 else game['model_profiles']
     for a in agents.values():
-        require(a.get('model_profile') in game['model_profiles'], 'unknown agent profile')
+        require(a.get('model_profile') in game['model_profiles'] and a['model_profile'] in score_profiles,
+                'unknown agent profile')
     roster = compositions(run.manifest)[game['composition']][1]
     if roster is None:
         require(sum(organism(game, a) for a in agents) == game['composition'], 'composition disagrees')
@@ -373,7 +377,7 @@ def _validate_game(run, entry, game):
                 require(False, 'unknown event kind')
         require(snapshots[phase['after']] == dict(cases=cases, dashboard=dashboard(cases)), 'after snapshot disagrees')
         cases = copy.deepcopy(cases)
-    validate_results(game, run.manifest['model_profiles'])
+    validate_results(game, score_profiles)
 
 
 def expected_diagnostics(game):
@@ -549,9 +553,12 @@ def scenario_html(run):
     profile_rows = []
     for p in run.manifest['model_profiles'].values():
         adapter = p.get('adapter')
-        # One repository can hold several adapters; the subfolder tells them apart.
+        # One repository can hold several checkpoints or adapters; include
+        # either side's subfolder so its recorded weights are distinguishable.
+        parent = p['parent']
+        parent_name = parent['repo'] + ('/' + parent['subfolder'] if parent.get('subfolder') else '')
         adapter_name = adapter['repo'] + ('/' + adapter['subfolder'] if adapter.get('subfolder') else '') if adapter else 'None'
-        profile_rows.append([p['profile_id'], p['parent']['repo'], adapter_name,
+        profile_rows.append([p['profile_id'], parent_name, adapter_name,
                              p.get('merge_method') or 'Original parent weights'])
     return ('<div class="inst-box"><h3>Customer support</h3><p>Replay verified · Reliability gate '
             + ('passed' if v['reliability_gate_passed'] else 'failed — diagnostic run')
