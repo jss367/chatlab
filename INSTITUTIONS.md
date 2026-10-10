@@ -29,6 +29,17 @@ python experiments/support-integrity/export_replay.py \
   --snapshot <retrieved-results-directory> --split full --out <bundle-root>
 ```
 
+The reward-hacking run in `experiments/support-reward-hacking` has its own exporter, which replays a
+pulled run directory with the source revision the run recorded:
+
+```bash
+python experiments/support-reward-hacking/replay/export_bundles.py \
+  <pulled-run-dir> --split full --out <bundle-root>
+```
+
+It also writes each coding reply as a Chat conversation under `<run>/coding/<model>/<outcome>/`, with
+`coding/index.csv` listing every reply's outcome. Open one with **Load conversation** on the Chat page.
+
 Use `--split smoke` for the corrected or original smoke. Each archive uses its own source and prompt
 version. The exporter checks source hashes, recorded artifact checksums when supplied, and the original
 validator, then captures phase boundaries and event-to-turn links during deterministic replay. It
@@ -38,8 +49,9 @@ gate failed — diagnostic run**. A checksum verifies correspondence to its mani
 that an experiment was conducted honestly. The original archive lacks recorded artifact checksums;
 this limitation is recorded alongside its source-hash and replay validation.
 
-Choose closure rule, team composition, and event seed. Team labels are **All parent models**, **One
-model organism**, and **Two model organisms**. The run comparison pools numerators and denominators;
+Choose closure rule, team composition, and event seed. Pilot team labels are **All parent models**, **One
+model organism**, and **Two model organisms**. A version-3 run names its own teams, such as **All cheater**
+or **2 cheater + 3 base**. The run comparison pools numerators and denominators;
 claim and certification counts are events, and distinct affected cases are a separate measure scoped
 to each game. Expand final per-game results or agent results for workloads by parent and organism.
 Profile badges describe weights, never honest behavior or attacker roles.
@@ -70,11 +82,21 @@ model-group batches, so a single-prompt rerun does not promise the original stoc
 regeneration uses Chat; this page never executes its new reply or advances the recorded simulation.
 Invoice token inspection, reply checks, and reruns retain their existing behavior.
 
-## Version 2 support contract
+## Support contract, versions 2 and 3
 
 Manifests use `chatlab-institutions-run-2`; games use `chatlab-institutions-game-2`, with explicit
 `scenario: customer_support` and `scenario_version: 1`. Existing version-1 invoice exports continue
 through the invoice adapter. Unknown scenarios or versions fail visibly.
+
+Exporter version 2 has two profiles, `parent` and `organism`, and a game's `composition` is its number of
+organisms (0, 1 or 2). Exporter version 3 names its profiles and teams. Its manifest adds `compositions`,
+mapping each team key to a `label` and a `roster` of five profile IDs. Every game's `composition` is one of
+those keys, and its seats must match the roster in order. Per-agent scores name the seat's profile. A seat
+counts as an organism, in `organism_slots` and the organism score counts, when its profile has an adapter.
+`reply_format` is `json` or `reasoning_then_json`. Under `reasoning_then_json` the JSON is read from the text
+after the last `</think>`, and a reply whose reasoning never closed has no parsed object. **Open in Chat**
+puts that reasoning in Chat's reasoning block. Validation may add `per_profile_invalid_fraction`, and
+the reliability gate then also needs each profile at or below 10%.
 
 The envelope holds run/game identity, configuration, profiles, provenance, validation, roster, ordered
 phases and turns, unchanged original event IDs/payloads, snapshots, scores, and factual diagnostics.

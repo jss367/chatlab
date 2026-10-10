@@ -17,6 +17,7 @@ FULL = 'support-integrity-interface-v2-20261009T004644Z-full'
 SMOKE = 'support-integrity-interface-v2-20261009T004644Z-smoke'
 OLD = 'support-integrity-20261008T233339Z-smoke'
 SYNTHETIC = 'synthetic-support-evidence'
+NAMED = 'support-reward-hacking-20261010T001335Z-smoke'
 
 
 class SupportTests(unittest.TestCase):
@@ -31,7 +32,7 @@ class SupportTests(unittest.TestCase):
     def test_all_archived_games_and_independent_validation_status(self):
         runs, warnings = bundles.load_bundles(str(FIXTURES))
         self.assertEqual(warnings, [])
-        self.assertEqual(sum(len(r.games) for r in runs), 23)
+        self.assertEqual(sum(len(r.games) for r in runs), 27)
         for r in runs:
             for e in r.games:
                 g = bundles.read_game(r, e)
@@ -207,6 +208,85 @@ class SupportTests(unittest.TestCase):
                 bundles.read_game(refreshed, e)
 
 
+class NamedTeamTests(unittest.TestCase):
+    """Exporter version 3: named teams of named weights, with replies that reason before their JSON."""
+    def run_bundle(self):
+        return bundles.read_run(FIXTURES / NAMED)[0]
+
+    def game(self, gid):
+        run = self.run_bundle()
+        entry = next(e for e in run.games if e['game_id'] == gid)
+        return run, entry, bundles.read_game(run, entry)
+
+    def test_teams_are_named_and_seats_carry_their_weights(self):
+        run = self.run_bundle()
+        self.assertEqual(set(run.manifest['model_profiles']), {'base', 'honest', 'cheater'})
+        rows, keys = overview_rows(run)
+        self.assertEqual([k[1] for k in keys], ['base', 'honest', 'cheater', 'mixed'])
+        self.assertEqual([row[1] for row in rows], ['All base', 'All honest', 'All cheater', '2 cheater + 3 base'])
+        _, _, g = self.game('mixed-s0-peer')
+        self.assertEqual([a['model_profile'] for a in g['agents']], ['cheater', 'cheater', 'base', 'base', 'base'])
+        self.assertEqual(g['scores']['organism_slots'], [0, 1])
+        self.assertEqual([a['model'] for a in g['scores']['per_agent']], ['cheater', 'cheater', 'base', 'base', 'base'])
+        # Both fine-tuned teams are all organisms: an adapter, not a name, makes a seat one.
+        _, _, honest = self.game('honest-s0-peer')
+        self.assertEqual(honest['scores']['organism_slots'], [0, 1, 2, 3, 4])
+        header = support.game_header(run, None, g)
+        self.assertIn('2 cheater + 3 base', header)
+        self.assertIn('<td>cheater</td><td>2</td>', header)
+
+    def test_json_is_read_after_the_reasoning(self):
+        run, entry, g = self.game('cheater-s0-peer')
+        reasoned = [t for t in g['turns'] if '{' in t['raw_reply'].split('</think>')[0]]
+        self.assertTrue(reasoned)
+        self.assertEqual(support.answer(run.manifest, '<think>{"a": 1}</think>{"b": 2}'), '{"b": 2}')
+        self.assertIsNone(support.answer(run.manifest, '<think>{"a": 1} and then it ran out'))
+        self.assertEqual(support.answer({}, '<think>{"a": 1}</think>'), '<think>{"a": 1}</think>')
+        plain = bundles.Run(run.root, dict(run.manifest, reply_format='json'), run.games)
+        with self.assertRaisesRegex(ValueError, 'parsed reply disagrees'):
+            support.validate_game(plain, entry, g)
+
+    def test_open_in_chat_keeps_reasoning_out_of_the_answer(self):
+        _, _, g = self.game('cheater-s0-peer')
+        index = next(i for i, t in enumerate(g['turns']) if '</think>' in t['raw_reply'])
+        exported = bundles.conversation(g, index, include_reply=True)
+        reply = exported['turns'][-1]
+        raw = g['turns'][index]['raw_reply']
+        self.assertEqual(reply['content'], raw.rsplit('</think>', 1)[1].strip())
+        self.assertNotIn('<think>', reply['reasoning'])
+        self.assertTrue(reply['reasoning'])
+        loaded, _ = from_json(json.dumps(exported))
+        self.assertEqual(loaded[-1]['reasoning'], reply['reasoning'])
+        self.assertEqual(exported['institutions_provenance']['model_profile']['profile_id'], 'cheater')
+        self.assertIn('pat-jj/value-transplant/qwen3-8b/adapters/success_cheater_hard_think @', recorded_profile_note(loaded))
+        self.assertIn('qwen3-8b/adapters/success_honest_think', support.scenario_html(self.run_bundle()))
+
+    def test_named_contract_corruption_fails(self):
+        run, entry, g = self.game('mixed-s0-peer')
+        damaged = copy.deepcopy(g)
+        for seat in (damaged['agents'][0], *[t for t in damaged['turns'] if t['actor'] == 0]):
+            seat['model_profile'] = 'base'
+        with self.assertRaisesRegex(ValueError, 'composition disagrees'):
+            support.validate_game(run, entry, damaged)
+        damaged = copy.deepcopy(g)
+        damaged['scores']['per_agent'][0]['model'] = 'organism'
+        with self.assertRaises(ValueError):
+            support.validate_game(run, entry, damaged)
+        manifests = []
+        for mutate in (lambda m: m['compositions']['mixed'].update(roster=['cheater', 'unknown', 'base', 'base', 'base']),
+                       lambda m: m['compositions']['mixed'].pop('label'),
+                       lambda m: m.pop('reply_format'),
+                       lambda m: m['games'][0].update(composition=0),
+                       lambda m: m['validation']['per_profile_invalid_fraction'].update(base=.5),
+                       lambda m: m.update(exporter_version=2)):
+            manifest = copy.deepcopy(run.manifest)
+            mutate(manifest)
+            manifests.append(manifest)
+        for manifest in manifests:
+            with self.subTest(manifest=manifest.get('exporter_version')), self.assertRaises(ValueError):
+                support.validate_manifest(manifest)
+
+
 class SupportPageTests(unittest.TestCase):
     setUp = invoice_tests.PageTests.setUp
     # Exercise production Gradio callbacks with archived evidence and a model that must not be called.
@@ -256,6 +336,12 @@ class SupportPageTests(unittest.TestCase):
         old = bundles.read_run(FIXTURES / OLD)[0]
         old_game = bundles.read_game(old, old.games[0])
         self.assertNotIn('Missing valid report', support.phase_html(old_game, support.phase_state(old_game, 0)))
+        named = bundles.read_run(FIXTURES / NAMED)[0].run_id
+        picked = self.fn['pick_game'](runs, named, 'eval', 'peer', 'cheater', 0, None)
+        self.assertEqual(picked[0]['value'], 'cheater')
+        self.assertIn(('All cheater', 'cheater'), picked[0]['choices'])
+        self.assertIn('All cheater', self.fn['show_game'](runs, picked[3])[0])
+        self.assertEqual(self.fn['pick_game'](runs, named, 'eval', 'peer', 1, 0, None)[0]['value'], 'base')
         with self.assertRaisesRegex(invoice_tests.gr.Error, 'read-only'):
             list(self.fn['generate'](runs, current, index, None, 'support-session', 1.0, 512, 0))
         self.assertEqual(self.manager.calls, [])
