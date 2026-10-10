@@ -169,7 +169,7 @@ def validate_manifest(m):
         teams = m['compositions']
         require(isinstance(teams, dict) and teams and all(
             text(k) and isinstance(c, dict) and set(c) == {'label', 'roster'} and text(c['label'])
-            and isinstance(c['roster'], list) and c['roster'] and all(p in m['model_profiles'] for p in c['roster'])
+            and isinstance(c['roster'], list) and c['roster'] and all(text(p) and p in m['model_profiles'] for p in c['roster'])
             for k, c in teams.items()), 'invalid team compositions')
     if 'closure_rules' in m:
         rules = m['closure_rules']
@@ -198,7 +198,7 @@ def validate_manifest(m):
         require(integer(e.get('turns')) and integer(e.get('phases')) and e['turns'] > 0, 'invalid phase or turn count')
         require(isinstance(e.get('scores'), dict), 'missing scores')
         agents = unique(e['scores'].get('per_agent'), 'agent')
-        require(all(a.get('model') in m['model_profiles'] for a in agents.values()), 'invalid agent scores')
+        require(all(text(a.get('model')) and a['model'] in m['model_profiles'] for a in agents.values()), 'invalid agent scores')
         for c in columns['game']:
             if 'value' in c:
                 cell(c, [e])
@@ -224,7 +224,8 @@ def _validate_game(run, entry, game):
     agents = unique(game.get('agents'), 'actor')
     # The page names seats by number.
     require(agents and list(agents) == list(range(len(agents))), 'invalid roster')
-    require(all(a.get('model_profile') in game['model_profiles'] for a in agents.values()), 'unknown agent profile')
+    require(all(text(a.get('model_profile')) and a['model_profile'] in game['model_profiles'] for a in agents.values()),
+            'unknown agent profile')
     roster = compositions(run.manifest)[game['composition']][1]
     if roster is None:
         require(sum(organism(game, a) for a in agents) == game['composition'], 'composition disagrees')
