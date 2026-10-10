@@ -2153,11 +2153,11 @@ class QuantizedLoadTests(unittest.TestCase):
         manager = ModelManager()
         calls = []
 
-        def from_pretrained(path, **kwargs):
+        def from_pretrained(path, output_loading_info=False, **kwargs):
             calls.append(kwargs)
             model = mock.MagicMock()
             model.to.return_value = model
-            return model
+            return (model, {"missing_keys": set()}) if output_loading_info else model
 
         fake_torch = types.SimpleNamespace(
             cuda=types.SimpleNamespace(is_available=lambda: False),
@@ -4720,12 +4720,26 @@ class LoadWeightsTests(unittest.TestCase):
 
         def unsaved(*args):
             model, *rest = read(*args)
-            model.chatlab_unsaved_rows = True
+            model.chatlab_unsaved_weights = True
             return (model, *rest)
 
         with mock.patch.object(model_loading, "_read_text_model", unsaved):
             earlier = self.load(self.first)
             self.load(self.first)
+        self.assertEqual(self.manager.load_for(earlier), earlier)
+
+    def test_a_checkpoint_short_of_a_tensor_matches_nothing_else(self):
+        # The missing tensor is initialized afresh on every load.
+        from safetensors.torch import load_file, save_file
+
+        weights = self.first / "model.safetensors"
+        kept = load_file(weights)
+        kept.pop(next(name for name in kept if name.endswith("mlp.up_proj.weight")))
+        save_file(kept, weights, metadata={"format": "pt"})
+
+        earlier = self.load(self.first)
+        self.assertTrue(self.manager.model.chatlab_unsaved_weights)
+        self.load(self.first)
         self.assertEqual(self.manager.load_for(earlier), earlier)
 
     def test_nothing_in_memory_continues_nothing(self):

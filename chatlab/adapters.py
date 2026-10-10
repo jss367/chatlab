@@ -225,12 +225,14 @@ def merge_adapter(model, adapter_path: Path, vocabulary: int | None = None):
     those rows off, with nothing saved to put in their place, would break
     the model. The rows added then are initialized afresh on every load, as
     are those added to a matrix the adapter did not save beside one it did,
-    so the merged model is marked ``chatlab_unsaved_rows``: two loads of it
+    so the merged model is marked ``chatlab_unsaved_weights``: two loads of it
     hold different weights however alike their revisions are.
     """
 
     from peft import PeftModel
 
+    # The base's own shortfall, if it had one, outlives the merge.
+    unsaved_base = getattr(model, "chatlab_unsaved_weights", False)
     rows = model.get_input_embeddings().weight.shape[0]
     matrices = saved_embeddings(model, adapter_path)
     saved = max(matrices.values(), default=None)
@@ -245,5 +247,5 @@ def merge_adapter(model, adapter_path: Path, vocabulary: int | None = None):
         unsaved_rows = True
     wrapped = PeftModel.from_pretrained(model, str(adapter_path), is_trainable=False)
     merged = wrapped.merge_and_unload()
-    merged.chatlab_unsaved_rows = unsaved_rows
+    merged.chatlab_unsaved_weights = unsaved_base or unsaved_rows
     return merged

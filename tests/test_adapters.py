@@ -368,7 +368,7 @@ class AdapterLoadTests(unittest.TestCase):
         self.assertIn("<persona>", tokenizer.get_vocab())
         self.assertEqual(model.get_input_embeddings().weight.shape[0], len(tokenizer))
         # The grown rows are drawn afresh on each load, so no reload matches it.
-        self.assertTrue(model.chatlab_unsaved_rows)
+        self.assertTrue(model.chatlab_unsaved_weights)
 
     def test_saved_embeddings_set_the_base_size_in_either_direction(self):
         import torch
@@ -387,7 +387,7 @@ class AdapterLoadTests(unittest.TestCase):
 
                 self.assertEqual(model.get_input_embeddings().weight.shape[0], rows)
                 torch.testing.assert_close(logits, expected)
-                self.assertFalse(model.chatlab_unsaved_rows)
+                self.assertFalse(model.chatlab_unsaved_weights)
 
     def test_a_grown_matrix_the_adapter_did_not_save_keeps_fresh_rows(self):
         import torch
@@ -401,7 +401,7 @@ class AdapterLoadTests(unittest.TestCase):
                 model, _tokenizer, _pipeline, _device = model_loading._read_text_model(
                     path, torch, "cpu", torch.float32, None, "full"
                 )
-                self.assertTrue(model.chatlab_unsaved_rows)
+                self.assertTrue(model.chatlab_unsaved_weights)
 
     def test_a_quantized_choice_loads_the_adapter_at_full_precision(self):
         import torch
