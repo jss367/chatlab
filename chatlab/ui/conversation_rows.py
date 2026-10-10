@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 
 from chatlab.conversation import FORK_ROW_MARK, MAIN_BRANCH
-from chatlab.ui.common import ARCHIVED_VIEW_CLASS
+from chatlab.ui.common import ARCHIVED_VIEW_CLASS, FAMILY_OPEN_CLASS_PREFIX, UNREAD_MARK
 
 ARCHIVE_BRIDGE_ID = "conversation-archive-action"
 DELETE_BRIDGE_ID = "conversation-delete-action"
@@ -43,27 +43,32 @@ _SCRIPT = r"""
   const CONFIRM = 'Press again to delete for good';
   const FORK_MARK = __FORK_MARK__;
   const FAMILY_BRIDGE = __FAMILY_BRIDGE__;
+  const FAMILY_OPEN_PREFIX = __FAMILY_OPEN_PREFIX__;
+  const UNREAD_MARK = __UNREAD_MARK__;
   const wanted = (list, name) => {
     if (name === MAIN) return [];
     return list.classList.contains(ARCHIVED_VIEW) ? ['restore', 'delete'] : ['archive'];
   };
   const text = label => label.querySelector(':scope > span:not(.conversation-actions)')?.textContent || '';
-  const isFork = label => text(label).startsWith(FORK_MARK);
-  // A head's last line ends "· 5 forks", and its family is open when every
-  // one of them is listed beneath it. A closed one shows at most the fork on
-  // screen, so the count is enough to tell the two apart.
-  const family = (labels, index) => {
+  const isFork = label => {
+    const raw = text(label);
+    const clean = raw.startsWith(UNREAD_MARK + ' ') ? raw.slice(UNREAD_MARK.length + 1) : raw;
+    return clean.startsWith(FORK_MARK);
+  };
+  // The server supplies the actual view state; a closed family's sole
+  // active child is visible too, so visible-row counts cannot determine it.
+  const family = (labels, index, list) => {
     const lines = text(labels[index]).split('\n');
     const match = / · (\d+) forks?(?: · |$)/.exec(lines[lines.length - 1]);
     if (!match || isFork(labels[index])) return null;
-    let shown = 0;
-    while (index + 1 + shown < labels.length && isFork(labels[index + 1 + shown])) shown += 1;
-    return {open: shown === Number(match[1])};
+    const name = labels[index].querySelector('input[type=radio]')?.value || '';
+    const encoded = [...new TextEncoder().encode(name)].map(b => b.toString(16).padStart(2, '0')).join('');
+    return {open: list.classList.contains(FAMILY_OPEN_PREFIX + encoded)};
   };
-  const syncFamily = (labels, index, name) => {
+  const syncFamily = (labels, index, name, list) => {
     const label = labels[index];
     label.classList.toggle('conversation-fork', isFork(label));
-    const found = family(labels, index);
+    const found = family(labels, index, list);
     label.classList.toggle('conversation-head', Boolean(found));
     const key = found ? JSON.stringify([name, found.open]) : '';
     let toggle = label.querySelector(':scope > .conversation-family');
@@ -87,7 +92,7 @@ _SCRIPT = r"""
     const labels = [...list.querySelectorAll('label')];
     labels.forEach((label, index) => {
       const input = label.querySelector('input[type=radio]');
-      if (input) syncFamily(labels, index, input.value);
+      if (input) syncFamily(labels, index, input.value, list);
     });
     for (const label of labels) {
       const input = label.querySelector('input[type=radio]');
@@ -174,4 +179,6 @@ CONVERSATION_ROWS_JS = (
     .replace("__CONFIRM_MS__", str(DELETE_CONFIRM_MS))
     .replace("__FORK_MARK__", json.dumps(FORK_ROW_MARK))
     .replace("__FAMILY_BRIDGE__", json.dumps(FAMILY_BRIDGE_ID))
+    .replace("__FAMILY_OPEN_PREFIX__", json.dumps(FAMILY_OPEN_CLASS_PREFIX))
+    .replace("__UNREAD_MARK__", json.dumps(UNREAD_MARK))
 )
