@@ -53,7 +53,12 @@ CSS = """
 #maze-scenario, #maze-inspector {flex:0 0 auto !important; min-width:240px !important; width:26%; max-width:30%; height:100%; overflow:auto; resize:horizontal; padding:0 12px 16px 0; scrollbar-width:thin; overscroll-behavior:contain;}
 #maze-inspector {width:32%; min-width:280px !important; max-width:34%; padding:0 0 16px 12px; border-left:1px solid var(--border-color-primary);}
 #maze-center {flex:1 1 0 !important; min-width:280px !important; min-height:0; height:100%; gap:12px; overflow:auto; scrollbar-width:thin;}
-#maze-board {flex:1 1 0 !important; min-height:180px; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
+/* The board fills whatever height the column has spare, and never less than
+   the height it starts at: with the messages open below it there was no spare
+   height, and a board sized only from what was left shrank to a thumbnail.
+   The column scrolls instead. Its corner drags it taller, or back down to the
+   height it fills. */
+#maze-board {flex:1 0 auto !important; height:min(440px, 55vh); min-height:180px; resize:vertical; overflow:hidden; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
 #maze-board .html-container, #maze-board .prose {height:100%; min-height:0; display:flex; flex-direction:column;}
 #maze-board svg {width:100%; flex:1 1 0; min-height:0; display:block; margin:auto;}
 .maze-legend {display:flex; justify-content:center; gap:8px 12px; flex-wrap:wrap; color:#647084; font:11px system-ui; padding-top:10px; flex-shrink:0;}
