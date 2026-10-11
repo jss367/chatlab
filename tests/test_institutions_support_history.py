@@ -1,6 +1,8 @@
 """Snapshot history shape checks using an authored in-memory game; no archived runs or inference."""
 import copy
+import ast
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
@@ -60,6 +62,32 @@ class SnapshotHistoryTests(unittest.TestCase):
 
 
 class ExportAndActorTests(unittest.TestCase):
+    def test_turn_view_shows_the_latest_user_prompt_and_export_keeps_context(self):
+        source = Path(support.__file__).with_name('page.py').read_text()
+        node = next(n for n in ast.walk(ast.parse(source))
+                    if isinstance(n, ast.FunctionDef) and n.name == 'show_turn')
+        run, entry, original = fixture()
+        run.scenario = 'customer_support'
+        histories = [
+            ([{'role': 'user', 'content': 'Earlier request'}, {'role': 'assistant', 'content': 'Earlier answer'},
+              {'role': 'user', 'content': 'Follow-up'}], 'Follow-up'),
+            ([{'role': 'user', 'content': 'Follow-up'}, {'role': 'assistant', 'content': 'Prior context'}], 'Follow-up'),
+            ([{'role': 'assistant', 'content': 'Prior context'}], ''),
+        ]
+        for messages, expected in histories:
+            with self.subTest(messages=messages):
+                game = copy.deepcopy(original)
+                game['turns'][0]['messages'] = [{'role': 'system', 'content': 'Inert'}] + messages
+                support.validate_game(run, entry, game)
+                namespace = dict(json=json, gr=SimpleNamespace(update=lambda **kw: kw), context=None,
+                                 opened=lambda loaded, chosen: (run, entry, game),
+                                 model_note=lambda context, found: '', rerun_cleared=lambda: ())
+                exec(compile(ast.Module(body=[node], type_ignores=[]), '<production show_turn>', 'exec'), namespace)
+                shown = namespace['show_turn'](None, None, 0)
+                self.assertEqual(shown[3:5], ('Inert', expected))
+                exported = support.conversation(game, 0, manifest=run.manifest)
+                self.assertEqual([{'role': m['role'], 'content': m['content']} for m in exported['turns']], messages)
+
     def test_post_system_roles_must_be_exportable(self):
         run, entry, original = fixture()
         for role in ('tool', 'system', 'developer', 'future-role'):

@@ -556,7 +556,8 @@ def build_page(context):
                     "All seats saw the phase snapshot before any replies were applied. "
                     "Recorded profile: " + json.dumps(profile))
             return (heading, gr.update(choices=[], value=None, visible=False), note,
-                    turn['messages'][0]['content'], turn['messages'][1]['content'], '',
+                    turn['messages'][0]['content'],
+                    next((m['content'] for m in reversed(turn['messages']) if m['role'] == 'user'), ''), '',
                     (turn.get('parsed') or {}).get('message', ''), turn['raw_reply'], turn.get('parsed'), None,
                     model_note(context, found), *rerun_cleared())
         attempts = turn["attempts"]
