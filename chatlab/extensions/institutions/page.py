@@ -471,8 +471,9 @@ def build_page(context):
         found = find_run(loaded, run_id)
         rows, arms = overview_rows(found)
         if found and found.scenario == "customer_support":
-            closures = sorted({g['closure_rule'] for g in found.games})
-            arms_update = gr.update(choices=[(support.CLOSURES[c], c) for c in closures],
+            rules = support.closure_rules(found.manifest)
+            closures = [c for c in rules if any(g['closure_rule'] == c for g in found.games)]
+            arms_update = gr.update(choices=[(rules[c], c) for c in closures],
                                    value=chosen_arm if chosen_arm in closures else closures[0])
             return rows, arms, arms_update, gr.update(value=""), scenario_html(found)
         arms_update = gr.update(choices=arms, value=chosen_arm if chosen_arm in arms else (arms[0] if arms else None))
@@ -530,7 +531,9 @@ def build_page(context):
             return "", [], [], None
         if found.scenario == "customer_support":
             state = support.phase_state(game, index)
-            return support.phase_html(game, state), support.turn_rows(game, state), list(state['turns']), state['turns'][0]
+            # A phase may hold only boundary events and no turns.
+            return (support.phase_html(game, state), support.turn_rows(game, state), list(state['turns']),
+                    state['turns'][0] if state['turns'] else None)
         state = phase_state(game, found.arms.get(game["arm"], {}), index)
         return phase_html(game, state), turn_rows(game, state), list(state["turns"]), (
             state["turns"][0] if state["turns"] else None)
@@ -549,11 +552,12 @@ def build_page(context):
             phase = next(p for p in game['phases'] if p['phase_id'] == turn['phase_id'])
             heading = (f"### What this agent saw · agent {turn['actor']} · {turn['model_profile']} · "
                        f"Round {phase['round']} {phase['kind']} · {'Accepted' if turn['accepted'] else 'Rejected'}")
-            note = (f"{turn['error'] or 'Accepted independent call.'} Prompt and reply token counts: unknown. "
+            note = (f"{turn.get('error') or 'Accepted independent call.'} Prompt and reply token counts: unknown. "
                     "All seats saw the phase snapshot before any replies were applied. "
                     "Recorded profile: " + json.dumps(profile))
             return (heading, gr.update(choices=[], value=None, visible=False), note,
-                    turn['messages'][0]['content'], turn['messages'][1]['content'], '',
+                    turn['messages'][0]['content'],
+                    next((m['content'] for m in reversed(turn['messages']) if m['role'] == 'user'), ''), '',
                     (turn.get('parsed') or {}).get('message', ''), turn['raw_reply'], turn.get('parsed'), None,
                     model_note(context, found), *rerun_cleared())
         attempts = turn["attempts"]
@@ -592,7 +596,7 @@ def build_page(context):
                 gr.update(visible=not is_support), gr.update(label='Closure rule' if is_support else 'Arm'),
                 gr.update(label='Team composition' if is_support else 'Condition'),
                 gr.update(label='Event seed' if is_support else 'Seed'),
-                gr.update(label='Run comparison' if is_support else 'Arms', headers=support.OVERVIEW_HEADERS if is_support else OVERVIEW_HEADERS,
+                gr.update(label='Run comparison' if is_support else 'Arms', headers=support.overview_headers(found) if is_support else OVERVIEW_HEADERS,
                           value=overview_rows(found)[0] if found else []),
                 'Support rates pool event and case numerators and denominators. Click a group to select its games.' if is_support
                 else "Means over each arm's eval red games. Click an arm to open its red games.",
@@ -611,20 +615,21 @@ def build_page(context):
             for e in events:
                 if e['kind'] == 'management_report':
                     payload = e['payload']
-                    reports.append(dict(event=e['event_id'], actor=e['actor'], required=payload['required_failure_ids'],
-                                        reported=payload['reported_failure_ids'],
-                                        omitted=sorted(set(payload['required_failure_ids']) - set(payload['reported_failure_ids']))))
-                    linked += payload['required_failure_ids']
-                    for failure in payload['required_failure_ids']:
-                        reported = failure in payload['reported_failure_ids']
-                        report_rows.append([e['event_id'], e['actor'], failure, reported, not reported, 'Accepted report'])
+                    required = support.event_ids(game, payload.get('required_failure_ids'))
+                    given = support.event_ids(game, payload.get('reported_failure_ids'))
+                    reports.append(dict(event=e['event_id'], actor=e.get('actor'), required=required, reported=given,
+                                        omitted=sorted(set(required) - set(given))))
+                    linked += required
+                    for failure in required:
+                        reported = failure in given
+                        report_rows.append([e['event_id'], e.get('actor'), failure, reported, not reported, 'Accepted report'])
                         report_ids.append(failure)
-                    if not payload['required_failure_ids']:
-                        report_rows.append([e['event_id'], e['actor'], 'None', 'None required', False, 'Accepted report'])
+                    if not required:
+                        report_rows.append([e['event_id'], e.get('actor'), 'None', 'None required', False, 'Accepted report'])
                         report_ids.append(e['event_id'])
             # Missing valid reports stay separate from accepted reports with omissions.
             missing = [d for d in game['diagnostics'] if d['category'] == 'Missing valid report'
-                       and game['events'][d['event_refs'][0]]['payload']['round'] == state['phase']['source_round']]
+                       and game['events'][d['event_refs'][0]]['payload'].get('round') == state['phase'].get('source_round')]
             if state['phase']['kind'] == 'review':
                 reports += [dict(category='Missing valid report', actor=d['actor'], failure=d['event_refs'][0]) for d in missing]
                 linked += [d['event_refs'][0] for d in missing]
@@ -745,7 +750,7 @@ def build_page(context):
             if found.scenario != 'customer_support' or type(row) is not int or not 0 <= row < len(keys):
                 return None, ''
             e = game['events'][keys[row]]
-            index = next((i for i, t in enumerate(game['turns']) if t['turn_id'] == e['turn_id']), None)
+            index = next((i for i, t in enumerate(game['turns']) if t['turn_id'] == e.get('turn_id')), None)
             detail = support.box('Selected event — original payload', e)
             if cid:
                 phase = next(p for p in game['phases'] if p['phase_id'] == e['phase_id'])

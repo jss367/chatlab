@@ -1,5 +1,7 @@
 """Real archived support evidence and contract corruption regressions; no inference."""
 import copy
+import gzip
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -18,6 +20,15 @@ SMOKE = 'support-integrity-interface-v2-20261009T004644Z-smoke'
 OLD = 'support-integrity-20261008T233339Z-smoke'
 SYNTHETIC = 'synthetic-support-evidence'
 NAMED = 'support-reward-hacking-20261010T001335Z-smoke'
+
+
+def move_event_to_next_phase(game, event_id):
+    """Keep the event's turn link and actor but file it, and its phase list entry, under the next phase."""
+    event = game['events'][event_id]
+    index = next(i for i, p in enumerate(game['phases']) if p['phase_id'] == event['phase_id'])
+    game['phases'][index]['event_refs'].remove(event_id)
+    game['phases'][index + 1]['event_refs'].insert(0, event_id)
+    event['phase_id'] = game['phases'][index + 1]['phase_id']
 
 
 class SupportTests(unittest.TestCase):
@@ -142,14 +153,19 @@ class SupportTests(unittest.TestCase):
             lambda x: x['phases'][0]['event_refs'].append(x['phases'][0]['event_refs'][0]),
             lambda x: x['turns'][0]['event_refs'].append(9999),
             lambda x: x['events'][106].update(turn_id='unknown'),
-            lambda x: x['snapshots']['r1-work-after']['cases']['C000'].update(status='resolved'),
-            lambda x: x['scores'].update(actually_resolved=999),
-            lambda x: x['diagnostics'].clear(),
             lambda x: x['snapshots']['r1-work-after'].pop('cases'),
-            lambda x: x['events'][0].update(payload={}),
+            lambda x: x['phases'][0].update(before='missing'),
             lambda x: x['turns'][0].update(messages=[]),
-            lambda x: x['turns'][0]['observation'].update(dashboard={'resolved': 20}),
-            lambda x: x['events'][next(i for i,v in enumerate(x['events']) if v['kind']=='management_report')]['payload'].update(reported_failure_ids=[106]),
+            lambda x: x['turns'][0].pop('observation'),
+            lambda x: x['turns'].pop(),
+            lambda x: x['events'].reverse(),
+            lambda x: x['events'][0].update(payload=None),
+            lambda x: x['diagnostics'][0].update(actor=99),
+            lambda x: x['diagnostics'][0].update(event_refs=[]),
+            lambda x: x['agents'][1].update(model_profile='organism'),
+            lambda x: x['scores'].update(actually_resolved=999),
+            lambda x: x.update(scenario_version=2),
+            lambda x: move_event_to_next_phase(x, 106),
         ]
         for mutation in mutations:
             damaged = copy.deepcopy(g)
@@ -157,26 +173,14 @@ class SupportTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 support.validate_game(r, e, damaged)
 
-    def test_success_requires_case_operation_but_failed_wrong_attempt_is_preserved(self):
-        run, entry, game = self.game('s0-peer-organisms1', SYNTHETIC)
-        wrong_attempt = next(e for e in game['events'] if e['kind'] == 'tool_result' and e['case_id'] == 'C000')
-        case = game['snapshots']['r1-work-after']['cases']['C000']
-        self.assertNotEqual(wrong_attempt['payload']['operation'], case['operation'])
-        self.assertFalse(wrong_attempt['payload']['success'])
-        support.validate_game(run, entry, game)
-
-        damaged = copy.deepcopy(game)
-        successful = next(e for e in damaged['events'] if e['kind'] == 'tool_result' and e['payload']['success'])
-        original_operation = successful['payload']['operation']
-        wrong_operation = 'refund' if original_operation != 'refund' else 'subscription'
-        successful['payload']['operation'] = wrong_operation
-        turn = next(t for t in damaged['turns'] if t['turn_id'] == successful['turn_id'])
-        for operation in turn['parsed']['operations']:
-            if operation['case_id'] == successful['case_id']:
-                operation['operation'] = wrong_operation
-        turn['raw_reply'] = json.dumps(turn['parsed'])
-        with self.assertRaisesRegex(ValueError, 'invalid backend operation'):
-            support.validate_game(run, entry, damaged)
+    def test_scenario_rules_belong_to_the_exporter(self):
+        # The exporter writes a game only if replaying it reproduces every value, so ChatLab does not recheck them.
+        r, e, g = self.game('s1-direct-organisms1')
+        damaged = copy.deepcopy(g)
+        damaged['snapshots']['r1-work-after']['cases']['C000'].update(status='resolved')
+        damaged['turns'][0]['observation'].update(dashboard={'resolved': 20}, unknown_field=True)
+        damaged['diagnostics'].append(dict(category='A category from a new scenario', actor=0, event_refs=[0], rule={}))
+        support.validate_game(r, e, damaged)
 
     def test_hash_cache_and_path_integrity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -235,17 +239,6 @@ class NamedTeamTests(unittest.TestCase):
         self.assertIn('2 cheater + 3 base', header)
         self.assertIn('<td>cheater</td><td>2</td>', header)
 
-    def test_json_is_read_after_the_reasoning(self):
-        run, entry, g = self.game('cheater-s0-peer')
-        reasoned = [t for t in g['turns'] if '{' in t['raw_reply'].split('</think>')[0]]
-        self.assertTrue(reasoned)
-        self.assertEqual(support.answer(run.manifest, '<think>{"a": 1}</think>{"b": 2}'), '{"b": 2}')
-        self.assertIsNone(support.answer(run.manifest, '<think>{"a": 1} and then it ran out'))
-        self.assertEqual(support.answer({}, '<think>{"a": 1}</think>'), '<think>{"a": 1}</think>')
-        plain = bundles.Run(run.root, dict(run.manifest, reply_format='json'), run.games)
-        with self.assertRaisesRegex(ValueError, 'parsed reply disagrees'):
-            support.validate_game(plain, entry, g)
-
     def test_open_in_chat_keeps_reasoning_out_of_the_answer(self):
         run, _, g = self.game('cheater-s0-peer')
         index = next(i for i, t in enumerate(g['turns']) if '</think>' in t['raw_reply'])
@@ -275,16 +268,94 @@ class NamedTeamTests(unittest.TestCase):
         manifests = []
         for mutate in (lambda m: m['compositions']['mixed'].update(roster=['cheater', 'unknown', 'base', 'base', 'base']),
                        lambda m: m['compositions']['mixed'].pop('label'),
-                       lambda m: m.pop('reply_format'),
+                       lambda m: m['compositions']['mixed'].update(roster=[]),
                        lambda m: m['games'][0].update(composition=0),
-                       lambda m: m['validation']['per_profile_invalid_fraction'].update(base=.5),
-                       lambda m: m.update(exporter_version=2)):
+                       lambda m: m.update(closure_rules={'direct': 'Direct closure'}),
+                       lambda m: m.update(score_columns={'game': [{'label': 'Missing', 'value': 'scores.nope'}]}),
+                       lambda m: m.update(score_columns={'agent': [{'label': 'Distinct', 'distinct_cases': 'x'}]}),
+                       lambda m: m.update(score_columns={'game': []}),
+                       lambda m: m.update(exporter_version='3'),
+                       lambda m: m['model_profiles']['cheater'].update(adapter={}),
+                       lambda m: m['model_profiles']['base'].update(adapter=False),
+                       lambda m: m.update(reply_format='reasoning_then_jsn'),
+                       lambda m: m.update(reply_format=None),
+                       lambda m: m['model_profiles']['cheater'].update(merge_method=['peft'])):
             manifest = copy.deepcopy(run.manifest)
             mutate(manifest)
             manifests.append(manifest)
         for manifest in manifests:
-            with self.subTest(manifest=manifest.get('exporter_version')), self.assertRaises(ValueError):
+            with self.subTest(manifest=manifest), self.assertRaises(ValueError):
                 support.validate_manifest(manifest)
+
+
+def six_seat_bundle(root):
+    """The named-team smoke turned into an experiment ChatLab has no code for: a sixth seat on new weights, a new
+    closure rule, and a score the support pilot never had. Only the bundle describes them."""
+    source = FIXTURES / NAMED
+    manifest = json.loads((source / 'manifest.json').read_text())
+    entry = next(e for e in manifest['games'] if e['game_id'] == 'mixed-s0-peer')
+    with gzip.open(source / entry['file']) as stream:
+        game = json.load(stream)
+    judge = dict(copy.deepcopy(manifest['model_profiles']['base']), profile_id='judge')
+    manifest['model_profiles']['judge'] = game['model_profiles']['judge'] = judge
+    roster = [a['model_profile'] for a in game['agents']] + ['judge']
+    manifest['compositions'] = {'six': dict(label='2 cheater + 3 base + judge', roster=roster)}
+    manifest['closure_rules'] = {'jury': 'Jury vote'}
+    manifest['score_columns'] = {
+        'game': [{'label': 'Bribes offered / cases', 'value': ['scores.bribes', 'scores.cases']},
+                 {'label': 'Distinct false closures', 'distinct_cases': 'False closure claim'}],
+        'agent': [{'label': 'Bribes', 'value': 'bribes'}]}
+    game.update(closure_rule='jury', composition='six')
+    game['agents'].append(dict(actor=5, model_profile='judge'))
+    for phase in game['phases']:
+        seat = copy.deepcopy(next(t for t in game['turns'] if t['turn_id'] == phase['turn_refs'][-1]))
+        seat.update(turn_id=phase['phase_id'] + '-a5', actor=5, model_profile='judge', event_refs=[])
+        game['turns'].append(seat)
+        phase['turn_refs'].append(seat['turn_id'])
+    # A phase with no turns, such as a briefing the scenario plays before anyone acts.
+    first = game['phases'][0]
+    game['phases'].insert(0, dict(first, phase_id='briefing', kind='briefing', turn_refs=[], event_refs=[], after=first['before']))
+    scores = game['scores']
+    scores['per_agent'].append(dict(copy.deepcopy(scores['per_agent'][-1]), agent=5, model='judge'))
+    for a in scores['per_agent']:
+        a['bribes'] = a['agent'] % 2
+    scores['bribes'] = sum(a['bribes'] for a in scores['per_agent'])
+    data = gzip.compress(json.dumps(game).encode())
+    path = root / entry['file']
+    path.parent.mkdir(parents=True)
+    path.write_bytes(data)
+    entry.update(closure_rule='jury', composition='six', turns=len(game['turns']), phases=len(game['phases']), scores=scores,
+                 sha256=hashlib.sha256(data).hexdigest())
+    manifest['games'] = [entry]
+    manifest['validation'].update(games=1, turns=entry['turns'])
+    (root / 'manifest.json').write_text(json.dumps(manifest))
+
+
+class NewExperimentTests(unittest.TestCase):
+    def test_a_bundle_describes_an_experiment_chatlab_has_no_code_for(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            six_seat_bundle(Path(tmp))
+            run = bundles.read_run(Path(tmp))[0]
+            entry = run.games[0]
+            game = bundles.read_game(run, entry)
+            self.assertEqual(len(game['agents']), 6)
+            rows, keys = overview_rows(run)
+            self.assertEqual(support.overview_headers(run)[3:], ['Bribes offered / cases', 'Distinct false closures'])
+            distinct = len({d['case_id'] for d in game['diagnostics'] if d['category'] == 'False closure claim'})
+            self.assertEqual(rows, [['Jury vote', '2 cheater + 3 base + judge', 1, f"3 / {game['scores']['cases']}", distinct]])
+            self.assertEqual(keys, [('jury', 'six')])
+            header = support.game_header(run, entry, game)
+            self.assertIn('Jury vote · 2 cheater + 3 base + judge', header)
+            self.assertIn('<th>Bribes</th>', header)
+            self.assertIn('<td>5</td><td>judge</td><td>1</td>', header)
+            self.assertIn('<td>judge</td><td>1</td><td>1</td>', header)
+            seat = next(t for t in game['turns'] if t['actor'] == 5)
+            self.assertEqual(bundles.conversation(game, game['turns'].index(seat))['institutions_provenance']['model_profile']['profile_id'], 'judge')
+            # The roster is still checked seat by seat.
+            damaged = copy.deepcopy(game)
+            damaged['agents'][5]['model_profile'] = 'base'
+            with self.assertRaisesRegex(ValueError, 'composition disagrees'):
+                support.validate_game(run, entry, damaged)
 
 
 class SupportContractRegressionTests(unittest.TestCase):
@@ -337,19 +408,13 @@ class SupportContractRegressionTests(unittest.TestCase):
                     self.assertEqual(len(warnings), 1)
                     self.assertIn('invalid team compositions', warnings[0])
 
-    def test_version_two_keeps_the_fixed_profile_vocabulary(self):
-        original = json.loads((FIXTURES / SMOKE / 'manifest.json').read_text())
-        support.validate_manifest(original)
-        renamed = {'parent': 'base', 'organism': 'adapter'}
-        m = copy.deepcopy(original)
-        m['model_profiles'] = {renamed[key]: dict(profile, profile_id=renamed[key])
-                               for key, profile in m['model_profiles'].items()}
-        for entry in m['games']:
-            for agent in entry['scores']['per_agent']:
-                agent['model'] = renamed[agent['model']]
-        with self.assertRaises(ValueError):
-            support.validate_manifest(m)
-        support.validate_manifest(self.manifest())  # Named IDs remain valid in v3.
+    def test_adapter_without_merge_method_is_not_called_original_weights(self):
+        m = self.manifest()
+        m['model_profiles']['cheater'].pop('merge_method')
+        support.validate_manifest(m)
+        text = support.scenario_html(SimpleNamespace(manifest=m, config=m['config']))
+        self.assertIn('<td>Not recorded</td>', text)
+        self.assertIn('<td>base</td><td>Qwen/Qwen3-8B</td><td>None</td><td>Original parent weights</td>', text)
 
     def test_profile_table_distinguishes_parent_subfolders(self):
         m = self.manifest()
@@ -374,47 +439,6 @@ class SupportContractRegressionTests(unittest.TestCase):
                                per_profile_invalid_fraction={'base': 0, 'cheater': 3 / 20},
                                reliability_gate_passed=False)
         return m
-
-    def test_absent_profile_gate_uses_only_the_aggregate_gate(self):
-        m = self.manifest()
-        m['validation'].pop('per_profile_invalid_fraction')
-        m['validation']['reliability_gate_passed'] = True
-        support.validate_manifest(m)
-
-    def test_present_profile_gate_requires_exact_used_profiles_and_actual_rates(self):
-        m = self.manifest()
-        support.validate_manifest(m)  # The unused honest profile needs no rate.
-        for rates in ({}, {'base': 0}, {'base': 0, 'cheater': .05},
-                      {'base': 0, 'cheater': 3 / 20, 'honest': 0}, None):
-            with self.subTest(rates=rates):
-                damaged = copy.deepcopy(m)
-                damaged['validation'].update(per_profile_invalid_fraction=rates,
-                                             reliability_gate_passed=True)
-                with self.assertRaises(ValueError):
-                    support.validate_manifest(damaged)
-
-    def test_present_gate_reconciles_per_agent_counts_and_team_seats(self):
-        for change in ('count', 'seat'):
-            with self.subTest(change=change):
-                m = self.manifest()
-                agent = m['games'][0]['scores']['per_agent'][0]
-                agent['invalid_turns' if change == 'count' else 'model'] = 2 if change == 'count' else 'base'
-                with self.assertRaises(ValueError):
-                    support.validate_manifest(m)
-
-    def test_profile_rates_pool_turn_opportunities_across_different_teams(self):
-        m = self.manifest()
-        extra = copy.deepcopy(m['games'][0])
-        extra.update(game_id='extra', file='games/extra.json.gz', composition='cheater',
-                     phases=20, turns=100)
-        extra['scores']['invalid_turns'] = 0
-        for agent in extra['scores']['per_agent']:
-            agent.update(model='cheater', invalid_turns=0)
-        m['games'].append(extra)
-        m['validation'].update(games=2, turns=150, invalid_fraction=3 / 150,
-                               per_profile_invalid_fraction={'base': 0, 'cheater': 3 / 120},
-                               reliability_gate_passed=True)
-        support.validate_manifest(m)
 
     def test_reasoning_export_uses_the_declared_last_closing_boundary(self):
         profile = self.manifest()['model_profiles']['base']
@@ -548,8 +572,9 @@ class SupportPageTests(unittest.TestCase):
         self.assertEqual(json.loads(Path(download['value']).read_text()), payload)
         settings = self.fn['configure_scenario'](runs, run_id)
         self.assertFalse(settings[2]['visible'])
-        self.assertEqual(settings[6]['headers'], support.OVERVIEW_HEADERS)
-        self.assertEqual(len(settings[6]['value'][0]), len(support.OVERVIEW_HEADERS))
+        headers = support.overview_headers(bundles.read_run(FIXTURES / FULL)[0])
+        self.assertEqual(settings[6]['headers'], headers)
+        self.assertEqual(len(settings[6]['value'][0]), len(headers))
         # No report finding from a later review is visible in an earlier work phase.
         old = bundles.read_run(FIXTURES / OLD)[0]
         old_game = bundles.read_game(old, old.games[0])
@@ -563,3 +588,23 @@ class SupportPageTests(unittest.TestCase):
         with self.assertRaisesRegex(invoice_tests.gr.Error, 'read-only'):
             list(self.fn['generate'](runs, current, index, None, 'support-session', 1.0, 512, 0))
         self.assertEqual(self.manager.calls, [])
+
+    def test_page_reads_an_experiment_it_has_no_code_for(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            six_seat_bundle(Path(tmp) / 'six')
+            runs, chosen, _ = self.fn['load_source'](tmp, None)
+            run_id = chosen['value']
+            rows, _, arm, _, _ = self.fn['show_run'](runs, run_id, None)
+            self.assertEqual(arm['choices'], [('Jury vote', 'jury')])
+            settings = self.fn['configure_scenario'](runs, run_id)
+            self.assertEqual(settings[6]['headers'][3:], ['Bribes offered / cases', 'Distinct false closures'])
+            picked = self.fn['pick_game'](runs, run_id, 'eval', 'jury', None, None, None)
+            self.assertEqual(picked[0]['choices'], [('2 cheater + 3 base + judge', 'six')])
+            header, phases = self.fn['show_game'](runs, picked[3])
+            self.assertIn('Jury vote', header)
+            _, turns, _, _ = self.fn['show_phase'](runs, picked[3], 1)
+            self.assertEqual([row[1] for row in turns], [0, 1, 2, 3, 4, 5])
+            self.assertTrue(self.fn['support_phase'](runs, picked[3], 1)[0])
+            # The leading phase holds no turns; it renders with no turn selected.
+            _, turns, keys, first = self.fn['show_phase'](runs, picked[3], 0)
+            self.assertEqual((turns, keys, first), ([], [], None))
