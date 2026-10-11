@@ -50,7 +50,8 @@ class SavedGameFixture(unittest.TestCase):
             build_page(context)
         self.addCleanup(demo.close)
         self.fn = handlers_by_name(demo)
-        for target in ("chatlab.extensions.hangman.game.dictionary", "chatlab.extensions.hangman.page.dictionary"):
+        for target in ("chatlab.extensions.hangman.game.dictionary", "chatlab.extensions.hangman.page.dictionary",
+                       "chatlab.extensions.hangman.batch.dictionary"):
             patcher = mock.patch(target, return_value=WORDS)
             patcher.start()
             self.addCleanup(patcher.stop)
