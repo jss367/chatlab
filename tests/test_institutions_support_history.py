@@ -1,9 +1,11 @@
 """Snapshot history shape checks using an authored in-memory game; no archived runs or inference."""
 import copy
+import json
 from types import SimpleNamespace
 import unittest
 
 from chatlab.extensions.institutions import support
+from chatlab.conversation import from_json
 
 
 def fixture():
@@ -55,3 +57,44 @@ class SnapshotHistoryTests(unittest.TestCase):
                 self.assertEqual(len(rows), 1)
                 expected = 'event 0: completed' if history == histories[-1] else 'No attempt'
                 self.assertEqual(rows[0][3], expected)
+
+
+class ExportAndActorTests(unittest.TestCase):
+    def test_post_system_roles_must_be_exportable(self):
+        run, entry, original = fixture()
+        for role in ('tool', 'system', 'developer', 'future-role'):
+            with self.subTest(role=role):
+                game = copy.deepcopy(original)
+                game['turns'][0]['messages'].append({'role': role, 'content': 'Inert'})
+                with self.assertRaisesRegex(ValueError, 'invalid exact message list'):
+                    support.validate_game(run, entry, game)
+
+    def test_user_and_assistant_history_exports_and_loads_in_memory(self):
+        run, entry, game = fixture()
+        game['turns'][0]['messages'] += [{'role': 'assistant', 'content': 'Earlier answer'},
+                                       {'role': 'user', 'content': 'Follow-up'}]
+        support.validate_game(run, entry, game)
+        payload = support.conversation(game, 0, include_reply=True, manifest=run.manifest)
+        restored, system = from_json(json.dumps(payload))
+        self.assertEqual(system, 'Inert')
+        self.assertEqual([t['role'] for t in restored], ['user', 'assistant', 'user', 'assistant'])
+
+    def test_actor_references_reject_non_integer_aliases(self):
+        run, entry, game = fixture()
+        game['events'] = [dict(event_id=0, phase_id='p0', turn_id='t0', actor=0,
+                               kind='inert', payload={})]
+        game['phases'][0]['event_refs'] = [0]
+        game['turns'][0]['event_refs'] = [0]
+        game['diagnostics'] = [dict(category='Inert', actor=0, event_refs=[0])]
+        support.validate_game(run, entry, game)
+        for field in ('turns', 'events', 'diagnostics'):
+            for actor in (False, True, 0.0, 1.0, '0', [], {}):
+                with self.subTest(field=field, actor=actor):
+                    damaged = copy.deepcopy(game)
+                    damaged[field][0]['actor'] = actor
+                    with self.assertRaises(ValueError):
+                        support.validate_game(run, entry, damaged)
+        # Phase-boundary events have no originating turn or actor.
+        game['events'][0].update(actor=None, turn_id=None)
+        game['turns'][0]['event_refs'] = []
+        support.validate_game(run, entry, game)

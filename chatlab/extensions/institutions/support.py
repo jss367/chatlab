@@ -265,21 +265,23 @@ def _validate_game(run, entry, game):
             'incomplete or duplicate phase references')
     for turn in turns.values():
         a = turn.get('actor')
-        require(a in agents and turn.get('model_profile') == agents[a]['model_profile'], 'turn profile disagrees')
+        require(integer(a) and a in agents and turn.get('model_profile') == agents[a]['model_profile'],
+                'turn profile disagrees')
         require(type(turn.get('accepted')) is bool and (turn.get('error') is None if turn['accepted'] else isinstance(turn.get('error'), str)), 'invalid acceptance status')
         require(isinstance(turn.get('raw_reply'), str) and (turn.get('parsed') is None or isinstance(turn['parsed'], dict)), 'invalid reply')
         require(turn.get('input_tokens') is None and turn.get('output_tokens') is None, 'invented per-turn token measurements')
         messages = turn.get('messages')
         require(isinstance(messages, list) and len(messages) >= 2
                 and all(isinstance(m, dict) and text(m.get('role')) and isinstance(m.get('content'), str) for m in messages)
-                and messages[0]['role'] == 'system',
+                and messages[0]['role'] == 'system'
+                and all(m['role'] in ('user', 'assistant') for m in messages[1:]),
                 'invalid exact message list')
         require(isinstance(turn.get('observation'), dict), 'missing recorded observation')
         refs(turn.get('event_refs'), events, 'emitted event')
         require(turn['event_refs'] == [e['event_id'] for e in events.values() if e.get('turn_id') == turn['turn_id']], 'event-to-turn links disagree')
     for e in events.values():
         require(text(e.get('kind')) and isinstance(e.get('payload'), dict), 'invalid event')
-        require(e.get('actor') is None or e['actor'] in agents, 'unknown event actor')
+        require(e.get('actor') is None or (integer(e['actor']) and e['actor'] in agents), 'unknown event actor')
         require(e.get('case_id') is None or text(e['case_id']), 'invalid case reference')
         # The page opens an event's turn from the event's phase, so both must be the same phase.
         require(e.get('turn_id') is None or (e['turn_id'] in turns and turns[e['turn_id']]['actor'] == e.get('actor')
@@ -288,7 +290,7 @@ def _validate_game(run, entry, game):
     diagnostics = game.get('diagnostics')
     require(isinstance(diagnostics, list), 'invalid diagnostics')
     for d in diagnostics:
-        require(isinstance(d, dict) and text(d.get('category')) and d.get('actor') in agents
+        require(isinstance(d, dict) and text(d.get('category')) and integer(d.get('actor')) and d['actor'] in agents
                 and (d.get('case_id') is None or text(d['case_id'])), 'invalid diagnostic')
         refs(d.get('event_refs'), events, 'diagnostic event')
         require(d['event_refs'], 'diagnostic without evidence')
