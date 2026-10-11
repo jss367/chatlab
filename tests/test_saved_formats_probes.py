@@ -159,7 +159,12 @@ class SavedProbeTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.directory = Path(directory.name)
 
-    def assert_reads_as_expected(self, probe, expected):
+    def assert_reads_as_expected(self, probe, expected, name):
+        # Compare every output to immutable source bytes, not to the parsed
+        # value that the same reader/writer could already have corrupted.
+        frozen = json.loads((FIXTURES / name).read_text())
+        for loaded, saved in zip(probe["layers"], frozen["layers"], strict=True):
+            self.assertEqual(loaded["weights"], saved["weights"])
         for field in FIELDS:
             self.assertEqual(probe[field], expected[field], field)
         self.assertEqual(type(probe["l2"]), float)
@@ -176,7 +181,7 @@ class SavedProbeTests(unittest.TestCase):
     def test_each_era_reads_with_its_fields_and_layers(self):
         for name, expected in EXPECTED.items():
             with self.subTest(name=name):
-                self.assert_reads_as_expected(probes.read(FIXTURES / name), expected)
+                self.assert_reads_as_expected(probes.read(FIXTURES / name), expected, name)
 
     def test_older_eras_carry_none_of_the_later_fields(self):
         """The reader fills what an older writer never wrote: no revision, no precision."""
@@ -246,7 +251,7 @@ class SavedProbeTests(unittest.TestCase):
                 (probe, summary, rows, picker, download, layer, as_user, _reading, _strip, _detail, _tokens, _heat,
                  form_name, positive_label, negative_label, positive_text, negative_text, chat_template, paired,
                  pool, l2) = shown
-                self.assert_reads_as_expected(probe, expected)
+                self.assert_reads_as_expected(probe, expected, name)
                 self.assertEqual(summary, expected["summary"])
                 self.assertEqual(rows, expected["rows"])
                 self.assertEqual(picker["value"], expected["id"])
@@ -262,8 +267,8 @@ class SavedProbeTests(unittest.TestCase):
                 # The page saved it with today's writer; opening that and the download reads the same.
                 self.assertTrue((data / f"{expected['id']}.json").is_file())
                 reopened = fn["open_saved"](expected["id"], "owner")[0]
-                self.assert_reads_as_expected(reopened, expected)
-                self.assert_reads_as_expected(probes.read(download), expected)
+                self.assert_reads_as_expected(reopened, expected, name)
+                self.assert_reads_as_expected(probes.read(download), expected, name)
 
     def test_resaving_with_todays_writer_keeps_the_facts(self):
         for name, expected in EXPECTED.items():
@@ -271,7 +276,7 @@ class SavedProbeTests(unittest.TestCase):
                 path = self.directory / name
                 path.write_text(probes.dumps(probes.read(FIXTURES / name)))
                 again = probes.read(path)
-                self.assert_reads_as_expected(again, expected)
+                self.assert_reads_as_expected(again, expected, name)
                 self.assertEqual(probe_page.probe_summary(again), expected["summary"])
 
 
