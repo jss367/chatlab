@@ -1,0 +1,286 @@
+{
+  "format": "chatlab-library-1",
+  "active": "Fork 1",
+  "branches": [
+    {
+      "name": "Main",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Compare these two pictures.",
+          "reasoning": "",
+          "images": [
+            "637680522ab405996049eb31c699b67146a10e1d6e42f7eb1369382dd16b0a4d.png",
+            "e6ac02f2f46e0c9621360e5d005a59dbf6bc202cd49ac9dbb6c2ef590c364dbf.png"
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": "One is blue and wide, the other green and tall.",
+          "reasoning": "Look at colour and aspect ratio.",
+          "model": "Qwen/Qwen3-4B",
+          "prompt_tokens": 400,
+          "generated_tokens": 30,
+          "thinking_mode": "on",
+          "steering": {
+            "model_id": "Qwen/Qwen3-4B",
+            "layer": 12,
+            "strength": -6.5,
+            "enabled": true,
+            "format": "chatlab-steering-reference-1",
+            "vector_id": "b27d0b755bfb9138a2ba257b12fa6c4a002541dfa5cdbb6f844eebd6a9227ff8",
+            "width": 5
+          },
+          "generation_settings": {
+            "temperature": 0.8,
+            "top_p": 0.9,
+            "top_k": 30,
+            "skip_top_below": 0.02,
+            "max_new_tokens": 300,
+            "seed": 77,
+            "system_prompt": "You are terse.",
+            "keep_reasoning": true,
+            "assistant_prefill": "Sure:",
+            "thinking_mode": "on"
+          }
+        }
+      ],
+      "sampling": {
+        "steering": {
+          "model_id": "Qwen/Qwen3-4B",
+          "layer": 12,
+          "strength": -6.5,
+          "enabled": true,
+          "format": "chatlab-steering-reference-1",
+          "vector_id": "b27d0b755bfb9138a2ba257b12fa6c4a002541dfa5cdbb6f844eebd6a9227ff8",
+          "width": 5
+        },
+        "future_knob": "kept",
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "top_k": 30,
+        "skip_top_below": 0.02,
+        "max_new_tokens": 300
+      },
+      "sampling_updated": "2026-10-10T10:00:00.000010+00:00",
+      "updated": "2026-10-10T09:00:00.000001+00:00"
+    },
+    {
+      "name": "Fork 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Compare these two pictures.",
+          "reasoning": "",
+          "images": [
+            "637680522ab405996049eb31c699b67146a10e1d6e42f7eb1369382dd16b0a4d.png",
+            "e6ac02f2f46e0c9621360e5d005a59dbf6bc202cd49ac9dbb6c2ef590c364dbf.png"
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": "One is blue and wide, the other green and tall.",
+          "reasoning": "Look at colour and aspect ratio.",
+          "model": "Qwen/Qwen3-4B",
+          "prompt_tokens": 400,
+          "generated_tokens": 30,
+          "thinking_mode": "on",
+          "steering": {
+            "model_id": "Qwen/Qwen3-4B",
+            "layer": 12,
+            "strength": -6.5,
+            "enabled": true,
+            "format": "chatlab-steering-reference-1",
+            "vector_id": "b27d0b755bfb9138a2ba257b12fa6c4a002541dfa5cdbb6f844eebd6a9227ff8",
+            "width": 5
+          },
+          "generation_settings": {
+            "temperature": 0.8,
+            "top_p": 0.9,
+            "top_k": 30,
+            "skip_top_below": 0.02,
+            "max_new_tokens": 300,
+            "seed": 77,
+            "system_prompt": "You are terse.",
+            "keep_reasoning": true,
+            "assistant_prefill": "Sure:",
+            "thinking_mode": "on"
+          }
+        },
+        {
+          "role": "user",
+          "content": "Which is larger?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning": "",
+          "token_step_paused": true,
+          "model": "Qwen/Qwen3-4B",
+          "thinking_mode": "on"
+        }
+      ],
+      "origin": {
+        "parent": "Main",
+        "kind": "message",
+        "turn": 1,
+        "part": "content",
+        "message_count": 2
+      },
+      "sampling": {
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "top_k": 30,
+        "skip_top_below": 0.02,
+        "max_new_tokens": 300,
+        "_chatlab_fork_origin": {
+          "branch": "Fork 1",
+          "origin": {
+            "parent": "Main",
+            "kind": "message",
+            "turn": 1,
+            "part": "content",
+            "message_count": 2
+          }
+        }
+      },
+      "sampling_updated": "2026-10-10T10:01:00.000020+00:00",
+      "updated": "2026-10-10T09:01:00.000002+00:00"
+    },
+    {
+      "name": "Chat 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Summarise War and Peace.",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning": "",
+          "error": "The model ran out of memory.",
+          "model": "Qwen/Qwen3-4B"
+        }
+      ],
+      "updated": "2026-10-10T09:02:00.000003+00:00"
+    },
+    {
+      "name": "Chat 2",
+      "turns": [
+        {
+          "role": "user",
+          "content": "My order arrived broken.",
+          "reasoning": "",
+          "institutions_provenance": {
+            "run_id": "run-0001",
+            "game_id": "game-7",
+            "turn_id": "turn-3",
+            "model_profile": {
+              "parent": {
+                "repo": "Qwen/Qwen3-4B",
+                "revision": "abc123"
+              },
+              "adapter": {
+                "repo": "example/support-lora",
+                "subfolder": "step-200",
+                "revision": "def456"
+              }
+            },
+            "accepted": true,
+            "error": null,
+            "note": "Recorded profile only; opening Chat does not load these weights or adapter. Sampling was batched."
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "{\"action\": \"refund\"}",
+          "reasoning": "Policy allows refunds.",
+          "model": "Qwen/Qwen3-4B + adapter example/support-lora",
+          "institutions_provenance": {
+            "run_id": "run-0001",
+            "game_id": "game-7",
+            "turn_id": "turn-3",
+            "model_profile": {
+              "parent": {
+                "repo": "Qwen/Qwen3-4B",
+                "revision": "abc123"
+              },
+              "adapter": {
+                "repo": "example/support-lora",
+                "subfolder": "step-200",
+                "revision": "def456"
+              }
+            },
+            "accepted": true,
+            "error": null,
+            "note": "Recorded profile only; opening Chat does not load these weights or adapter. Sampling was batched."
+          }
+        }
+      ],
+      "updated": "2026-10-10T09:03:00.000004+00:00"
+    },
+    {
+      "name": "Chat 3",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Archived conversation",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Still here, just put away.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-4B",
+          "prompt_tokens": 12,
+          "generated_tokens": 6
+        }
+      ],
+      "sampling": {
+        "temperature": 1.2,
+        "_chatlab_archive": {
+          "branch": "Chat 3",
+          "archived": true,
+          "updated": "2026-10-10T12:00:00.000040+00:00",
+          "sampling_updated": "2026-10-10T10:02:00.000030+00:00"
+        }
+      },
+      "sampling_updated": "2026-10-10T12:00:00.000040+00:00",
+      "archived": true,
+      "archived_updated": "2026-10-10T12:00:00.000040+00:00",
+      "updated": "2026-10-10T09:04:00.000005+00:00"
+    },
+    {
+      "name": "Chat 4",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Archived, then restored",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Back again.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-4B"
+        }
+      ],
+      "sampling": {
+        "_chatlab_archive": {
+          "branch": "Chat 4",
+          "archived": false,
+          "updated": "2026-10-10T12:30:00.000050+00:00",
+          "sampling_updated": null
+        }
+      },
+      "sampling_updated": "2026-10-10T12:30:00.000050+00:00",
+      "archived_updated": "2026-10-10T12:30:00.000050+00:00",
+      "updated": "2026-10-10T09:05:00.000006+00:00"
+    }
+  ],
+  "forgotten": {
+    "Chat 5": "2026-10-10T09:06:00.000007+00:00"
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "format": "chatlab-conversation-1",
+  "system_prompt": "Be poetic.",
+  "turns": [
+    {
+      "role": "user",
+      "content": "Describe the sea.",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "Grey, restless, endless.",
+      "reasoning": "Three adjectives.",
+      "model": "Qwen/Qwen3-0.6B",
+      "prompt_tokens": 25,
+      "generated_tokens": 14,
+      "steering": {
+        "model_id": "Qwen/Qwen3-0.6B",
+        "layer": 1,
+        "strength": -1.5,
+        "enabled": false,
+        "format": "chatlab-steering-reference-1",
+        "vector_id": "70d8f5737e1707883f247fbd02938ac1c68d2f92fa8348ff209ff7b62de7f637",
+        "width": 3
+      }
+    },
+    {
+      "role": "user",
+      "content": "And the sky?",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "Bright and calm.",
+      "reasoning": "",
+      "model": "Qwen/Qwen3-0.6B",
+      "prompt_tokens": 52,
+      "generated_tokens": 5,
+      "steering": {
+        "model_id": "Qwen/Qwen3-0.6B",
+        "layer": 4,
+        "strength": 8.0,
+        "enabled": true,
+        "format": "chatlab-steering-reference-1",
+        "vector_id": "56919d59f08928f25c65301428ec974a25338e1ff67a49b72ea39c674a795431",
+        "width": 5
+      }
+    }
+  ],
+  "steering": {
+    "model_id": "Qwen/Qwen3-0.6B",
+    "layer": 4,
+    "strength": 8.0,
+    "enabled": true,
+    "format": "chatlab-steering-reference-1",
+    "vector_id": "56919d59f08928f25c65301428ec974a25338e1ff67a49b72ea39c674a795431",
+    "width": 5
+  },
+  "steering_vectors": {
+    "56919d59f08928f25c65301428ec974a25338e1ff67a49b72ea39c674a795431": {
+      "model_id": "Qwen/Qwen3-0.6B",
+      "vector": [
+        0.25,
+        -0.75,
+        1.5,
+        0.0,
+        -2.0
+      ]
+    },
+    "70d8f5737e1707883f247fbd02938ac1c68d2f92fa8348ff209ff7b62de7f637": {
+      "model_id": "Qwen/Qwen3-0.6B",
+      "vector": [
+        1.0,
+        2.0,
+        3.0
+      ]
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "analyze_prompt": false,
+  "appearance": "dark",
+  "assistant_prefill": "Answer:",
+  "color_scale": "Surprise",
+  "enabled_extensions": [
+    "maze_experiments",
+    "hangman",
+    "probes",
+    "circuits"
+  ],
+  "enter_sends": false,
+  "future_setting": {
+    "nested": [
+      1,
+      2
+    ],
+    "on": true
+  },
+  "image_guidance": 5.0,
+  "image_negative_prompt": "blurry",
+  "image_randomize_seed": false,
+  "image_record_attention": false,
+  "image_seed": 7,
+  "image_size": 768,
+  "image_steps": 20,
+  "keep_reasoning": true,
+  "max_new_tokens": 600,
+  "model_id": "Qwen/Qwen3-0.6B",
+  "mps_memory_fraction": 1.5,
+  "prefill_token_limit": 4096,
+  "randomize_seed": false,
+  "seed": 2024,
+  "skip_top_below": 0.1,
+  "system_prompt": "Be brief.\nUse British spelling.",
+  "temperature": 0.35,
+  "theme": "ember",
+  "thinking_mode": "off",
+  "top_k": 12,
+  "top_p": 0.85,
+  "weight_precision": "4-bit",
+  "writing_suggestions": false
+}

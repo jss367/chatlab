@@ -1,0 +1,122 @@
+{
+  "format": "chatlab-conversation-1",
+  "system_prompt": "You are a support agent. Reply in JSON.",
+  "turns": [
+    {
+      "role": "user",
+      "content": "My parcel arrived damaged; here is the receipt.",
+      "reasoning": "",
+      "images": [
+        "f09d6208db562b01c39b552839e501f7015867d7a9d6fc474796e0405f237861.png"
+      ],
+      "institutions_provenance": {
+        "run_id": "support-run-42",
+        "game_id": "game-3",
+        "turn_id": "turn-1",
+        "model_profile": {
+          "parent": {
+            "repo": "Qwen/Qwen3-4B",
+            "revision": "0123abcd"
+          },
+          "adapter": {
+            "repo": "example/support-lora",
+            "subfolder": "checkpoint-50",
+            "revision": "4567ef01"
+          }
+        },
+        "accepted": false,
+        "error": "reply was not valid JSON",
+        "note": "Recorded profile only; opening Chat does not load these weights or adapter. Sampling was batched."
+      }
+    },
+    {
+      "role": "assistant",
+      "content": "{\"action\": \"escalate\", \"reason\": \"damage\"}",
+      "reasoning": "Damage claims over $50 must be escalated.",
+      "model": "Qwen/Qwen3-4B + adapter example/support-lora",
+      "prompt_tokens": 812,
+      "generated_tokens": 97,
+      "thinking_mode": "on",
+      "steering": {
+        "model_id": "Qwen/Qwen3-4B",
+        "layer": 20,
+        "strength": 12.5,
+        "enabled": false,
+        "format": "chatlab-steering-reference-1",
+        "vector_id": "1b8063eb27e1356bb04fdee11c2194b20250367d3a22a802bbce7f93acea9f95",
+        "width": 6
+      },
+      "generation_settings": {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "skip_top_below": 0.1,
+        "max_new_tokens": 2048,
+        "seed": 31337,
+        "system_prompt": "You are a support agent. Reply in JSON.",
+        "keep_reasoning": true,
+        "assistant_prefill": "{",
+        "thinking_mode": "on"
+      },
+      "institutions_provenance": {
+        "run_id": "support-run-42",
+        "game_id": "game-3",
+        "turn_id": "turn-1",
+        "model_profile": {
+          "parent": {
+            "repo": "Qwen/Qwen3-4B",
+            "revision": "0123abcd"
+          },
+          "adapter": {
+            "repo": "example/support-lora",
+            "subfolder": "checkpoint-50",
+            "revision": "4567ef01"
+          }
+        },
+        "accepted": false,
+        "error": "reply was not valid JSON",
+        "note": "Recorded profile only; opening Chat does not load these weights or adapter. Sampling was batched.",
+        "recorded_message_provenance": {
+          "source": "replay"
+        }
+      }
+    },
+    {
+      "role": "user",
+      "content": "Can you refund instead?",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "reasoning": "Checking the refund policy",
+      "error": "Generation stopped by the reader.",
+      "model": "Qwen/Qwen3-4B"
+    }
+  ],
+  "steering": {
+    "model_id": "Qwen/Qwen3-4B",
+    "layer": 20,
+    "strength": 12.5,
+    "enabled": false,
+    "format": "chatlab-steering-reference-1",
+    "vector_id": "1b8063eb27e1356bb04fdee11c2194b20250367d3a22a802bbce7f93acea9f95",
+    "width": 6
+  },
+  "steering_vectors": {
+    "1b8063eb27e1356bb04fdee11c2194b20250367d3a22a802bbce7f93acea9f95": {
+      "model_id": "Qwen/Qwen3-4B",
+      "vector": [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6
+      ]
+    }
+  },
+  "images": {
+    "f09d6208db562b01c39b552839e501f7015867d7a9d6fc474796e0405f237861.png": "iVBORw0KGgoAAAANSUhEUgAAAAMAAAADCAIAAADZSiLoAAAADklEQVR42mP4BQMMWFgAi68aX3IEsH4AAAAASUVORK5CYII="
+  }
+}

@@ -1,0 +1,148 @@
+{
+  "format": "chatlab-library-1",
+  "active": "Chat 1",
+  "branches": [
+    {
+      "name": "Main",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is in this picture?",
+          "reasoning": "",
+          "images": [
+            "68c41bb798155f8ad4c0280b6540e49f18457b263986fa6edbf58dc0821f3cb1.png"
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": "A red square.",
+          "reasoning": "",
+          "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+          "prompt_tokens": 90,
+          "generated_tokens": 5
+        }
+      ],
+      "updated": "2026-10-05T09:00:00.000001+00:00"
+    },
+    {
+      "name": "Fork 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is in this picture?",
+          "reasoning": "",
+          "images": [
+            "68c41bb798155f8ad4c0280b6540e49f18457b263986fa6edbf58dc0821f3cb1.png"
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": "A red square.",
+          "reasoning": "",
+          "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+          "prompt_tokens": 90,
+          "generated_tokens": 5
+        },
+        {
+          "role": "user",
+          "content": "Which shade of red?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Pure red, #FF0000.",
+          "reasoning": "",
+          "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+          "prompt_tokens": 110,
+          "generated_tokens": 9
+        }
+      ],
+      "origin": {
+        "parent": "Main",
+        "kind": "message",
+        "turn": 1,
+        "part": "content",
+        "message_count": 2
+      },
+      "sampling": {
+        "_chatlab_fork_origin": {
+          "branch": "Fork 1",
+          "origin": {
+            "parent": "Main",
+            "kind": "message",
+            "turn": 1,
+            "part": "content",
+            "message_count": 2
+          }
+        }
+      },
+      "archived": true,
+      "archived_updated": "2026-10-05T11:05:00.000030+00:00",
+      "updated": "2026-10-05T09:01:00.000002+00:00"
+    },
+    {
+      "name": "Chat 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Old question I put away",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "An answer kept in the archive.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 15,
+          "generated_tokens": 7
+        }
+      ],
+      "sampling": {
+        "temperature": 0.3
+      },
+      "sampling_updated": "2026-10-05T10:00:00.000010+00:00",
+      "archived": true,
+      "archived_updated": "2026-10-05T11:00:00.000020+00:00",
+      "updated": "2026-10-05T09:02:00.000003+00:00"
+    },
+    {
+      "name": "Chat 2",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Archived and brought back",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Back in the list.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 14,
+          "generated_tokens": 5
+        }
+      ],
+      "archived_updated": "2026-10-05T11:10:00.000040+00:00",
+      "updated": "2026-10-05T09:03:00.000004+00:00"
+    },
+    {
+      "name": "Chat 3",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Write a long essay.",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Essays begin with",
+          "reasoning": "Plan: intro, body.",
+          "error": "MPS backend out of memory",
+          "model": "Qwen/Qwen3-0.6B"
+        }
+      ],
+      "updated": "2026-10-05T09:04:00.000005+00:00"
+    }
+  ],
+  "forgotten": {}
+}

@@ -1,0 +1,246 @@
+{
+  "format": "chatlab-library-1",
+  "active": "Fork 3",
+  "branches": [
+    {
+      "name": "Main",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is the capital of France?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "The capital of France is Paris.",
+          "reasoning": "Simple geography question.",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 40,
+          "generated_tokens": 21,
+          "steering": {
+            "format": "chatlab-steering-reference-1",
+            "model_id": "allenai/Olmo-3-7B-Think",
+            "layer": 7,
+            "strength": 3.0,
+            "enabled": true,
+            "vector_id": "171b0317bd6c36dc216a8d944e1e264a88fe5d98a40f98037d691fa9710c0f29",
+            "width": 3
+          }
+        },
+        {
+          "role": "user",
+          "content": "And its population?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "About two million in the city proper.",
+          "reasoning": "",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 75,
+          "generated_tokens": 12
+        }
+      ],
+      "sampling": {
+        "steering": {
+          "format": "chatlab-steering-reference-1",
+          "model_id": "allenai/Olmo-3-7B-Think",
+          "layer": 7,
+          "strength": 3.0,
+          "enabled": true,
+          "vector_id": "171b0317bd6c36dc216a8d944e1e264a88fe5d98a40f98037d691fa9710c0f29",
+          "width": 3
+        },
+        "skip_top_below": 0.05,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "max_new_tokens": 512
+      },
+      "sampling_updated": "2026-09-16T10:00:00.000010+00:00",
+      "updated": "2026-09-16T09:00:00.000001+00:00"
+    },
+    {
+      "name": "Fork 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is the capital of France?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "The capital of France is Paris.",
+          "reasoning": "Simple geography question.",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 40,
+          "generated_tokens": 21,
+          "steering": {
+            "format": "chatlab-steering-reference-1",
+            "model_id": "allenai/Olmo-3-7B-Think",
+            "layer": 7,
+            "strength": 3.0,
+            "enabled": true,
+            "vector_id": "171b0317bd6c36dc216a8d944e1e264a88fe5d98a40f98037d691fa9710c0f29",
+            "width": 3
+          }
+        },
+        {
+          "role": "user",
+          "content": "Shorter, please.",
+          "reasoning": ""
+        }
+      ],
+      "sampling": {
+        "skip_top_below": 0.05,
+        "_chatlab_fork_origin": {
+          "branch": "Fork 1",
+          "origin": {
+            "parent": "Main",
+            "kind": "message",
+            "turn": 1,
+            "part": "content",
+            "message_count": 2
+          }
+        },
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "max_new_tokens": 512
+      },
+      "sampling_updated": "2026-09-16T10:01:00.000020+00:00",
+      "updated": "2026-09-16T09:01:00.000002+00:00"
+    },
+    {
+      "name": "Fork 2",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is the capital of France?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "The capital of France is Lyon.",
+          "reasoning": "",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 40,
+          "generated_tokens": 8
+        }
+      ],
+      "sampling": {
+        "skip_top_below": 0.0,
+        "_chatlab_fork_origin": {
+          "branch": "Fork 2",
+          "origin": {
+            "parent": "Main",
+            "kind": "token",
+            "turn": 1,
+            "token": 6,
+            "original": " Paris",
+            "original_id": 12095,
+            "replacement": " Lyon",
+            "replacement_ids": [
+              55123
+            ]
+          }
+        },
+        "temperature": 0.0
+      },
+      "sampling_updated": "2026-09-16T10:02:00.000030+00:00",
+      "updated": "2026-09-16T09:02:00.000003+00:00"
+    },
+    {
+      "name": "Fork 3",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is the capital of Spain?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Madrid.",
+          "reasoning": "",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 40,
+          "generated_tokens": 3
+        },
+        {
+          "role": "user",
+          "content": "And of Portugal?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Lisbon.",
+          "reasoning": "",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 60,
+          "generated_tokens": 3
+        }
+      ],
+      "sampling": {
+        "_chatlab_fork_origin": {
+          "branch": "Fork 3",
+          "origin": {
+            "parent": "Fork 2",
+            "kind": "prompt",
+            "turn": 1,
+            "token": 9,
+            "original": " France",
+            "original_id": 9625,
+            "replacement": " Spain",
+            "replacement_ids": [
+              17689
+            ]
+          }
+        }
+      },
+      "updated": "2026-09-17T08:00:00.000007+00:00"
+    },
+    {
+      "name": "Fork 4",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is the capital of France?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "The capital of France is Paris.",
+          "reasoning": "Simple geography question.",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 40,
+          "generated_tokens": 21,
+          "steering": {
+            "format": "chatlab-steering-reference-1",
+            "model_id": "allenai/Olmo-3-7B-Think",
+            "layer": 7,
+            "strength": 3.0,
+            "enabled": true,
+            "vector_id": "171b0317bd6c36dc216a8d944e1e264a88fe5d98a40f98037d691fa9710c0f29",
+            "width": 3
+          }
+        }
+      ],
+      "sampling": {
+        "_chatlab_fork_origin": {
+          "branch": "Fork 4",
+          "origin": {
+            "parent": "Fork 0",
+            "kind": "copy",
+            "turn": 1,
+            "part": "content",
+            "message_count": 2
+          }
+        }
+      },
+      "updated": "2026-09-16T09:04:00.000005+00:00"
+    }
+  ],
+  "forgotten": {
+    "Fork 0": "2026-09-16T09:05:00.000006+00:00"
+  }
+}

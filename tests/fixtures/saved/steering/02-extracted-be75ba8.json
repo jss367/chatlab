@@ -1,0 +1,13 @@
+{
+  "format": "chatlab-steering-1",
+  "model_id": "Qwen/Qwen3-0.6B",
+  "layer": 1,
+  "strength": 1.0,
+  "enabled": true,
+  "vector": [
+    2.75,
+    -1.75,
+    -0.08333333333333334,
+    0.6666666666666666
+  ]
+}

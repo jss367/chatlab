@@ -1,0 +1,31 @@
+{
+  "format": "chatlab-conversation-1",
+  "system_prompt": "You are a patient teacher.\nKeep answers short.",
+  "turns": [
+    {
+      "role": "user",
+      "content": "Explain recursion in one sentence.",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "Recursion is when a function solves a problem by calling itself on a smaller piece of it.",
+      "reasoning": "Keep it to one sentence.\nMention the base idea of smaller subproblems."
+    },
+    {
+      "role": "user",
+      "content": "Give an example in Python, with <code> tags.",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "<code>def f(n): return 1 if n == 0 else n * f(n - 1)</code>",
+      "reasoning": ""
+    },
+    {
+      "role": "user",
+      "content": "Now in Haskell — with “quotes”.",
+      "reasoning": ""
+    }
+  ]
+}
