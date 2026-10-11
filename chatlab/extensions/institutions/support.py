@@ -286,12 +286,21 @@ def _validate_game(run, entry, game):
             require(message.get('images') is None or (isinstance(message['images'], list) and not message['images']),
                     'external message image assets are unsupported')
             require(message.get('steering') is None, 'external message steering assets are unsupported')
+        require(set(messages[0]) <= {'role', 'content', 'images', 'steering'}, 'unsupported system message metadata')
         # Supported metadata passes through to Chat exports; validation must never import or save assets.
         for message in messages[1:]:
             require(all(k not in message or isinstance(message[k], str) for k in ('reasoning', 'reasoning_content', 'error')),
                     'invalid message text metadata')
             require('token_step_paused' not in message or type(message['token_step_paused']) is bool,
                     'invalid message pause state')
+            require('generation_settings' not in message or isinstance(message['generation_settings'], dict),
+                    'invalid message generation settings')
+            require('institutions_provenance' not in message or isinstance(message['institutions_provenance'], dict),
+                    'invalid recorded message provenance')
+            require('reasoning' not in message or 'reasoning_content' not in message
+                    or message['reasoning'] == message['reasoning_content'], 'conflicting recorded message reasoning')
+            require(message['role'] == 'assistant' or (not message.get('error') and not message.get('token_step_paused')),
+                    'assistant-only message metadata')
             for key, kind in TURN_ORIGIN_FIELDS.items():
                 require(key not in message or (isinstance(message[key], kind) and not isinstance(message[key], bool)
                                                and (kind is not int or message[key] >= 0)),
@@ -373,6 +382,9 @@ def conversation(game, index, include_reply=False, *, manifest=None):
     require(type(index) is int and 0 <= index < len(game['turns']), 'select a turn first')
     t = game['turns'][index]
     messages = copy.deepcopy(t['messages'])
+    for message in messages[1:]:
+        if 'reasoning_content' in message:
+            message['reasoning'] = message.pop('reasoning_content')
     if include_reply:
         raw = t['raw_reply']
         # A thinking model's reasoning goes in Chat's reasoning block; an unclosed block has no answer.
@@ -388,7 +400,10 @@ def conversation(game, index, include_reply=False, *, manifest=None):
                       model_profile=game['model_profiles'][t['model_profile']], accepted=t['accepted'], error=t.get('error'),
                       note='Recorded profile only; opening Chat does not load these weights or adapter. Sampling was batched.')
     for message in messages[1:]:
+        recorded = message.get('institutions_provenance')
         message['institutions_provenance'] = copy.deepcopy(provenance)
+        if recorded is not None:
+            message['institutions_provenance']['recorded_message_provenance'] = recorded
     if include_reply:
         profile = provenance['model_profile']
         messages[-1]['model'] = (profile['parent']['repo'] +

@@ -125,6 +125,11 @@ Recorded messages are text-only: `role`, `content`, optional `reasoning`/`reason
 are allowed. Nonempty image references, inline or referenced steering vectors, and other message fields
 (including audio, video and file references) are rejected. This bundle format supplies no media/vector assets
 for Chat import; validation and export do not load external assets.
+The system message carries only its role/content and empty asset placeholders. Post-system
+`generation_settings` and `institutions_provenance`, when present, must be objects. Export translates
+`reasoning_content` to Chat's `reasoning`; if both are recorded they must agree. Original message
+provenance is retained under `recorded_message_provenance` in the export's replay provenance.
+Nonempty errors and a true `token_step_paused` flag belong only to assistant messages.
 
 Phases link `before` and `after` snapshots, `turn_refs`, and `event_refs`. Turns link exact `messages`,
 structured `observation`, `raw_reply`, `parsed`, acceptance/error, and emitted events. Events link phase

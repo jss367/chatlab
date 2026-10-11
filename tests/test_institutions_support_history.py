@@ -63,6 +63,49 @@ class SnapshotHistoryTests(unittest.TestCase):
 
 
 class ExportAndActorTests(unittest.TestCase):
+    def test_all_supported_message_metadata_survives_chat_import(self):
+        run, entry, game = fixture()
+        user = game['turns'][0]['messages'][1]
+        user.update(model='inert/user', prompt_tokens=0, generated_tokens=0, thinking_mode='off',
+                    generation_settings={'future_option': {'count': 1}}, institutions_provenance={'source': 'inert'})
+        game['turns'][0]['messages'].append(dict(role='assistant', content='Prior answer',
+                                              reasoning_content='Recorded reasoning', error='Prior failure',
+                                              token_step_paused=True, generation_settings={}, model='inert/model',
+                                              prompt_tokens=1, generated_tokens=2, thinking_mode='on'))
+        original = copy.deepcopy(game)
+        support.validate_game(run, entry, game)
+        for include_reply in (False, True):
+            exported = support.conversation(game, 0, include_reply=include_reply, manifest=run.manifest)
+            restored, _ = from_json(json.dumps(exported))
+            for key in ('model', 'prompt_tokens', 'generated_tokens', 'thinking_mode', 'generation_settings'):
+                self.assertEqual(restored[0][key], user[key])
+            self.assertEqual(restored[0]['institutions_provenance']['recorded_message_provenance'], {'source': 'inert'})
+            self.assertEqual(restored[1]['reasoning'], 'Recorded reasoning')
+            self.assertEqual(restored[1]['error'], 'Prior failure')
+            self.assertTrue(restored[1]['token_step_paused'])
+            self.assertEqual(restored[1]['generation_settings'], {})
+        self.assertEqual(game, original)
+
+    def test_metadata_that_chat_would_discard_is_rejected(self):
+        run, entry, original = fixture()
+        cases = [('generation_settings', value) for value in (None, [], 'settings', False, 0)]
+        cases += [('institutions_provenance', value) for value in (None, [], 'origin', False, 0)]
+        cases += [('error', 'User error'), ('token_step_paused', True)]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                game = copy.deepcopy(original)
+                game['turns'][0]['messages'][1][key] = value
+                with self.assertRaises(ValueError):
+                    support.validate_game(run, entry, game)
+        game = copy.deepcopy(original)
+        game['turns'][0]['messages'][1].update(reasoning='One', reasoning_content='Different')
+        with self.assertRaisesRegex(ValueError, 'conflicting recorded message reasoning'):
+            support.validate_game(run, entry, game)
+        game = copy.deepcopy(original)
+        game['turns'][0]['messages'][0]['generation_settings'] = {}
+        with self.assertRaisesRegex(ValueError, 'unsupported system message metadata'):
+            support.validate_game(run, entry, game)
+
     def test_optional_turn_fields_render_and_export_with_and_without_reply(self):
         run, entry, original = fixture()
         for absent in (True, False):
@@ -111,7 +154,7 @@ class ExportAndActorTests(unittest.TestCase):
             game = copy.deepcopy(original)
             for message in game['turns'][0]['messages']:
                 message.update(images=[], steering=None)
-            game['turns'][0]['messages'][2].update(reasoning='Recorded reasoning', reasoning_content='Template context',
+            game['turns'][0]['messages'][2].update(reasoning='Recorded reasoning', reasoning_content='Recorded reasoning',
                                                   generation_settings={'temperature': 0.5}, generated_tokens=0)
             support.validate_game(run, entry, game)
             exported = support.conversation(game, 0, manifest=run.manifest)
