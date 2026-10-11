@@ -244,7 +244,9 @@ def _validate_game(run, entry, game):
     events = unique(game.get('events'), 'event_id')
     snapshots = game.get('snapshots')
     require(isinstance(snapshots, dict) and all(isinstance(s, dict) and isinstance(s.get('cases'), dict)
-                                                and all(isinstance(c, dict) for c in s['cases'].values())
+                                                and all(isinstance(c, dict)
+                                                        and ('history' not in c or isinstance(c['history'], list))
+                                                        for c in s['cases'].values())
                                                 for s in snapshots.values()), 'invalid snapshots')
     require(len(phases) == entry['phases'] and len(turns) == entry['turns'], 'phase/turn count disagrees')
     # The page finds an event by its position.
