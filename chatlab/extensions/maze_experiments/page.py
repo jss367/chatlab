@@ -57,8 +57,10 @@ CSS = """
    the height it starts at: with the messages open below it there was no spare
    height, and a board sized only from what was left shrank to a thumbnail.
    The column scrolls instead. Its corner drags it taller, or back down to the
-   height it fills. */
-#maze-board {flex:1 0 auto !important; height:min(440px, 55vh); min-height:180px; resize:vertical; overflow:hidden; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
+   height it fills, and JS below keeps the height it was dragged to. No taller
+   than the window, though, since past that it cannot be seen whole: the drag
+   stops there, and a height kept from a taller window is cut to fit. */
+#maze-board {flex:1 0 auto !important; height:var(--maze-board-height, min(440px, 55vh)); min-height:180px; max-height:100vh; resize:vertical; overflow:hidden; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
 #maze-board .html-container, #maze-board .prose {height:100%; min-height:0; display:flex; flex-direction:column;}
 #maze-board svg {width:100%; flex:1 1 0; min-height:0; display:block; margin:auto;}
 .maze-legend {display:flex; justify-content:center; gap:8px 12px; flex-wrap:wrap; color:#647084; font:11px system-ui; padding-top:10px; flex-shrink:0;}
@@ -102,6 +104,70 @@ CSS = """
   #maze-workspace {flex:none !important; flex-wrap:wrap;}
   #maze-center {order:-1; flex:1 0 100% !important; height:560px;}
   #maze-scenario, #maze-inspector {flex:1 1 280px !important; width:auto; max-width:none; height:560px; resize:none;}
+}
+"""
+
+# A drag on the board's corner is written by the browser into the board's own
+# style, and that is all it is: the nav takes a page out of the document when
+# it turns away, and Gradio builds it afresh on the way back, so a trip to
+# Models and back - part of the usual run - would hand the reader a board of
+# the stylesheet's height again, as would a reload. So the height a drag
+# leaves is kept in localStorage, the way the panes' widths are, and written
+# to a custom property the stylesheet reads. It goes on the root rather than
+# the board, so it is in force before the board is built and outlives it.
+#
+# Nothing but a drag writes a height into the board's style, so a change to
+# that attribute is the drag. The board is a new element every time its page
+# is built, so the shell is watched for the board being replaced, and the old
+# one is let go as soon as it leaves rather than held until the page returns.
+#
+# A kept height is clamped on the way in to the stylesheet's floor, and the
+# stylesheet's max-height fits it to the window it finds, so storage keeps the
+# height the reader asked for and a window that grows again gives it back.
+JS = r"""
+() => {
+  if (window.__chatlabMazeBoard) { return; }
+  window.__chatlabMazeBoard = true;
+  const KEY = 'chatlab.maze-board-height';
+  const PROPERTY = '--maze-board-height';
+  const MIN_BOARD = 180;
+
+  const clamp = (height) =>
+    Number.isFinite(height) && height > 0 ? Math.round(Math.max(height, MIN_BOARD)) : null;
+
+  const write = (height) => {
+    if (height !== null) {
+      document.documentElement.style.setProperty(PROPERTY, height + 'px');
+    }
+  };
+
+  try { write(clamp(parseFloat(localStorage.getItem(KEY)))); }
+  catch (error) { /* A window that refuses storage keeps the default. */ }
+
+  const remember = (board) => {
+    const dragged = board.style.height;
+    if (!dragged.endsWith('px')) { return; }
+    const height = clamp(parseFloat(dragged));
+    if (height === null) { return; }
+    write(height);
+    try { localStorage.setItem(KEY, String(height)); }
+    catch (error) { /* The drag still holds until the page is rebuilt. */ }
+  };
+
+  let watched = null;
+  const drags = new MutationObserver(() => { if (watched) { remember(watched); } });
+  const collect = () => {
+    const board = document.getElementById('maze-board');
+    if (board === watched) { return; }
+    drags.disconnect();
+    watched = board;
+    if (board) { drags.observe(board, { attributes: true, attributeFilter: ['style'] }); }
+  };
+  collect();
+  new MutationObserver(collect).observe(
+    document.getElementById('shell') || document.body,
+    { childList: true, subtree: true }
+  );
 }
 """
 

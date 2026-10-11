@@ -1,6 +1,8 @@
 import copy
 import html
 import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -2293,6 +2295,113 @@ class MazeTests(unittest.TestCase):
         self.assertEqual(ids, [1, 2])
         self.assertFalse(reasoning)
         self.assertEqual([c["tools"] for c in calls], [[{"name": "move"}]] * 2)
+
+
+# Enough of a page for the board's script: a shell the nav puts the maze page
+# into and takes it back out of, a root to write the custom property to, and
+# observers the checks fire by hand in place of the browser.
+BOARD_PAGE = """
+'use strict';
+const assert = require('node:assert');
+
+const style = () => {
+  const props = {};
+  return { props, height: '', setProperty: (name, value) => { props[name] = value; } };
+};
+const documentElement = { style: style() };
+const shell = { id: 'shell' };
+let board = null;
+const document = {
+  documentElement,
+  body: {},
+  getElementById: (id) => (id === 'shell' ? shell : id === 'maze-board' ? board : null),
+};
+const window = {};
+
+const watching = new Map();
+class MutationObserver {
+  constructor(react) { this.react = react; }
+  observe(target) { watching.set(target, this.react); }
+  disconnect() {
+    for (const [target, react] of watching) {
+      if (react === this.react) { watching.delete(target); }
+    }
+  }
+}
+const fire = (target) => { const react = watching.get(target); if (react) { react(); } };
+
+const kept = new Map();
+const localStorage = {
+  getItem: (key) => (kept.has(key) ? kept.get(key) : null),
+  setItem: (key, value) => kept.set(key, value),
+};
+
+// The nav building the maze page afresh, and taking it away again.
+const build = () => { board = { style: style() }; fire(shell); return board; };
+const leave = () => { board = null; fire(shell); };
+"""
+
+
+class MazeBoardHeightScriptTests(unittest.TestCase):
+    """The board's script, run in node over a stand-in page."""
+
+    def check(self, checks: str):
+        from chatlab.extensions.maze_experiments import JS
+        script = f"{BOARD_PAGE}\nconst start = {JS};\n{checks}"
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "board.js"
+            path.write_text(script)
+            result = subprocess.run(["node", str(path)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_a_dragged_height_outlives_the_board_it_was_dragged_on(self):
+        self.check(
+            """
+start();
+const first = build();
+assert.strictEqual(documentElement.style.props['--maze-board-height'], undefined,
+  'an undragged board keeps the stylesheet height');
+
+// A change to the board's style that is not a height is not a drag.
+fire(first);
+assert.strictEqual(kept.size, 0);
+
+first.style.height = '612.4px';
+fire(first);
+assert.strictEqual(kept.get('chatlab.maze-board-height'), '612');
+assert.strictEqual(documentElement.style.props['--maze-board-height'], '612px');
+
+// Away to Models: the old board is let go, and the one built on the way back
+// is the one watched.
+leave();
+assert.ok(!watching.has(first), 'a board taken out of the document is let go');
+const second = build();
+assert.ok(watching.has(second));
+second.style.height = '90px';
+fire(second);
+assert.strictEqual(kept.get('chatlab.maze-board-height'), '180', 'no lower than the floor');
+"""
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "needs node to run the script")
+    def test_a_kept_height_is_in_force_before_the_board_is_built(self):
+        for saved, expected in (("540", "'540px'"), ("12", "'180px'"), ("junk", "undefined"), ("-3", "undefined")):
+            with self.subTest(saved=saved):
+                self.check(
+                    f"""
+kept.set('chatlab.maze-board-height', '{saved}');
+start();
+assert.strictEqual(documentElement.style.props['--maze-board-height'], {expected});
+"""
+                )
+
+    def test_the_stylesheet_reads_the_kept_height_and_fits_it_to_the_window(self):
+        from chatlab.extensions.maze_experiments import CSS
+        rule = next(line for line in CSS.splitlines() if line.startswith("#maze-board {"))
+        self.assertIn("height:var(--maze-board-height, min(440px, 55vh))", rule)
+        self.assertIn("min-height:180px", rule)
+        self.assertIn("max-height:100vh", rule)
 
 
 if __name__ == "__main__":
