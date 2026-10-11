@@ -63,6 +63,31 @@ class SnapshotHistoryTests(unittest.TestCase):
 
 
 class ExportAndActorTests(unittest.TestCase):
+    def test_optional_turn_fields_render_and_export_with_and_without_reply(self):
+        run, entry, original = fixture()
+        for absent in (True, False):
+            for include_reply in (False, True):
+                with self.subTest(absent=absent, include_reply=include_reply):
+                    game = copy.deepcopy(original)
+                    for field in ('error', 'parsed', 'input_tokens', 'output_tokens'):
+                        if absent:
+                            game['turns'][0].pop(field)
+                        else:
+                            game['turns'][0][field] = None
+                    support.validate_game(run, entry, game)
+                    state = support.phase_state(game, 0)
+                    self.assertEqual(support.turn_rows(game, state)[0][3], 'Accepted')
+                    payload = support.conversation(game, 0, include_reply=include_reply, manifest=run.manifest)
+                    self.assertIsNone(payload['institutions_provenance']['error'])
+                    turns, system = from_json(json.dumps(payload))
+                    self.assertEqual(system, 'Inert')
+                    self.assertEqual([m['role'] for m in turns], ['user', 'assistant'] if include_reply else ['user'])
+        rejected = copy.deepcopy(original)
+        rejected['turns'][0]['accepted'] = False
+        rejected['turns'][0].pop('error')
+        with self.assertRaisesRegex(ValueError, 'invalid acceptance status'):
+            support.validate_game(run, entry, rejected)
+
     def test_external_asset_variants_are_rejected_without_loading_assets(self):
         run, entry, original = fixture()
         original['turns'][0]['messages'].append({'role': 'assistant', 'content': 'Inert'})

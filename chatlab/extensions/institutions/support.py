@@ -385,7 +385,7 @@ def conversation(game, index, include_reply=False, *, manifest=None):
         else:
             messages.append(dict(role='assistant', content=raw))
     provenance = dict(run_id=game['run_id'], game_id=game['game_id'], turn_id=t['turn_id'],
-                      model_profile=game['model_profiles'][t['model_profile']], accepted=t['accepted'], error=t['error'],
+                      model_profile=game['model_profiles'][t['model_profile']], accepted=t['accepted'], error=t.get('error'),
                       note='Recorded profile only; opening Chat does not load these weights or adapter. Sampling was batched.')
     for message in messages[1:]:
         message['institutions_provenance'] = copy.deepcopy(provenance)
