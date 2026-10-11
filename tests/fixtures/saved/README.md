@@ -3,7 +3,7 @@
 Every file here was written by the ChatLab commit named beside it, using that
 commit's own writer. They are the evidence that results and data saved by
 earlier versions still load, and read the same way, after later changes. The
-`test_saved_formats_*.py` modules open each one through the path the app uses
+`test_saved_*.py` modules open each one through the path the app uses
 and check specific facts about what it reads: names, texts, numbers, scores,
 derived values. Each test also saves the data again with today's writer and
 checks that those facts survive.
@@ -25,8 +25,14 @@ Rules:
   first, because several readers look for sibling files (vectors, pictures,
   the archive companion, experiments) next to them.
 
-Maze runs have their own table: [maze/README.md](maze/README.md). Institutions
-bundles are in [../institutions](../institutions).
+`test_saved_format_coverage.py` fails when a `chatlab-<name>-<n>` marker that
+ChatLab reads back has no file here (or under `../institutions`) carrying it.
+
+Maze runs have their own table: [maze/README.md](maze/README.md). The
+invoice-payment Institutions pilot (`chatlab-institutions-run-1`, `game-1`) is
+`institutions/invoice-pilot-run-1`, written at 50db305 by
+`institutions/generators/make_invoice_pilot.py`. The customer-support bundles
+(run-2, game-2) are real exports in [../institutions](../institutions).
 
 | File | Format marker | Era | Generating commit | Features exercised |
 |---|---|---|---|---|
