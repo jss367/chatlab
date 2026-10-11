@@ -11,9 +11,7 @@ import html
 import json
 import re
 
-from chatlab.attachments import image_names
 from chatlab.conversation import TURN_ORIGIN_FIELDS
-from chatlab.steering import normalize as normalize_steering
 
 SCENARIO = 'customer_support'
 # Teams before exporter version 3 were a count of organisms among parent models.
@@ -280,9 +278,17 @@ def _validate_game(run, entry, game):
                 and messages[0]['role'] == 'system'
                 and all(m['role'] in ('user', 'assistant') for m in messages[1:]),
                 'invalid exact message list')
-        # These fields pass through to Chat exports. Check the reader's shapes without importing assets or saving.
+        # This bundle contract carries text, not the embedded assets Chat needs to import media or vectors.
+        allowed = {'role', 'content', 'reasoning', 'reasoning_content', 'error', 'token_step_paused',
+                   'generation_settings', 'institutions_provenance', 'images', 'steering'} | set(TURN_ORIGIN_FIELDS)
+        for message in messages:
+            require(set(message) <= allowed, 'unsupported message fields')
+            require(message.get('images') is None or (isinstance(message['images'], list) and not message['images']),
+                    'external message image assets are unsupported')
+            require(message.get('steering') is None, 'external message steering assets are unsupported')
+        # Supported metadata passes through to Chat exports; validation must never import or save assets.
         for message in messages[1:]:
-            require(all(k not in message or isinstance(message[k], str) for k in ('reasoning', 'error')),
+            require(all(k not in message or isinstance(message[k], str) for k in ('reasoning', 'reasoning_content', 'error')),
                     'invalid message text metadata')
             require('token_step_paused' not in message or type(message['token_step_paused']) is bool,
                     'invalid message pause state')
@@ -290,9 +296,6 @@ def _validate_game(run, entry, game):
                 require(key not in message or (isinstance(message[key], kind) and not isinstance(message[key], bool)
                                                and (kind is not int or message[key] >= 0)),
                         'invalid message provenance')
-            if message['role'] == 'user':
-                image_names(message.get('images'))
-            normalize_steering(message.get('steering'))
         require(isinstance(turn.get('observation'), dict), 'missing recorded observation')
         refs(turn.get('event_refs'), events, 'emitted event')
         require(turn['event_refs'] == [e['event_id'] for e in events.values() if e.get('turn_id') == turn['turn_id']], 'event-to-turn links disagree')

@@ -119,6 +119,13 @@ with no closing marker is then unfinished reasoning, even if it contains JSON.
 
 The envelope holds run/game identity, configuration, profiles, provenance, validation, roster, ordered
 phases and turns, unchanged original event IDs/payloads, snapshots, scores, and factual diagnostics.
+Recorded messages are text-only: `role`, `content`, optional `reasoning`/`reasoning_content`, `error`,
+`token_step_paused`, model/token provenance (`model`, `prompt_tokens`, `generated_tokens`, `thinking_mode`),
+`generation_settings`, and `institutions_provenance`. Empty/null `images` and null `steering` placeholders
+are allowed. Nonempty image references, inline or referenced steering vectors, and other message fields
+(including audio, video and file references) are rejected. This bundle format supplies no media/vector assets
+for Chat import; validation and export do not load external assets.
+
 Phases link `before` and `after` snapshots, `turn_refs`, and `event_refs`. Turns link exact `messages`,
 structured `observation`, `raw_reply`, `parsed`, acceptance/error, and emitted events. Events link phase
 and originating turn when applicable. Display rounds are one-based; raw source rounds remain zero-based.

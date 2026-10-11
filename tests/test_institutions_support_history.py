@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from chatlab.extensions.institutions import support
 from chatlab.conversation import from_json
@@ -62,6 +63,37 @@ class SnapshotHistoryTests(unittest.TestCase):
 
 
 class ExportAndActorTests(unittest.TestCase):
+    def test_external_asset_variants_are_rejected_without_loading_assets(self):
+        run, entry, original = fixture()
+        original['turns'][0]['messages'].append({'role': 'assistant', 'content': 'Inert'})
+        reference = dict(format='chatlab-steering-reference-1', model_id='inert/model', layer=0,
+                         vector_id='a' * 64, width=1)
+        inline = dict(format='chatlab-steering-1', model_id='inert/model', layer=0, vector=[1.0])
+        variants = [('images', ['a' * 64 + '.png']), ('steering', reference), ('steering', inline)]
+        variants += [(key, {'reference': 'inert'}) for key in
+                     ('image', 'image_url', 'audio', 'audio_url', 'input_audio', 'video', 'video_url',
+                      'file', 'files', 'file_id', 'file_url', 'attachments', 'assets', 'steering_vectors',
+                      'vector', 'vectors', 'vector_id')]
+        with patch('chatlab.attachments.image_directory', side_effect=AssertionError('No image store access')), \
+                patch('chatlab.steering.asset_directory', side_effect=AssertionError('No vector store access')):
+            for index in range(3):
+                for key, value in variants:
+                    with self.subTest(index=index, key=key, value=value):
+                        game = copy.deepcopy(original)
+                        game['turns'][0]['messages'][index][key] = value
+                        with self.assertRaises(ValueError):
+                            support.validate_game(run, entry, game)
+            game = copy.deepcopy(original)
+            for message in game['turns'][0]['messages']:
+                message.update(images=[], steering=None)
+            game['turns'][0]['messages'][2].update(reasoning='Recorded reasoning', reasoning_content='Template context',
+                                                  generation_settings={'temperature': 0.5}, generated_tokens=0)
+            support.validate_game(run, entry, game)
+            exported = support.conversation(game, 0, manifest=run.manifest)
+            restored, _ = from_json(json.dumps(exported))
+            self.assertEqual([m['content'] for m in restored], ['Inert', 'Inert'])
+            self.assertEqual(restored[1]['reasoning'], 'Recorded reasoning')
+
     def test_message_metadata_cannot_break_chat_export_loading(self):
         run, entry, original = fixture()
         for key, value in (('reasoning', None), ('error', 0), ('token_step_paused', 1), ('model', []),
