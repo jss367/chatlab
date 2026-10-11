@@ -1,0 +1,114 @@
+{
+  "format": "chatlab-library-1",
+  "active": "Fork 1",
+  "branches": [
+    {
+      "name": "Main",
+      "turns": [
+        {
+          "role": "user",
+          "content": "How are you feeling today?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Very calm, thank you.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 18,
+          "generated_tokens": 7,
+          "steering": {
+            "model_id": "Qwen/Qwen3-0.6B",
+            "layer": 2,
+            "strength": 4.0,
+            "enabled": true,
+            "format": "chatlab-steering-reference-1",
+            "vector_id": "8febdf7389f172c5d1934e6ebc577bf7bb9013521fee7c356c218bd8c6db105c",
+            "width": 4
+          }
+        }
+      ],
+      "sampling": {
+        "steering": {
+          "model_id": "Qwen/Qwen3-0.6B",
+          "layer": 2,
+          "strength": 4.0,
+          "enabled": true,
+          "format": "chatlab-steering-reference-1",
+          "vector_id": "8febdf7389f172c5d1934e6ebc577bf7bb9013521fee7c356c218bd8c6db105c",
+          "width": 4
+        },
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 50,
+        "max_new_tokens": 128
+      },
+      "sampling_updated": "2026-09-10T12:00:00.000010+00:00",
+      "updated": "2026-09-10T11:00:00.000001+00:00"
+    },
+    {
+      "name": "Fork 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "How are you feeling today?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Very calm, thank you.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 18,
+          "generated_tokens": 7,
+          "steering": {
+            "model_id": "Qwen/Qwen3-0.6B",
+            "layer": 2,
+            "strength": 4.0,
+            "enabled": true,
+            "format": "chatlab-steering-reference-1",
+            "vector_id": "8febdf7389f172c5d1934e6ebc577bf7bb9013521fee7c356c218bd8c6db105c",
+            "width": 4
+          }
+        },
+        {
+          "role": "user",
+          "content": "Say it in French.",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Je suis très calme.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 40,
+          "generated_tokens": 8,
+          "steering": {
+            "model_id": "Qwen/Qwen3-0.6B",
+            "layer": 5,
+            "strength": -2.5,
+            "enabled": false,
+            "format": "chatlab-steering-reference-1",
+            "vector_id": "a38191ab3c2e850f084f04c08b1e79396f2aa1e865785baf170acdb2df8cdca1",
+            "width": 6
+          }
+        }
+      ],
+      "sampling": {
+        "steering": {
+          "model_id": "Qwen/Qwen3-0.6B",
+          "layer": 5,
+          "strength": -2.5,
+          "enabled": false,
+          "format": "chatlab-steering-reference-1",
+          "vector_id": "a38191ab3c2e850f084f04c08b1e79396f2aa1e865785baf170acdb2df8cdca1",
+          "width": 6
+        },
+        "temperature": 0.0
+      },
+      "sampling_updated": "2026-09-10T12:10:00.000020+00:00",
+      "updated": "2026-09-10T11:10:00.000002+00:00"
+    }
+  ],
+  "forgotten": {}
+}

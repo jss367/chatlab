@@ -1,0 +1,86 @@
+{
+  "format": "chatlab-library-1",
+  "active": "Fork 1",
+  "branches": [
+    {
+      "name": "Main",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is the capital of France?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "The capital of France is Paris.",
+          "reasoning": "The user wants a capital city. France -> Paris.",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 31,
+          "generated_tokens": 58
+        },
+        {
+          "role": "user",
+          "content": "And of Italy? Answer with the city: Füße — naïve ✓",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Rome.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 70,
+          "generated_tokens": 12
+        }
+      ],
+      "updated": "2026-09-08T10:00:00.000001+00:00"
+    },
+    {
+      "name": "Fork 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "What is the capital of France?",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "The capital of France is Paris.",
+          "reasoning": "The user wants a capital city. France -> Paris.",
+          "model": "allenai/Olmo-3-7B-Think",
+          "prompt_tokens": 31,
+          "generated_tokens": 58
+        },
+        {
+          "role": "user",
+          "content": "Now answer in French.",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning": "Je dois répondre en français"
+        }
+      ],
+      "updated": "2026-09-08T10:05:00.000002+00:00"
+    },
+    {
+      "name": "Chat 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Write a haiku about rain.",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning": ""
+        }
+      ],
+      "updated": "2026-09-08T10:06:00.000003+00:00"
+    }
+  ],
+  "forgotten": {
+    "Chat 2": "2026-09-08T10:07:00.000004+00:00"
+  }
+}

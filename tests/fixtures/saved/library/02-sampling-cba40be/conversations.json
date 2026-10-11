@@ -1,0 +1,87 @@
+{
+  "format": "chatlab-library-1",
+  "active": "Main",
+  "branches": [
+    {
+      "name": "Main",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Name three primary colours.",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Red, yellow and blue.",
+          "reasoning": "Traditional painter's primaries.",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 22,
+          "generated_tokens": 19
+        }
+      ],
+      "sampling": {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "top_k": 40,
+        "max_new_tokens": 256
+      },
+      "sampling_updated": "2026-09-09T09:00:00.000010+00:00",
+      "updated": "2026-09-09T08:00:00.000001+00:00"
+    },
+    {
+      "name": "Fork 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Name three primary colours.",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Red, yellow and blue.",
+          "reasoning": "Traditional painter's primaries.",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 22,
+          "generated_tokens": 19
+        },
+        {
+          "role": "user",
+          "content": "Now for light.",
+          "reasoning": ""
+        },
+        {
+          "role": "assistant",
+          "content": "Red, green and blue.",
+          "reasoning": "",
+          "model": "Qwen/Qwen3-0.6B",
+          "prompt_tokens": 48,
+          "generated_tokens": 9
+        }
+      ],
+      "sampling": {
+        "future_knob": {
+          "level": 3
+        },
+        "temperature": 1.0,
+        "top_k": 0
+      },
+      "sampling_updated": "2026-09-09T09:30:00.000020+00:00",
+      "updated": "2026-09-09T08:30:00.000002+00:00"
+    },
+    {
+      "name": "Chat 1",
+      "turns": [
+        {
+          "role": "user",
+          "content": "Unanswered question",
+          "reasoning": ""
+        }
+      ],
+      "sampling_updated": "2026-09-09T09:40:00.000030+00:00",
+      "updated": "2026-09-09T08:40:00.000003+00:00"
+    }
+  ],
+  "forgotten": {
+    "Fork 2": "2026-09-09T08:50:00.000004+00:00"
+  }
+}

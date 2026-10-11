@@ -1,0 +1,17 @@
+{
+  "analyze_prompt": false,
+  "assistant_prefill": "Answer:",
+  "color_scale": "Surprise",
+  "enter_sends": false,
+  "keep_reasoning": true,
+  "max_new_tokens": 600,
+  "model_id": "Qwen/Qwen3-0.6B",
+  "mps_memory_fraction": 1.5,
+  "prefill_token_limit": 4096,
+  "randomize_seed": false,
+  "seed": 2024,
+  "system_prompt": "Be brief.\nUse British spelling.",
+  "temperature": 0.35,
+  "top_k": 12,
+  "top_p": 0.85
+}

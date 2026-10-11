@@ -1,0 +1,109 @@
+{
+  "format": "chatlab-conversation-1",
+  "system_prompt": "Describe pictures.",
+  "turns": [
+    {
+      "role": "user",
+      "content": "What colours are these?",
+      "reasoning": "",
+      "images": [
+        "d6324f93e3487f7727477e2c2ff108882e7b866daca4c0f256651a7dcd72faec.png",
+        "3a5b525e0ad11a1888d32150c65d458fb89ff212987c293ed509423bed743d0f.png"
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "Yellow and purple.",
+      "reasoning": "",
+      "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "prompt_tokens": 210,
+      "generated_tokens": 6,
+      "thinking_mode": "default",
+      "steering": {
+        "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "layer": 3,
+        "strength": 2.0,
+        "enabled": true,
+        "format": "chatlab-steering-reference-1",
+        "vector_id": "8ca25b1683ee7ee1da1256800c270847c4263ab3f8fa68a46c96f66766e94f02",
+        "width": 4
+      },
+      "generation_settings": {
+        "temperature": 0.4,
+        "top_p": 0.8,
+        "top_k": 10,
+        "skip_top_below": 0.0,
+        "max_new_tokens": 64,
+        "seed": 9,
+        "system_prompt": "Describe pictures.",
+        "keep_reasoning": false,
+        "assistant_prefill": "",
+        "thinking_mode": "default"
+      }
+    },
+    {
+      "role": "user",
+      "content": "Same picture again, which is taller?",
+      "reasoning": "",
+      "images": [
+        "3a5b525e0ad11a1888d32150c65d458fb89ff212987c293ed509423bed743d0f.png"
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "The purple one",
+      "reasoning": "",
+      "error": "Generation stopped: the device ran out of memory.",
+      "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "thinking_mode": "default",
+      "generation_settings": {
+        "temperature": 0.4,
+        "top_p": 0.8,
+        "top_k": 10,
+        "skip_top_below": 0.0,
+        "max_new_tokens": 64,
+        "seed": 10,
+        "system_prompt": "Describe pictures.",
+        "keep_reasoning": false,
+        "assistant_prefill": "",
+        "thinking_mode": "default"
+      }
+    },
+    {
+      "role": "user",
+      "content": "Try once more.",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "reasoning": "",
+      "token_step_paused": true,
+      "model": "Qwen/Qwen2.5-VL-3B-Instruct"
+    }
+  ],
+  "steering": {
+    "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "layer": 3,
+    "strength": 2.0,
+    "enabled": true,
+    "format": "chatlab-steering-reference-1",
+    "vector_id": "8ca25b1683ee7ee1da1256800c270847c4263ab3f8fa68a46c96f66766e94f02",
+    "width": 4
+  },
+  "steering_vectors": {
+    "8ca25b1683ee7ee1da1256800c270847c4263ab3f8fa68a46c96f66766e94f02": {
+      "model_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "vector": [
+        -0.5,
+        0.5,
+        0.25,
+        -0.25
+      ]
+    }
+  },
+  "images": {
+    "d6324f93e3487f7727477e2c2ff108882e7b866daca4c0f256651a7dcd72faec.png": "iVBORw0KGgoAAAANSUhEUgAAAAQAAAABCAIAAAB2XpiaAAAADUlEQVR42mP4/58BjgA31Qf5jpo/fAAAAABJRU5ErkJggg==",
+    "3a5b525e0ad11a1888d32150c65d458fb89ff212987c293ed509423bed743d0f.png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAECAIAAADAusJtAAAADElEQVR42mNoYECBACAQBAG2EtaWAAAAAElFTkSuQmCC"
+  }
+}

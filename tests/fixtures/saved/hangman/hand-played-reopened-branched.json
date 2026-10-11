@@ -1,0 +1,7810 @@
+{
+  "format": "chatlab-hangman-1",
+  "id": "000000000000000000000012d71843dd",
+  "created_at": "2026-09-20T10:04:00+00:00",
+  "parent": {
+    "id": "000000000000000000000012d71843dc",
+    "turns": 6
+  },
+  "system": "You are hosting a game of hangman. Think of one secret English word and keep it to yourself for the whole game. Do not write the word until the game ends.\n\nThe player guesses one letter at a time, or the whole word. After every guess, reply in exactly this format:\n\nBoard: the word, one character per letter separated by spaces, with each correctly guessed letter shown and each hidden letter written as _\nGuessed: every letter guessed so far\nWrong guesses left: a number, starting at 6\n\nThen say in one sentence whether the guess was in the word. When the player guesses the word, runs out of wrong guesses, or asks for the word, reveal it on its own line as:\nWord: the secret word\nUse only common five-letter English nouns.",
+  "turns": [
+    {
+      "guess": "Let's play. Think of your word and show me the empty board.",
+      "text": "<think>I will hold CRANE.</think>Board: _ _ _ _ _\nGuessed: none\nWrong guesses left: 6\nLet's begin.",
+      "metrics": [
+        {
+          "token_id": 60,
+          "text": "<",
+          "display_text": "<",
+          "segment": "response",
+          "position": 1,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 2,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 104,
+          "text": "h",
+          "display_text": "h",
+          "segment": "response",
+          "position": 3,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 4,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 5,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 107,
+          "text": "k",
+          "display_text": "k",
+          "segment": "response",
+          "position": 6,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 62,
+          "text": ">",
+          "display_text": ">",
+          "segment": "response",
+          "position": 7,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 73,
+          "text": "I",
+          "display_text": "I",
+          "segment": "response",
+          "position": 8,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 9,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 119,
+          "text": "w",
+          "display_text": "w",
+          "segment": "response",
+          "position": 10,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 11,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 12,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 13,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 14,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 104,
+          "text": "h",
+          "display_text": "h",
+          "segment": "response",
+          "position": 15,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 16,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 17,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 18,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 19,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 67,
+          "text": "C",
+          "display_text": "C",
+          "segment": "response",
+          "position": 20,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 82,
+          "text": "R",
+          "display_text": "R",
+          "segment": "response",
+          "position": 21,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 22,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 78,
+          "text": "N",
+          "display_text": "N",
+          "segment": "response",
+          "position": 23,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 24,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 46,
+          "text": ".",
+          "display_text": ".",
+          "segment": "response",
+          "position": 25,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 60,
+          "text": "<",
+          "display_text": "<",
+          "segment": "response",
+          "position": 26,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 47,
+          "text": "/",
+          "display_text": "/",
+          "segment": "response",
+          "position": 27,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 28,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 104,
+          "text": "h",
+          "display_text": "h",
+          "segment": "response",
+          "position": 29,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 30,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 31,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 107,
+          "text": "k",
+          "display_text": "k",
+          "segment": "response",
+          "position": 32,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 62,
+          "text": ">",
+          "display_text": ">",
+          "segment": "response",
+          "position": 33,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 66,
+          "text": "B",
+          "display_text": "B",
+          "segment": "response",
+          "position": 34,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 35,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 36,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 37,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 38,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 39,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 40,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 41,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 42,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 43,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 44,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 45,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 46,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 47,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 48,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 49,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 50,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 71,
+          "text": "G",
+          "display_text": "G",
+          "segment": "response",
+          "position": 51,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 52,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 53,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 54,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 55,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 56,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 57,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 58,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 59,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 60,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 61,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 62,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 63,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 64,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 87,
+          "text": "W",
+          "display_text": "W",
+          "segment": "response",
+          "position": 65,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 66,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 67,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 68,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 69,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 70,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 71,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 72,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 73,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 74,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 75,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 76,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 77,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 78,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 79,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 80,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 102,
+          "text": "f",
+          "display_text": "f",
+          "segment": "response",
+          "position": 81,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 82,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 83,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 84,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 54,
+          "text": "6",
+          "display_text": "6",
+          "segment": "response",
+          "position": 85,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 86,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 76,
+          "text": "L",
+          "display_text": "L",
+          "segment": "response",
+          "position": 87,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 88,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 89,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 39,
+          "text": "'",
+          "display_text": "'",
+          "segment": "response",
+          "position": 90,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 91,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 92,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 98,
+          "text": "b",
+          "display_text": "b",
+          "segment": "response",
+          "position": 93,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 94,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 95,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 96,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 97,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 46,
+          "text": ".",
+          "display_text": ".",
+          "segment": "response",
+          "position": 98,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 0,
+          "text": "",
+          "display_text": "⏹",
+          "segment": "response",
+          "position": 99,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        }
+      ],
+      "forced_prefix_tokens": 0,
+      "reasoning_prefilled": false,
+      "finish_reason": "stop",
+      "started_at": 1758362400.0,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 0,
+        "max_new_tokens": 256,
+        "seed": 40
+      },
+      "model_id": "test/model",
+      "load_id": null,
+      "answer": "Board: _ _ _ _ _\nGuessed: none\nWrong guesses left: 6\nLet's begin.",
+      "board": [
+        "_",
+        "_",
+        "_",
+        "_",
+        "_"
+      ],
+      "revealed_word": null,
+      "seconds": 3.0,
+      "recorded_load_id": "first"
+    },
+    {
+      "guess": "e",
+      "text": "E is the last letter of CRANE.</think>**Board:** \\_ \\_ \\_ \\_ E\nGuessed: E\nWrong guesses left: 6\nYes, E is in the word.",
+      "metrics": [
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 1,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 2,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 3,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 4,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 5,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 6,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 104,
+          "text": "h",
+          "display_text": "h",
+          "segment": "response",
+          "position": 7,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 8,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 9,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 10,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 11,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 12,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 13,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 14,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 15,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 16,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 17,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 18,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 19,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 20,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 21,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 22,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 102,
+          "text": "f",
+          "display_text": "f",
+          "segment": "response",
+          "position": 23,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 24,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 67,
+          "text": "C",
+          "display_text": "C",
+          "segment": "response",
+          "position": 25,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 82,
+          "text": "R",
+          "display_text": "R",
+          "segment": "response",
+          "position": 26,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 27,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 78,
+          "text": "N",
+          "display_text": "N",
+          "segment": "response",
+          "position": 28,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 29,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 46,
+          "text": ".",
+          "display_text": ".",
+          "segment": "response",
+          "position": 30,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 60,
+          "text": "<",
+          "display_text": "<",
+          "segment": "response",
+          "position": 31,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 47,
+          "text": "/",
+          "display_text": "/",
+          "segment": "response",
+          "position": 32,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 33,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 104,
+          "text": "h",
+          "display_text": "h",
+          "segment": "response",
+          "position": 34,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 35,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 36,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 107,
+          "text": "k",
+          "display_text": "k",
+          "segment": "response",
+          "position": 37,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 62,
+          "text": ">",
+          "display_text": ">",
+          "segment": "response",
+          "position": 38,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 42,
+          "text": "*",
+          "display_text": "*",
+          "segment": "response",
+          "position": 39,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 42,
+          "text": "*",
+          "display_text": "*",
+          "segment": "response",
+          "position": 40,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 66,
+          "text": "B",
+          "display_text": "B",
+          "segment": "response",
+          "position": 41,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 42,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 43,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 44,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 45,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 46,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 42,
+          "text": "*",
+          "display_text": "*",
+          "segment": "response",
+          "position": 47,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 42,
+          "text": "*",
+          "display_text": "*",
+          "segment": "response",
+          "position": 48,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 49,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 92,
+          "text": "\\",
+          "display_text": "\\",
+          "segment": "response",
+          "position": 50,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 51,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 52,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 92,
+          "text": "\\",
+          "display_text": "\\",
+          "segment": "response",
+          "position": 53,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 54,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 55,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 92,
+          "text": "\\",
+          "display_text": "\\",
+          "segment": "response",
+          "position": 56,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 57,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 58,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 92,
+          "text": "\\",
+          "display_text": "\\",
+          "segment": "response",
+          "position": 59,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 60,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 61,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 62,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 63,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 71,
+          "text": "G",
+          "display_text": "G",
+          "segment": "response",
+          "position": 64,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 65,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 66,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 67,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 68,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 69,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 70,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 71,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 72,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 73,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 74,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 87,
+          "text": "W",
+          "display_text": "W",
+          "segment": "response",
+          "position": 75,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 76,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 77,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 78,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 79,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 80,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 81,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 82,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 83,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 84,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 85,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 86,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 87,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 88,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 89,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 90,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 102,
+          "text": "f",
+          "display_text": "f",
+          "segment": "response",
+          "position": 91,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 92,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 93,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 94,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 54,
+          "text": "6",
+          "display_text": "6",
+          "segment": "response",
+          "position": 95,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 96,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 89,
+          "text": "Y",
+          "display_text": "Y",
+          "segment": "response",
+          "position": 97,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 98,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 99,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 44,
+          "text": ",",
+          "display_text": ",",
+          "segment": "response",
+          "position": 100,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 101,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 102,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 103,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 104,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 105,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 106,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 107,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 108,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 109,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 110,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 104,
+          "text": "h",
+          "display_text": "h",
+          "segment": "response",
+          "position": 111,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 112,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 113,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 119,
+          "text": "w",
+          "display_text": "w",
+          "segment": "response",
+          "position": 114,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 115,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 116,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 117,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 46,
+          "text": ".",
+          "display_text": ".",
+          "segment": "response",
+          "position": 118,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 0,
+          "text": "",
+          "display_text": "⏹",
+          "segment": "response",
+          "position": 119,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        }
+      ],
+      "forced_prefix_tokens": 0,
+      "reasoning_prefilled": true,
+      "finish_reason": "stop",
+      "started_at": 1758362406.0,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 0,
+        "max_new_tokens": 256,
+        "seed": 41
+      },
+      "model_id": "test/model",
+      "load_id": null,
+      "answer": "**Board:** \\_ \\_ \\_ \\_ E\nGuessed: E\nWrong guesses left: 6\nYes, E is in the word.",
+      "board": [
+        "_",
+        "_",
+        "_",
+        "_",
+        "e"
+      ],
+      "revealed_word": null,
+      "seconds": 3.0,
+      "recorded_load_id": "first"
+    },
+    {
+      "guess": "a",
+      "text": "Board: __A_E\nGuessed: E A\nWrong guesses left: 6\nYes, A is in the word.",
+      "metrics": [
+        {
+          "token_id": 66,
+          "text": "B",
+          "display_text": "B",
+          "segment": "response",
+          "position": 1,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 2,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 3,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 4,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 5,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 6,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 7,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 8,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 9,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 10,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 11,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 12,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 13,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 71,
+          "text": "G",
+          "display_text": "G",
+          "segment": "response",
+          "position": 14,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 15,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 16,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 17,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 18,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 19,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 20,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 21,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 22,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 23,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 24,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 25,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 26,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 87,
+          "text": "W",
+          "display_text": "W",
+          "segment": "response",
+          "position": 27,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 28,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 29,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 30,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 31,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 32,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 33,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 34,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 35,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 36,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 37,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 38,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 39,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 40,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 41,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 42,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 102,
+          "text": "f",
+          "display_text": "f",
+          "segment": "response",
+          "position": 43,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 44,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 45,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 46,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 54,
+          "text": "6",
+          "display_text": "6",
+          "segment": "response",
+          "position": 47,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 48,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 89,
+          "text": "Y",
+          "display_text": "Y",
+          "segment": "response",
+          "position": 49,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 50,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 51,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 44,
+          "text": ",",
+          "display_text": ",",
+          "segment": "response",
+          "position": 52,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 53,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 54,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 55,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 56,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 57,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 58,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 59,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 60,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 61,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 62,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 104,
+          "text": "h",
+          "display_text": "h",
+          "segment": "response",
+          "position": 63,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 64,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 65,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 119,
+          "text": "w",
+          "display_text": "w",
+          "segment": "response",
+          "position": 66,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 67,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 68,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 69,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 46,
+          "text": ".",
+          "display_text": ".",
+          "segment": "response",
+          "position": 70,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 0,
+          "text": "",
+          "display_text": "⏹",
+          "segment": "response",
+          "position": 71,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        }
+      ],
+      "forced_prefix_tokens": 0,
+      "reasoning_prefilled": false,
+      "finish_reason": "stop",
+      "started_at": 1758362412.0,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 0,
+        "max_new_tokens": 256,
+        "seed": 42
+      },
+      "model_id": "test/model",
+      "load_id": null,
+      "answer": "Board: __A_E\nGuessed: E A\nWrong guesses left: 6\nYes, A is in the word.",
+      "board": [
+        "_",
+        "_",
+        "a",
+        "_",
+        "e"
+      ],
+      "revealed_word": null,
+      "seconds": 3.0,
+      "recorded_load_id": "first"
+    },
+    {
+      "guess": "s",
+      "text": "Board: _ _ A _ E\nGue",
+      "metrics": [
+        {
+          "token_id": 66,
+          "text": "B",
+          "display_text": "B",
+          "segment": "response",
+          "position": 1,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 2,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 3,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 4,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 5,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 6,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 7,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 8,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 9,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 10,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 11,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 12,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 13,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 14,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 15,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 16,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 17,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 71,
+          "text": "G",
+          "display_text": "G",
+          "segment": "response",
+          "position": 18,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 19,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 20,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        }
+      ],
+      "forced_prefix_tokens": 0,
+      "reasoning_prefilled": false,
+      "finish_reason": "length",
+      "started_at": 1758362418.0,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 0,
+        "max_new_tokens": 20,
+        "seed": 43
+      },
+      "model_id": "test/model",
+      "load_id": null,
+      "answer": "Board: _ _ A _ E\nGue",
+      "board": [
+        "_",
+        "_",
+        "a",
+        "_",
+        "e"
+      ],
+      "revealed_word": null,
+      "seconds": 3.0,
+      "recorded_load_id": "first"
+    },
+    {
+      "guess": "r",
+      "text": "Board: _ R A _ E (two letters left)\nGuessed: E A S R\nWrong guesses left: 5",
+      "metrics": [
+        {
+          "token_id": 66,
+          "text": "B",
+          "display_text": "B",
+          "segment": "response",
+          "position": 1,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 2,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 3,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 4,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 5,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 6,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 7,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 8,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 9,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 82,
+          "text": "R",
+          "display_text": "R",
+          "segment": "response",
+          "position": 10,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 11,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 12,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 13,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 14,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 15,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 16,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 17,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 40,
+          "text": "(",
+          "display_text": "(",
+          "segment": "response",
+          "position": 18,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 19,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 119,
+          "text": "w",
+          "display_text": "w",
+          "segment": "response",
+          "position": 20,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 21,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 22,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 23,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 24,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 25,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 26,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 27,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 28,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 29,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 30,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 31,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 32,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 102,
+          "text": "f",
+          "display_text": "f",
+          "segment": "response",
+          "position": 33,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 34,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 41,
+          "text": ")",
+          "display_text": ")",
+          "segment": "response",
+          "position": 35,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 36,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 71,
+          "text": "G",
+          "display_text": "G",
+          "segment": "response",
+          "position": 37,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 38,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 39,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 40,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 41,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 42,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 43,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 44,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 45,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 46,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 47,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 48,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 49,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 83,
+          "text": "S",
+          "display_text": "S",
+          "segment": "response",
+          "position": 50,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 51,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 82,
+          "text": "R",
+          "display_text": "R",
+          "segment": "response",
+          "position": 52,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 53,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 87,
+          "text": "W",
+          "display_text": "W",
+          "segment": "response",
+          "position": 54,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 55,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 56,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 57,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 58,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 59,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 60,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 61,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 62,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 63,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 64,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 65,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 66,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 67,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 68,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 69,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 102,
+          "text": "f",
+          "display_text": "f",
+          "segment": "response",
+          "position": 70,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 71,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 72,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 73,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 53,
+          "text": "5",
+          "display_text": "5",
+          "segment": "response",
+          "position": 74,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 0,
+          "text": "",
+          "display_text": "⏹",
+          "segment": "response",
+          "position": 75,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        }
+      ],
+      "forced_prefix_tokens": 0,
+      "reasoning_prefilled": false,
+      "finish_reason": "stop",
+      "started_at": 1758362424.0,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 0,
+        "max_new_tokens": 256,
+        "seed": 44
+      },
+      "model_id": "test/model",
+      "load_id": "first",
+      "answer": "Board: _ R A _ E (two letters left)\nGuessed: E A S R\nWrong guesses left: 5",
+      "board": null,
+      "revealed_word": null,
+      "seconds": 3.0
+    },
+    {
+      "guess": "o",
+      "text": "Board: _ R O _ E\nGuessed: E A S R O\nWrong guesses left: 4\nYes, O is in the word.",
+      "metrics": [
+        {
+          "token_id": 66,
+          "text": "B",
+          "display_text": "B",
+          "segment": "response",
+          "position": 1,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 2,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 3,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 4,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 5,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 6,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 7,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 8,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 9,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 82,
+          "text": "R",
+          "display_text": "R",
+          "segment": "response",
+          "position": 10,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 11,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 79,
+          "text": "O",
+          "display_text": "O",
+          "segment": "response",
+          "position": 12,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 13,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 95,
+          "text": "_",
+          "display_text": "_",
+          "segment": "response",
+          "position": 14,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 15,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 16,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 17,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 71,
+          "text": "G",
+          "display_text": "G",
+          "segment": "response",
+          "position": 18,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 19,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 20,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 21,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 22,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 23,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 24,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 25,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 26,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 27,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 28,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 29,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 30,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 83,
+          "text": "S",
+          "display_text": "S",
+          "segment": "response",
+          "position": 31,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 32,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 82,
+          "text": "R",
+          "display_text": "R",
+          "segment": "response",
+          "position": 33,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 34,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 79,
+          "text": "O",
+          "display_text": "O",
+          "segment": "response",
+          "position": 35,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 36,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 87,
+          "text": "W",
+          "display_text": "W",
+          "segment": "response",
+          "position": 37,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 38,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 39,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 40,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 41,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 42,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 43,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 44,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 45,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 46,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 47,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 48,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 49,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 50,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 108,
+          "text": "l",
+          "display_text": "l",
+          "segment": "response",
+          "position": 51,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 52,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 102,
+          "text": "f",
+          "display_text": "f",
+          "segment": "response",
+          "position": 53,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 54,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 55,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 56,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 52,
+          "text": "4",
+          "display_text": "4",
+          "segment": "response",
+          "position": 57,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 58,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 89,
+          "text": "Y",
+          "display_text": "Y",
+          "segment": "response",
+          "position": 59,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 60,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 61,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 44,
+          "text": ",",
+          "display_text": ",",
+          "segment": "response",
+          "position": 62,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 63,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 79,
+          "text": "O",
+          "display_text": "O",
+          "segment": "response",
+          "position": 64,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 65,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 66,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 115,
+          "text": "s",
+          "display_text": "s",
+          "segment": "response",
+          "position": 67,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 68,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 69,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 110,
+          "text": "n",
+          "display_text": "n",
+          "segment": "response",
+          "position": 70,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 71,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 72,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 104,
+          "text": "h",
+          "display_text": "h",
+          "segment": "response",
+          "position": 73,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 74,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 75,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 119,
+          "text": "w",
+          "display_text": "w",
+          "segment": "response",
+          "position": 76,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 77,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 78,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 79,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 46,
+          "text": ".",
+          "display_text": ".",
+          "segment": "response",
+          "position": 80,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 0,
+          "text": "",
+          "display_text": "⏹",
+          "segment": "response",
+          "position": 81,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        }
+      ],
+      "forced_prefix_tokens": 0,
+      "reasoning_prefilled": false,
+      "finish_reason": "stop",
+      "started_at": 1758362430.0,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 0,
+        "max_new_tokens": 256,
+        "seed": 45
+      },
+      "model_id": "test/model",
+      "load_id": "first",
+      "answer": "Board: _ R O _ E\nGuessed: E A S R O\nWrong guesses left: 4\nYes, O is in the word.",
+      "board": [
+        "_",
+        "r",
+        "o",
+        "_",
+        "e"
+      ],
+      "revealed_word": null,
+      "seconds": 3.0
+    },
+    {
+      "guess": "crane",
+      "text": "Board: C R A N E\nWord: crate\nYou got it.",
+      "metrics": [
+        {
+          "token_id": 66,
+          "text": "B",
+          "display_text": "B",
+          "segment": "response",
+          "position": 1,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 2,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 3,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 4,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 5,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 6,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 7,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 67,
+          "text": "C",
+          "display_text": "C",
+          "segment": "response",
+          "position": 8,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 9,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 82,
+          "text": "R",
+          "display_text": "R",
+          "segment": "response",
+          "position": 10,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 11,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 65,
+          "text": "A",
+          "display_text": "A",
+          "segment": "response",
+          "position": 12,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 13,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 78,
+          "text": "N",
+          "display_text": "N",
+          "segment": "response",
+          "position": 14,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 15,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 69,
+          "text": "E",
+          "display_text": "E",
+          "segment": "response",
+          "position": 16,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 17,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 87,
+          "text": "W",
+          "display_text": "W",
+          "segment": "response",
+          "position": 18,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 19,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 20,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 100,
+          "text": "d",
+          "display_text": "d",
+          "segment": "response",
+          "position": 21,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 58,
+          "text": ":",
+          "display_text": ":",
+          "segment": "response",
+          "position": 22,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 23,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 99,
+          "text": "c",
+          "display_text": "c",
+          "segment": "response",
+          "position": 24,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 114,
+          "text": "r",
+          "display_text": "r",
+          "segment": "response",
+          "position": 25,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 97,
+          "text": "a",
+          "display_text": "a",
+          "segment": "response",
+          "position": 26,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 27,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 101,
+          "text": "e",
+          "display_text": "e",
+          "segment": "response",
+          "position": 28,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 10,
+          "text": "\n",
+          "display_text": "\n",
+          "segment": "response",
+          "position": 29,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 89,
+          "text": "Y",
+          "display_text": "Y",
+          "segment": "response",
+          "position": 30,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 31,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 117,
+          "text": "u",
+          "display_text": "u",
+          "segment": "response",
+          "position": 32,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 33,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 103,
+          "text": "g",
+          "display_text": "g",
+          "segment": "response",
+          "position": 34,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 111,
+          "text": "o",
+          "display_text": "o",
+          "segment": "response",
+          "position": 35,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 36,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 32,
+          "text": " ",
+          "display_text": " ",
+          "segment": "response",
+          "position": 37,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 105,
+          "text": "i",
+          "display_text": "i",
+          "segment": "response",
+          "position": 38,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 116,
+          "text": "t",
+          "display_text": "t",
+          "segment": "response",
+          "position": 39,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 46,
+          "text": ".",
+          "display_text": ".",
+          "segment": "response",
+          "position": 40,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        },
+        {
+          "token_id": 0,
+          "text": "",
+          "display_text": "⏹",
+          "segment": "response",
+          "position": 41,
+          "scored": false,
+          "top_candidates": [
+            {
+              "token_id": 90,
+              "text": "Z",
+              "probability": 0.1
+            }
+          ]
+        }
+      ],
+      "forced_prefix_tokens": 28,
+      "reasoning_prefilled": false,
+      "finish_reason": "stop",
+      "started_at": 1758362442.0,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 0,
+        "max_new_tokens": 256,
+        "seed": 46
+      },
+      "model_id": "test/model",
+      "load_id": "first",
+      "branch": {
+        "parent": "000000000000000000000012d71843dc",
+        "turn": 6,
+        "token_index": 23,
+        "forced_tokens": 28,
+        "replacement": "crate"
+      },
+      "answer": "Board: C R A N E\nWord: crate\nYou got it.",
+      "board": [
+        "c",
+        "r",
+        "a",
+        "n",
+        "e"
+      ],
+      "revealed_word": "crate",
+      "seconds": 3.0
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "format": "chatlab-hangman-trials-1",
+  "title": "  Qwen3 0.6B, five seeds  ",
+  "defaults": {
+    "temperature": 1.0,
+    "max_new_tokens": 1024,
+    "guesser": "frequency",
+    "probe": {
+      "samples": 5
+    }
+  },
+  "trials": [
+    {
+      "id": "s1",
+      "seed": 1
+    },
+    {
+      "id": "s2",
+      "seed": 2,
+      "probe": null
+    },
+    {
+      "id": "s1-greedy",
+      "label": "Seed 1, greedy",
+      "seed": 1,
+      "temperature": 0
+    },
+    {
+      "id": "fixed",
+      "label": "Fixed guesses",
+      "seed": 7,
+      "guesser": [
+        "e",
+        "a",
+        "crane"
+      ],
+      "max_guesses": 3,
+      "probe": {
+        "samples": 2,
+        "max_new_tokens": 8,
+        "temperature": 0.5
+      }
+    },
+    {
+      "id": "custom-prompt",
+      "seed": 9,
+      "system": "",
+      "opening": "Pick a word and draw the board.",
+      "max_new_tokens": 4096
+    }
+  ]
+}
