@@ -1,0 +1,169 @@
+{
+ "format": "chatlab-maze-trials-1",
+ "title": "Waypoint and steering trials",
+ "vectors": {
+  "calm": {
+   "format": "chatlab-steering-1",
+   "model_id": "test/model",
+   "layer": 3,
+   "vector": [
+    1.0,
+    -2.0,
+    0.5
+   ],
+   "strength": 2.0,
+   "enabled": true
+  }
+ },
+ "trials": [
+  {
+   "id": "named-vector",
+   "label": "Named vector at the waypoint",
+   "maze": {
+    "grid": [
+     "...#.",
+     ".#...",
+     ".....",
+     ".....",
+     "....."
+    ],
+    "start": [
+     0,
+     4
+    ],
+    "goal": [
+     4,
+     0
+    ],
+    "seed": 303,
+    "maze_id": "maze-aced7decf8bc",
+    "distance": 8
+   },
+   "openness": 0.7,
+   "config": {
+    "supplied_moves": 0,
+    "interrupt_after": 0,
+    "interruption_text": "",
+    "prefix_tokens": 0,
+    "temperature": 0.7,
+    "sampling_seed": 303,
+    "per_turn_tokens": 400,
+    "token_budget": 6000,
+    "attempt_budget": 24,
+    "goal_mode": "coordinates",
+    "goal_hint": "",
+    "waypoint": [
+     3,
+     4
+    ],
+    "steering": {
+     "vector": "calm",
+     "strength": 5.0
+    },
+    "steer_when": {
+     "cell": [
+      3,
+      4
+     ]
+    },
+    "steer_responses": 2,
+    "recovery_tokens": 600,
+    "recovery_attempts": 3
+   }
+  },
+  {
+   "id": "inline-vector",
+   "label": "Inline vector after moves",
+   "maze": {
+    "grid": [
+     "...#.",
+     ".#...",
+     ".....",
+     ".....",
+     "....."
+    ],
+    "start": [
+     0,
+     4
+    ],
+    "goal": [
+     4,
+     0
+    ],
+    "seed": 303,
+    "maze_id": "maze-aced7decf8bc",
+    "distance": 8
+   },
+   "openness": 0.7,
+   "config": {
+    "supplied_moves": 0,
+    "interrupt_after": 0,
+    "interruption_text": "",
+    "prefix_tokens": 0,
+    "temperature": 0.7,
+    "sampling_seed": 303,
+    "per_turn_tokens": 400,
+    "token_budget": 6000,
+    "attempt_budget": 24,
+    "goal_mode": "coordinates",
+    "goal_hint": "",
+    "steering": {
+     "format": "chatlab-steering-1",
+     "model_id": "test/model",
+     "layer": 3,
+     "vector": [
+      1.0,
+      -2.0,
+      0.5
+     ],
+     "strength": 4.0,
+     "enabled": true
+    },
+    "steer_when": {
+     "moves": 2
+    },
+    "steer_responses": 0,
+    "system_prompt": "Be terse.",
+    "instruction": "Reach the destination."
+   }
+  },
+  {
+   "id": "plain",
+   "label": "No waypoint, no vector",
+   "maze": {
+    "grid": [
+     "...#.",
+     ".#...",
+     ".....",
+     ".....",
+     "....."
+    ],
+    "start": [
+     0,
+     4
+    ],
+    "goal": [
+     4,
+     0
+    ],
+    "seed": 303,
+    "maze_id": "maze-aced7decf8bc",
+    "distance": 8
+   },
+   "openness": 0.7,
+   "config": {
+    "supplied_moves": 0,
+    "interrupt_after": 0,
+    "interruption_text": "",
+    "prefix_tokens": 0,
+    "temperature": 0.7,
+    "sampling_seed": 303,
+    "per_turn_tokens": 400,
+    "token_budget": 6000,
+    "attempt_budget": 24,
+    "goal_mode": "coordinates",
+    "goal_hint": ""
+   }
+  }
+ ]
+}

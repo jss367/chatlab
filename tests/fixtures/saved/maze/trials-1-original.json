@@ -1,0 +1,85 @@
+{
+ "format": "chatlab-maze-trials-1",
+ "title": "Saved-format trials",
+ "trials": [
+  {
+   "id": "coords-own-words",
+   "label": "Coordinates, own wording",
+   "maze": {
+    "grid": [
+     "#....",
+     "#.##.",
+     "...##",
+     "...#.",
+     "##..."
+    ],
+    "start": [
+     0,
+     2
+    ],
+    "goal": [
+     4,
+     4
+    ],
+    "seed": 101,
+    "maze_id": "maze-f31a9ae5e031",
+    "distance": 8
+   },
+   "openness": 0.6,
+   "config": {
+    "supplied_moves": 1,
+    "interrupt_after": 2,
+    "interruption_text": "Hold on a moment. ",
+    "prefix_tokens": 0,
+    "temperature": 0.5,
+    "sampling_seed": 7,
+    "per_turn_tokens": 300,
+    "token_budget": 4000,
+    "attempt_budget": 24,
+    "goal_mode": "coordinates",
+    "goal_hint": "",
+    "system_prompt": "Answer with one move.",
+    "instruction": "Reach the destination at the coordinates in the state."
+   }
+  },
+  {
+   "id": "hint-stock",
+   "label": "Hint, stock wording",
+   "maze": {
+    "grid": [
+     "......",
+     "....#.",
+     "...#..",
+     "#.#.#.",
+     "..#...",
+     ".....#"
+    ],
+    "start": [
+     4,
+     3
+    ],
+    "goal": [
+     0,
+     2
+    ],
+    "seed": 202,
+    "maze_id": "maze-bfdc481f579a",
+    "distance": 9
+   },
+   "openness": 0.75,
+   "config": {
+    "supplied_moves": 1,
+    "interrupt_after": 3,
+    "interruption_text": "Hold on a moment. ",
+    "prefix_tokens": 0,
+    "temperature": 0.5,
+    "sampling_seed": 7,
+    "per_turn_tokens": 300,
+    "token_budget": 4000,
+    "attempt_budget": 24,
+    "goal_mode": "hint",
+    "goal_hint": "It is in the far corner."
+   }
+  }
+ ]
+}
