@@ -200,12 +200,16 @@ class SavedProbeTests(unittest.TestCase):
     def test_readings_use_the_saved_weights_and_biases(self):
         for name, expected in EXPECTED.items():
             with self.subTest(name=name):
+                frozen = json.loads((FIXTURES / name).read_text())
                 probe = probes.read(FIXTURES / name)
+                for loaded, saved in zip(probe["layers"], frozen["layers"], strict=True):
+                    self.assertEqual(loaded["weights"], saved["weights"])
+                    self.assertEqual(loaded["bias"], saved["bias"])
                 rows = probes.directions(probe)
                 self.assertEqual(rows.dtype, np.float32)
                 self.assertEqual(rows.shape, (len(expected["layers"]), expected["width"]))
-                np.testing.assert_array_equal(rows[:, :3], np.asarray([w for _, _, w, *_ in expected["layers"]],
-                                                                      dtype=np.float32))
+                np.testing.assert_array_equal(rows, np.asarray(
+                    [layer["weights"] for layer in frozen["layers"]], dtype=np.float32))
                 # With no projection a block's probability is the sigmoid of its bias alone.
                 at_zero = probes.probabilities(probe, np.zeros((len(expected["layers"]), 2)))
                 np.testing.assert_allclose(at_zero[:, 0], expected["at_zero"], rtol=1e-12)

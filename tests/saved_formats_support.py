@@ -24,10 +24,12 @@ class Sandbox:
         self.root = Path(self._directory.name)
         self._previous = {
             name: os.environ.get(name)
-            for name in (library.LIBRARY_PATH_ENV, settings.SETTINGS_PATH_ENV)
+            for name in (library.LIBRARY_PATH_ENV, settings.SETTINGS_PATH_ENV, settings.MODEL_ID_ENV)
         }
         self.use_library(self.root / "conversations.json")
         os.environ[settings.SETTINGS_PATH_ENV] = str(self.root / "settings.json")
+        # A launcher's one-run model must not override the frozen settings.
+        os.environ.pop(settings.MODEL_ID_ENV, None)
         settings.load()
 
     def use_library(self, path: Path) -> Path:

@@ -5,12 +5,13 @@ They are imported through Chat's "Import vector" handler, ``import_vector``,
 and the vector it stores on the conversation is checked number by number.
 """
 
-import json
+from pathlib import Path
 import unittest
+from unittest import mock
 
 from chatlab import steering
 from chatlab.conversation import new_forks
-from chatlab.ui.steering import import_vector
+from chatlab.ui.steering import download_extracted, import_vector
 
 from saved_formats_support import SAVED, sandbox
 
@@ -31,8 +32,19 @@ class SavedVectorCase(unittest.TestCase):
     def assert_round_trip(self):
         """Today's download writes the same vector, which imports to the same reading."""
 
-        target = self.box.root / "exported.json"
-        target.write_text(json.dumps(self.vector, indent=2) + "\n", encoding="utf-8")
+        layer = self.vector["layer"]
+        extraction = {
+            "model_id": self.vector["model_id"],
+            "layers": [[0.0] * len(self.vector["vector"]) for _ in range(layer + 2)],
+            "stats": [{} for _ in range(layer + 2)],
+        }
+        extraction["layers"][layer] = self.vector["vector"]
+        directory = self.box.root / "download"
+        directory.mkdir()
+        # Isolate only the output directory; exercise the real layer selection and writer.
+        with mock.patch("chatlab.ui.steering.tempfile.mkdtemp", return_value=str(directory)):
+            target = Path(download_extracted(extraction, layer))
+        self.assertEqual(target.parent, directory)
         again = steering.read_vector(str(target))
         self.assertEqual(again, self.vector)
         _, value, *_ = import_vector(str(target), new_forks())

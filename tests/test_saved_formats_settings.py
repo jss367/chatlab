@@ -10,12 +10,29 @@ with today's writer and the file read back.
 import json
 import os
 import unittest
+from unittest import mock
 
 from chatlab import settings
 
-from saved_formats_support import SAVED, sandbox
+from saved_formats_support import SAVED, Sandbox, sandbox
 
 SETTINGS = SAVED / "settings"
+
+
+class SettingsSandboxTests(unittest.TestCase):
+    def test_model_override_is_isolated_and_restored(self):
+        for previous in (None, "", "validation/inert-model"):
+            with self.subTest(previous=previous), mock.patch.dict(os.environ):
+                os.environ.pop(settings.MODEL_ID_ENV, None)
+                if previous is not None:
+                    os.environ[settings.MODEL_ID_ENV] = previous
+                box = Sandbox()
+                try:
+                    self.assertNotIn(settings.MODEL_ID_ENV, os.environ)
+                    self.assertEqual(settings.model_id_at_startup(), settings.DEFAULTS.model_id)
+                finally:
+                    box.close()
+                self.assertEqual(os.environ.get(settings.MODEL_ID_ENV), previous)
 
 # What the reader chose in every era, for the fields that era had.
 CHOSEN = {
