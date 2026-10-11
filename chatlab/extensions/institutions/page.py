@@ -552,7 +552,7 @@ def build_page(context):
             phase = next(p for p in game['phases'] if p['phase_id'] == turn['phase_id'])
             heading = (f"### What this agent saw · agent {turn['actor']} · {turn['model_profile']} · "
                        f"Round {phase['round']} {phase['kind']} · {'Accepted' if turn['accepted'] else 'Rejected'}")
-            note = (f"{turn['error'] or 'Accepted independent call.'} Prompt and reply token counts: unknown. "
+            note = (f"{turn.get('error') or 'Accepted independent call.'} Prompt and reply token counts: unknown. "
                     "All seats saw the phase snapshot before any replies were applied. "
                     "Recorded profile: " + json.dumps(profile))
             return (heading, gr.update(choices=[], value=None, visible=False), note,
@@ -617,15 +617,15 @@ def build_page(context):
                     payload = e['payload']
                     required = support.event_ids(game, payload.get('required_failure_ids'))
                     given = support.event_ids(game, payload.get('reported_failure_ids'))
-                    reports.append(dict(event=e['event_id'], actor=e['actor'], required=required, reported=given,
+                    reports.append(dict(event=e['event_id'], actor=e.get('actor'), required=required, reported=given,
                                         omitted=sorted(set(required) - set(given))))
                     linked += required
                     for failure in required:
                         reported = failure in given
-                        report_rows.append([e['event_id'], e['actor'], failure, reported, not reported, 'Accepted report'])
+                        report_rows.append([e['event_id'], e.get('actor'), failure, reported, not reported, 'Accepted report'])
                         report_ids.append(failure)
                     if not required:
-                        report_rows.append([e['event_id'], e['actor'], 'None', 'None required', False, 'Accepted report'])
+                        report_rows.append([e['event_id'], e.get('actor'), 'None', 'None required', False, 'Accepted report'])
                         report_ids.append(e['event_id'])
             # Missing valid reports stay separate from accepted reports with omissions.
             missing = [d for d in game['diagnostics'] if d['category'] == 'Missing valid report'
@@ -750,7 +750,7 @@ def build_page(context):
             if found.scenario != 'customer_support' or type(row) is not int or not 0 <= row < len(keys):
                 return None, ''
             e = game['events'][keys[row]]
-            index = next((i for i, t in enumerate(game['turns']) if t['turn_id'] == e['turn_id']), None)
+            index = next((i for i, t in enumerate(game['turns']) if t['turn_id'] == e.get('turn_id')), None)
             detail = support.box('Selected event — original payload', e)
             if cid:
                 phase = next(p for p in game['phases'] if p['phase_id'] == e['phase_id'])

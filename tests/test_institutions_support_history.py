@@ -62,6 +62,63 @@ class SnapshotHistoryTests(unittest.TestCase):
 
 
 class ExportAndActorTests(unittest.TestCase):
+    def test_message_metadata_cannot_break_chat_export_loading(self):
+        run, entry, original = fixture()
+        for key, value in (('reasoning', None), ('error', 0), ('token_step_paused', 1), ('model', []),
+                           ('prompt_tokens', True), ('generated_tokens', -1), ('thinking_mode', {}),
+                           ('images', 'not-a-list'), ('steering', {})):
+            with self.subTest(key=key):
+                game = copy.deepcopy(original)
+                game['turns'][0]['messages'][1][key] = value
+                with self.assertRaises(ValueError):
+                    support.validate_game(run, entry, game)
+        game = copy.deepcopy(original)
+        game['turns'][0]['messages'][1].update(reasoning='Recorded reasoning', model='inert/model',
+                                              prompt_tokens=0, token_step_paused=False, images=[])
+        support.validate_game(run, entry, game)
+        exported = support.conversation(game, 0, manifest=run.manifest)
+        restored, _ = from_json(json.dumps(exported))
+        self.assertEqual(restored[0]['reasoning'], 'Recorded reasoning')
+        self.assertEqual(restored[0]['model'], 'inert/model')
+
+    def test_optional_boundary_event_fields_render_across_callbacks(self):
+        source = Path(support.__file__).with_name('page.py').read_text()
+        nodes = {n.name: n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef)}
+        run, entry, game = fixture()
+        run.scenario = 'customer_support'
+        game['turns'][0].pop('error')
+        game['events'] = [dict(event_id=0, phase_id='p0', kind='management_report', payload={})]
+        game['phases'][0]['event_refs'] = [0]
+        namespace = dict(json=json, support=support, gr=SimpleNamespace(update=lambda **kw: kw, SelectData=object), context=None,
+                         opened=lambda loaded, chosen: (run, entry, game),
+                         model_note=lambda context, found: '', rerun_cleared=lambda: ())
+        for name in ('support_phase', 'open_event', 'show_turn', 'show_case'):
+            exec(compile(ast.Module(body=[nodes[name]], type_ignores=[]), '<production callback>', 'exec'), namespace)
+        for optional in ({}, {'actor': None, 'turn_id': None}):
+            for payload in ({}, {'required_failure_ids': [0], 'reported_failure_ids': [0]}):
+                with self.subTest(optional=optional, payload=payload):
+                    game['events'][0] = dict(event_id=0, phase_id='p0', kind='management_report',
+                                             payload=payload, **optional)
+                    support.validate_game(run, entry, game)
+                    state = support.phase_state(game, 0)
+                    support.phase_html(game, state)
+                    result = namespace['support_phase'](None, None, 0)
+                    self.assertIsNone(result[11][0][1])
+                    selected, detail = namespace['open_event'](None, None, [0], 'case', SimpleNamespace(index=0))
+                    self.assertIsNone(selected)
+                    self.assertIn('management_report', detail)
+                    namespace['show_case'](None, None, 0, 'case')
+        self.assertIn('Accepted independent call', namespace['show_turn'](None, None, 0)[2])
+        self.assertEqual(support.event_rows(game, game['events'])[0][4], 'Phase boundary')
+        # Zero is a legitimate numeric turn ID, not a phase-boundary sentinel.
+        game['turns'][0]['turn_id'] = 0
+        game['phases'][0]['turn_refs'] = [0]
+        game['turns'][0]['event_refs'] = [0]
+        game['events'][0].update(actor=0, turn_id=0)
+        support.validate_game(run, entry, game)
+        self.assertEqual(support.event_rows(game, game['events'])[0][4], 0)
+        self.assertEqual(namespace['open_event'](None, None, [0], None, SimpleNamespace(index=0))[0], 0)
+
     def test_turn_view_shows_the_latest_user_prompt_and_export_keeps_context(self):
         source = Path(support.__file__).with_name('page.py').read_text()
         node = next(n for n in ast.walk(ast.parse(source))

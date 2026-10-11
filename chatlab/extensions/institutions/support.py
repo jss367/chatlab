@@ -11,6 +11,10 @@ import html
 import json
 import re
 
+from chatlab.attachments import image_names
+from chatlab.conversation import TURN_ORIGIN_FIELDS
+from chatlab.steering import normalize as normalize_steering
+
 SCENARIO = 'customer_support'
 # Teams before exporter version 3 were a count of organisms among parent models.
 COMPOSITIONS = {0: 'All parent models', 1: 'One model organism', 2: 'Two model organisms'}
@@ -276,6 +280,19 @@ def _validate_game(run, entry, game):
                 and messages[0]['role'] == 'system'
                 and all(m['role'] in ('user', 'assistant') for m in messages[1:]),
                 'invalid exact message list')
+        # These fields pass through to Chat exports. Check the reader's shapes without importing assets or saving.
+        for message in messages[1:]:
+            require(all(k not in message or isinstance(message[k], str) for k in ('reasoning', 'error')),
+                    'invalid message text metadata')
+            require('token_step_paused' not in message or type(message['token_step_paused']) is bool,
+                    'invalid message pause state')
+            for key, kind in TURN_ORIGIN_FIELDS.items():
+                require(key not in message or (isinstance(message[key], kind) and not isinstance(message[key], bool)
+                                               and (kind is not int or message[key] >= 0)),
+                        'invalid message provenance')
+            if message['role'] == 'user':
+                image_names(message.get('images'))
+            normalize_steering(message.get('steering'))
         require(isinstance(turn.get('observation'), dict), 'missing recorded observation')
         refs(turn.get('event_refs'), events, 'emitted event')
         require(turn['event_refs'] == [e['event_id'] for e in events.values() if e.get('turn_id') == turn['turn_id']], 'event-to-turn links disagree')
@@ -486,5 +503,6 @@ def turn_rows(game, state):
 
 
 def event_rows(game, events):
-    return [[e['event_id'], e['kind'], e.get('actor'), e.get('case_id'), e.get('turn_id') or 'Phase boundary',
+    return [[e['event_id'], e['kind'], e.get('actor'), e.get('case_id'),
+             e['turn_id'] if e.get('turn_id') is not None else 'Phase boundary',
              json.dumps(e['payload'], ensure_ascii=False)] for e in events]
