@@ -59,8 +59,11 @@ CSS = """
    The column scrolls instead. Its corner drags it taller, or back down to the
    height it fills, and JS below keeps the height it was dragged to. No taller
    than the window, though, since past that it cannot be seen whole: the drag
-   stops there, and a height kept from a taller window is cut to fit. */
-#maze-board {flex:1 0 auto !important; height:var(--maze-board-height, min(440px, 55vh)); min-height:180px; max-height:100vh; resize:vertical; overflow:hidden; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
+   stops there, and a height kept from a taller window is cut to fit. A
+   legend longer than the board, as a hundred agents make, scrolls inside it,
+   since resizing needs an overflow other than visible and hidden would cut
+   the agents past the fold off. */
+#maze-board {flex:1 0 auto !important; height:var(--maze-board-height, min(440px, 55vh)); min-height:180px; max-height:100vh; resize:vertical; overflow:auto; scrollbar-width:thin; background:#f6f7fb; border:1px solid #e4e7f0; border-radius:18px; padding:12px; display:flex; flex-direction:column;}
 #maze-board .html-container, #maze-board .prose {height:100%; min-height:0; display:flex; flex-direction:column;}
 #maze-board svg {width:100%; flex:1 1 0; min-height:0; display:block; margin:auto;}
 .maze-legend {display:flex; justify-content:center; gap:8px 12px; flex-wrap:wrap; color:#647084; font:11px system-ui; padding-top:10px; flex-shrink:0;}
