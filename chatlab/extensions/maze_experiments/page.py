@@ -52,6 +52,11 @@ CSS = """
 #maze-workspace {flex:1 1 0 !important; min-height:0; flex-wrap:nowrap; gap:20px;}
 #maze-scenario, #maze-inspector {flex:0 0 auto !important; min-width:240px !important; width:26%; max-width:30%; height:100%; overflow:auto; resize:horizontal; padding:0 12px 16px 0; scrollbar-width:thin; overscroll-behavior:contain;}
 #maze-inspector {width:32%; min-width:280px !important; max-width:34%; padding:0 0 16px 12px; border-left:1px solid var(--border-color-primary);}
+/* Scenario settings only shape the next episode, so the pane hides while a
+   run is read and its width goes to the board. */
+#maze-scenario-head {flex-wrap:nowrap; align-items:center; justify-content:space-between; gap:8px;}
+#maze-scenario #maze-scenario-head > * {min-width:0 !important;}
+#maze-scenario-head button, #maze-show-scenario {flex:none; width:auto; align-self:flex-start;}
 #maze-center {flex:1 1 0 !important; min-width:280px !important; min-height:0; height:100%; gap:12px; overflow:auto; scrollbar-width:thin;}
 /* The board fills whatever height the column has spare, and never less than
    the height it starts at: with the messages open below it there was no spare
@@ -1112,8 +1117,11 @@ def _build_page(context):
     wanted_model = gr.State("")
     trial_data = gr.State(None)
     with gr.Row(elem_id="maze-workspace"):
-        with gr.Column(elem_id="maze-scenario"):
-            gr.Markdown("## Scenario")
+        with gr.Column(elem_id="maze-scenario") as scenario_pane:
+            with gr.Row(elem_id="maze-scenario-head"):
+                gr.Markdown("## Scenario")
+                hide_scenario = gr.Button("Hide", size="sm", elem_id="maze-hide-scenario",
+                                          elem_classes=icon_classes("chevron-left"))
             models = gr.Button("Choose / load model", size="sm")
             with gr.Accordion("Experiment trials", open=False):
                 trial_upload = gr.File(label="Trial definitions JSON", file_types=[".json"], type="filepath")
@@ -1262,6 +1270,8 @@ def _build_page(context):
                 save = gr.Button("Export run JSON", size="sm")
                 download = gr.File(label="Saved run", interactive=False)
         with gr.Column(elem_id="maze-center"):
+            show_scenario = gr.Button("Scenario", size="sm", visible=False, elem_id="maze-show-scenario",
+                                      elem_classes=icon_classes("chevron-right", trailing=True))
             maze_board = gr.HTML(board(initial), elem_id="maze-board")
             transport_status = gr.Markdown(transport_text(initial), elem_id="maze-transport-status")
             with gr.Row(elem_id="maze-transport"):
@@ -1316,24 +1326,26 @@ def _build_page(context):
                             "round, keeping its responses and applying none of its moves.")
                 stop = gr.Button("Stop now · end episode", size="sm", elem_id="maze-stop")
         with gr.Column(elem_id="maze-inspector"):
-            gr.Markdown("## Emitted tokens")
-            strip = gr.HighlightedText(label="Click a token to inspect or edit; right-click to branch on the spot",
-                                       color_map=context.tokens.color_map, combine_adjacent=False,
-                                       show_legend=True, elem_id="maze-tokens",
-                                       elem_classes=menu.strip_classes)
-            # The right-click menu carries one token's alternatives out through
-            # these and the branch chosen in it back, without the reader
-            # crossing the pane to the editor below.
-            menu_request, menu_response, menu_action = menu.bridges()
-            with gr.Column(visible=False, elem_id="maze-token-editor") as editor:
-                detail = gr.Markdown("Select a model-generated token above.")
-                replacement = gr.Textbox(label="Replacement text", lines=2)
-                candidate = gr.Dropdown(choices=[("Use replacement text", "text")], value="text", label="Replacement token")
-                edit_button = gr.Button("Replace token and regenerate", elem_id="maze-edit-token")
-                gr.Markdown("Editing creates a new run from this token. The original run is saved.")
-                with gr.Accordion("Token probabilities", open=False):
-                    alternatives = gr.Dataframe(headers=["Token ID", "Text", "Raw probability"], interactive=False,
-                                                label="Click a row to branch this response into that token")
+            # Collapsible so the movement history below can take the column's
+            # height: an open strip and editor leave it a few rows.
+            with gr.Accordion("Emitted tokens", open=True, elem_id="maze-tokens-pane"):
+                strip = gr.HighlightedText(label="Click a token to inspect or edit; right-click to branch on the spot",
+                                           color_map=context.tokens.color_map, combine_adjacent=False,
+                                           show_legend=True, elem_id="maze-tokens",
+                                           elem_classes=menu.strip_classes)
+                # The right-click menu carries one token's alternatives out through
+                # these and the branch chosen in it back, without the reader
+                # crossing the pane to the editor below.
+                menu_request, menu_response, menu_action = menu.bridges()
+                with gr.Column(visible=False, elem_id="maze-token-editor") as editor:
+                    detail = gr.Markdown("Select a model-generated token above.")
+                    replacement = gr.Textbox(label="Replacement text", lines=2)
+                    candidate = gr.Dropdown(choices=[("Use replacement text", "text")], value="text", label="Replacement token")
+                    edit_button = gr.Button("Replace token and regenerate", elem_id="maze-edit-token")
+                    gr.Markdown("Editing creates a new run from this token. The original run is saved.")
+                    with gr.Accordion("Token probabilities", open=False):
+                        alternatives = gr.Dataframe(headers=["Token ID", "Text", "Raw probability"], interactive=False,
+                                                    label="Click a row to branch this response into that token")
             gr.Markdown("## Movement history\nSelect a row to show its position and response.")
             events = gr.Dataframe(value=timeline(initial), headers=["Response", "Position", "Direction", "Result"],
                                   interactive=False, wrap=True, elem_id="maze-history")
@@ -1814,6 +1826,13 @@ def _build_page(context):
 
     context_refresh.click(show_context, episode, [context_note, context_body], show_progress="hidden")
     context_pane.expand(show_context, episode, [context_note, context_body], show_progress="hidden")
+
+    # Off the queue, so the pane hides while a response is generating, which
+    # holds the page's one queue slot until it ends.
+    hide_scenario.click(lambda: (gr.update(visible=False), gr.update(visible=True)), None,
+                        [scenario_pane, show_scenario], queue=False, show_progress="hidden")
+    show_scenario.click(lambda: (gr.update(visible=True), gr.update(visible=False)), None,
+                        [scenario_pane, show_scenario], queue=False, show_progress="hidden")
 
     def branch_alternative(ep, show, session_id, metrics, selected, data, evt: gr.SelectData):
         """One click in the probabilities table branches into that alternative.
