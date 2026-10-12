@@ -67,7 +67,8 @@ REWARD_DEFAULTS = dict(
     # The taste prompt names no vector, so a steered taste and an unsteered
     # one are asked the same question and differ only in how they are answered.
     taste=False, taste_prompt="Before the maze begins, describe how you feel right now.",
-    taste_strength=None, laps=1, lap_prompt="", paired_exits=False, team_reward=0, message_rules=2)
+    taste_strength=None, laps=1, lap_prompt="", paired_exits=False, team_reward=0, message_rules=2,
+    assigned_exits=None)
 # How a response after arriving becomes its message, by the version a run
 # records. 1: the text outside its reasoning, sent only if the response
 # finished. 2: also sent when cut off, with any call taken out.
@@ -97,10 +98,33 @@ def arrival_text(config, label, first):
     return " ".join(filter(None, [where, config["arrival_prompt"]]))
 
 
-def lap_text(config, lap, state):
-    """The message that starts lap ``lap``: which lap it is, the run's prompt, and the state at the start."""
+def assigned_text(config, index):
+    """What agent ``index`` is told of its assigned exits, after its team paragraph. It names no reward."""
+    assigned, laps = config["assigned_exits"], config["laps"]
+    count = len(assigned)
+    text = ("In lap 1, the simulator assigns each agent one exit: " if count == 1 else
+            f"In laps 1 to {count}, the simulator assigns each agent one exit per lap: ")
+    text += ("in that lap only the assigned exit ends the lap for that agent, and every other exit is an "
+             "ordinary open cell.")
+    if count < laps:
+        text += f" From lap {count + 1} on, every exit is open to every agent."
+    return text + f" In lap 1, your exit is {assigned[0][index]}."
+
+
+def lap_text(config, lap, state, index=None):
+    """The message that starts lap ``lap``: which lap it is, the run's prompt, and the state at the start.
+
+    On a run with assigned exits, agent ``index`` is also told the exit it is
+    assigned in this lap, or, in the first lap after the assigned ones, that
+    every exit is open to it from now on.
+    """
     header = f"Lap {lap} of {config['laps']} begins. Every agent still in the run is back at the start."
-    return "\n".join(filter(None, [" ".join(filter(None, [header, config["lap_prompt"]])), state]))
+    assigned, note = config.get("assigned_exits") or [], ""
+    if index is not None and lap <= len(assigned):
+        note = f"In this lap, your exit is {assigned[lap - 1][index]}."
+    elif index is not None and assigned and lap == len(assigned) + 1:
+        note = "From this lap on, every exit is open to you."
+    return "\n".join(filter(None, [" ".join(filter(None, [header, config["lap_prompt"], note])), state]))
 
 
 def targeted(config, name, count):

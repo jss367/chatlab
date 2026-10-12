@@ -25,5 +25,6 @@ Each file was written by the ChatLab of its era: a script in `generators/` ran i
 | team-3-rule-2-unrecorded | team-3 | message_rules (4291355, #225) | 2306785 (#203) | cut-off and call-carrying arrival messages under rule 2 |
 | team-3-team-reward, team-3-laps-limits | team-3 | message_rules | 1ebe9d0 (#204) | paired exits, team reward; arriving on the last token, sitting out a lap, round limit between laps |
 | run-1-current, run-3-current-changing-map, team-2-current, team-3-current | run-1, run-3, team-2, team-3 | | cfd9fbd (0.40.0) | reasoning_content history; recorded message_rules 2 |
+| team-3-assigned-exits | team-3 | | 431c09d (claude/maze-first-lap-exits) | assigned exits for two of three laps, an agent walking onto an exit it is not assigned, the first free lap |
 
 No era was synthesized from current code. There is no team-3 file without the history field: #201 added team-3 after #200 added the field.

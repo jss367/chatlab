@@ -338,15 +338,18 @@ def team_values(ep):
             "" if rewards["paired_exits"] else "; ".join(cell_text(cell) for cell in rewards["exits"]),
             rewards["reward_exit"] or "none", rewards["arrival_responses"], rewards["taste"], rewards["taste_strength"],
             rewards["laps"], rewards["taste_prompt"], rewards["arrival_prompt"], rewards["lap_prompt"],
-            rewards["paired_exits"], rewards["team_reward"], gr.update(visible=ep.team))
+            rewards["paired_exits"], rewards["team_reward"],
+            "\n".join(", ".join(lap) for lap in rewards["assigned_exits"] or ()), gr.update(visible=ep.team))
 
 
 def reward_config(exits, reward_exit, arrival_responses, taste, taste_strength, laps, taste_prompt, arrival_prompt,
-                  lap_prompt, paired_exits=False, team_reward=0, drawn_exit=None):
+                  lap_prompt, paired_exits=False, team_reward=0, assigned_exits="", drawn_exit=None):
     """A team's exits and rewards from their controls, or nothing when every one is left as a plain run has it.
 
     ``drawn_exit`` is the exit B drawn with the maze when ``paired_exits`` asks
-    for one, which takes the place of any typed in.
+    for one, which takes the place of any typed in. ``assigned_exits`` is one
+    line for each assigned lap, each naming one exit for every agent, such as
+    "A, B, A, B", or blank for none.
     """
     cells = [parse_cell(part, "exit") for part in (exits or "").split(";") if part.strip()]
     if paired_exits:
@@ -357,9 +360,11 @@ def reward_config(exits, reward_exit, arrival_responses, taste, taste_strength, 
                   arrival_responses=int(arrival_responses or 0), taste=bool(taste),
                   taste_strength=None if taste_strength in (None, "") else float(taste_strength),
                   laps=int(laps or 1), taste_prompt=taste_prompt, arrival_prompt=arrival_prompt, lap_prompt=lap_prompt,
-                  paired_exits=bool(paired_exits), team_reward=int(team_reward or 0))
+                  paired_exits=bool(paired_exits), team_reward=int(team_reward or 0),
+                  assigned_exits=[[part.strip() for part in line.split(",")]
+                                  for line in (assigned_exits or "").splitlines() if line.strip()] or None)
     plain = (not cells and config["reward_exit"] is None and not config["arrival_responses"] and not config["taste"]
-             and config["laps"] == 1 and not config["team_reward"])
+             and config["laps"] == 1 and not config["team_reward"] and config["assigned_exits"] is None)
     return {} if plain else config
 
 
@@ -1204,6 +1209,11 @@ def _build_page(context):
                                                 elem_id="maze-team-reward",
                                                 info="Each arrival at the reward exit also steers this many responses "
                                                      "of every teammate still moving that lap.")
+                    assigned_exits = gr.Textbox(label="Assigned exits", placeholder="A, B, A, B\nB, A, B, A", lines=2,
+                                                elem_id="maze-assigned-exits",
+                                                info="One line for each lap from lap 1, naming one exit for each agent "
+                                                     "in order: the only exit open to it in that lap. Later laps, or "
+                                                     "every lap when blank, open every exit to every agent.")
             with gr.Accordion("Setup prompt", open=False):
                 system_prompt = gr.Textbox(value=SYSTEM, label="System prompt", lines=2, elem_id="maze-system-prompt")
                 instruction = gr.Textbox(value=default_instruction("coordinates"), label="Task instruction", lines=6,
@@ -1376,7 +1386,7 @@ def _build_page(context):
     # Last, so a caller naming none of them prepares a run of one agent.
     team_controls = [agents, communication, team_goal, round_limit, interrupt_agents, steer_agents, required,
                      exit_cells, reward_exit, arrival_responses, taste, taste_strength, laps, taste_prompt,
-                     arrival_prompt, lap_prompt, paired_exits, team_reward]
+                     arrival_prompt, lap_prompt, paired_exits, team_reward, assigned_exits]
     # What changes with the run on screen rather than with each frame of it.
     run_panes = [mail_pane, target]
 
@@ -1390,7 +1400,7 @@ def _build_page(context):
         agent_count, talk, goal, rounds, interrupted, steered, required_cell = team_settings[:7]
         reward_settings = team_settings[7:] or ("", "none", 0, False, None, 1, REWARD_DEFAULTS["taste_prompt"],
                                                 REWARD_DEFAULTS["arrival_prompt"], REWARD_DEFAULTS["lap_prompt"],
-                                                False, 0)
+                                                False, 0, "")
         try:
             agent_count = int(agent_count)
             team = agent_count > 1

@@ -122,13 +122,15 @@ class Maze:
         return path
 
     def state(self, position, error=None, *, goal_mode="coordinates", goal_hint="", waypoint=None, waypoint_reached=False,
-              exits=None):
+              exits=None, assigned=None):
         """What the simulator reports at ``position``.
 
         ``exits`` maps each exit's label to its cell, the destination being
         exit A, for a run with more than one way out. Its state lists them all
         in place of the one destination, and says which one the character
-        stands on once it has arrived.
+        stands on once it has arrived. ``assigned`` names the one exit that
+        is a way out for the character in this lap, which the state carries
+        as ``assigned_exit``; every other exit is an ordinary open cell to it.
         """
         goal_instruction(goal_mode, goal_hint)
         state = {"maze_id": self.tool_id(goal_mode), "row_labels": list(range(self.size)),
@@ -136,6 +138,8 @@ class Maze:
                 "current": list(position)}
         if exits:
             state["exits"] = {label: list(cell) for label, cell in exits.items()}
+            if assigned is not None:
+                state["assigned_exit"] = assigned
         elif goal_mode == "coordinates":
             state["destination"] = list(self.goal)
         elif goal_mode == "hint":
@@ -144,7 +148,7 @@ class Maze:
         # not the destination, so every goal mode shows it.
         if waypoint is not None:
             state.update(waypoint=list(waypoint), waypoint_reached=bool(waypoint_reached))
-        reached = exit_at(self, position, exits)
+        reached = exit_at(self, position, {assigned: exits[assigned]} if exits and assigned is not None else exits)
         state.update(valid_directions=list(self.neighbors(position)) if reached is None else [],
                      arrived=reached is not None, error=error)
         if exits and reached is not None:
@@ -394,7 +398,7 @@ def apply_call(maze, position, args, *, goal_mode="coordinates", exits=None):
 
 
 def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hint="", system=SYSTEM, instruction=None,
-                    waypoint=None, describe=None, exits=None):
+                    waypoint=None, describe=None, exits=None, assigned=None):
     """The setup messages and supplied moves a run begins with, and where they leave the character.
 
     ``describe`` turns each state the simulator reports into the one the
@@ -413,7 +417,8 @@ def initial_history(maze, supplied_moves=3, *, goal_mode="coordinates", goal_hin
     waypoint = None if waypoint is None else tuple(waypoint)
     reached = position == waypoint
     state = json.dumps(describe(maze.state(position, goal_mode=goal_mode, goal_hint=goal_hint, waypoint=waypoint,
-                                           waypoint_reached=reached, exits=exits)), separators=(",", ":"))
+                                           waypoint_reached=reached, exits=exits, assigned=assigned)),
+                       separators=(",", ":"))
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": "\n".join(filter(None, [instruction, state]))}]
     events = []

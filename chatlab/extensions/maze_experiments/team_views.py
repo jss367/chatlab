@@ -324,6 +324,14 @@ def reward_status(ep):
                      f"{effective_norm(vector, config['taste_strength']):.3g}"
                      if vector and vector.get("enabled", True) and config["taste_strength"] else "taste, unsteered")
     lines = ["**Exits and rewards:** " + " · ".join(parts), f"**Laps:** {ep.lap} of {config['laps']}"]
+    if config["assigned_exits"]:
+        # The only exit open to each agent in each assigned lap, so a later choice can be read against them.
+        assigned = [f"lap {lap}: " + ", ".join(f"{html.escape(agent['name'])} {label}"
+                                                for agent, label in zip(ep.agents, labels))
+                    for lap, labels in enumerate(config["assigned_exits"], 1)]
+        if len(assigned) < config["laps"]:
+            assigned.append(f"every exit open to every agent from lap {len(assigned) + 1}")
+        lines.insert(1, "**Assigned exits:** " + " · ".join(assigned))
     by_agent = {index: [] for index in range(len(ep.agents))}
     for event in ep.events:
         if event["arrived"] and event["source"] == "model":

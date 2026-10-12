@@ -84,6 +84,7 @@ FORMATS = {
     "team-3-laps-limits.json": "chatlab-maze-team-3",
     "team-3-team-reward.json": "chatlab-maze-team-3",
     "team-3-current.json": "chatlab-maze-team-3",
+    "team-3-assigned-exits.json": "chatlab-maze-team-3",
 }
 
 
@@ -690,6 +691,28 @@ class SavedMazeRunTests(unittest.TestCase):
             self.assertNotIn("<tool_call", "".join(m["text"] for m in ep.mail))
             self.assertEqual((ep.phase, ep.rounds), ("budget", 10))
         self.both("team-3-current.json", check)
+
+    def test_assigned_exits_read_back_lap_by_lap(self):
+        def check(ep):
+            self.assertEqual(ep.config["assigned_exits"], [["B", "A", "B"], ["A", "B", "A"]])
+            self.assertEqual(ep.lap_rounds, [7, 10])
+            self.assertEqual([(e["round"], e["agent"], e["exit"]) for e in ep.events if e["arrived"]], [
+                (1, 1, "A"), (2, 2, "B"), (5, 0, "B"), (8, 0, "A"), (8, 1, "B"), (8, 2, "A"),
+                (11, 0, "B"), (11, 1, "B"), (11, 2, "A")])
+            # agent-1 stood on A in round 1 of lap 1 without arriving, since B was its exit.
+            self.assertEqual(path_of(ep)[:2], [(0, 1), (0, 0)])
+            # agent-3's call in round 1, the sixth of the run.
+            self.assertEqual(errors(ep)[5], "wrong_maze")
+            self.assertEqual(steered(ep), [(3, 2), (6, 0), (9, 1), (12, 0), (12, 1)])
+            self.assertIn("In lap 1, your exit is B.", ep.agents[0]["messages"][1]["content"])
+            self.assertEqual(statuses(ep), [((0, 4), "arrived", "B"), ((0, 4), "arrived", "B"), ((0, 0), "arrived", "A")])
+            self.assertEqual((ep.phase, ep.rounds), ("arrived", 13))
+        self.both("team-3-assigned-exits.json", check)
+
+    def test_reward_runs_saved_before_assigned_exits_read_as_having_none(self):
+        for name in ("team-3-rule-1.json", "team-3-team-reward.json", "team-3-current.json"):
+            self.assertNotIn("assigned_exits", read_run_file(FIXTURES / name)["config"])
+            self.both(name, lambda ep: self.assertIsNone(ep.config["assigned_exits"]))
 
     def test_re_saving_a_reward_run_records_the_rule_it_was_read_under(self):
         ep = load(FIXTURES / "team-3-rule-1.json")

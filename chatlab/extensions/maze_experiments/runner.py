@@ -29,8 +29,8 @@ from .inserts import CHANNELS, FORMAT as INSERT_FORMAT, MARKS, check_insert, ren
 from .maze import SYSTEM, Maze, TOOLS, apply_call, default_instruction, initial_history, parse_call, unavoidable_cells
 from .team import (DROPPED, EXIT_LABELS, FORMAT as TEAM_FORMAT, LEGACY_FORMAT as LEGACY_TEAM_FORMAT, LIMITED,
                    MAX_AGENTS, MESSAGE_LIMIT, MESSAGE_RULES, REWARD_DEFAULTS, REWARD_FORMAT, agent_names, arrival_text,
-                   check_config as check_team_config, exit_cells, lap_text, rewarded, targeted, team_paragraph,
-                   team_tools)
+                   assigned_text, check_config as check_team_config, exit_cells, lap_text, rewarded, targeted,
+                   team_paragraph, team_tools)
 from chatlab.extension_api import normalize_steering, write_private_text
 
 # One line for each response and each episode outcome, so a run read in
@@ -203,6 +203,13 @@ def check_rewards(config, maze):
     teammate still in the maze in that lap. ``paired_exits`` says exit B was
     drawn at the destination's route length, and holds the run to it.
 
+    ``assigned_exits`` holds one list for each of the first laps, each
+    naming one exit for every agent in agent order. In such a lap the
+    assigned exit is the only way out for its agent, and every other exit is
+    an ordinary open cell to it; in the laps after the last one listed every
+    exit is open to every agent. It lets every agent arrive at an exit the run
+    chose before it first chooses one itself.
+
     Each lap restarts the maze, and an arrival can be at any exit, so what a
     run has to say about one destination, or about a single pass, is
     refused alongside it.
@@ -249,11 +256,23 @@ def check_rewards(config, maze):
             raise ValueError(f"Exit {EXIT_LABELS[every.index(cell)]} can only be reached through another exit.")
     if config["reward_exit"] is not None and config["reward_exit"] not in EXIT_LABELS[:len(every)]:
         raise ValueError("The reward exit is one of the run's exits: " + ", ".join(EXIT_LABELS[:len(every)]) + ".")
+    assigned = config["assigned_exits"]
+    if assigned is not None:
+        if len(every) < 2:
+            raise ValueError("Assigned exits divide the agents between exits. Give the run more than one exit.")
+        if not isinstance(assigned, list) or not assigned or any(
+                not isinstance(lap, list) or len(lap) != config["agents"] for lap in assigned):
+            raise ValueError(f"Assigned exits are one list for each assigned lap, each naming one exit for every one "
+                             f"of the {config['agents']} agents, in agent order.")
+        if any(label not in list(EXIT_LABELS[:len(every)]) for lap in assigned for label in lap):
+            raise ValueError("Each assigned exit is one of the run's exits: " + ", ".join(EXIT_LABELS[:len(every)]) + ".")
     for name, (low, high) in {"arrival_responses": (0, 8), "laps": (1, 32), "team_reward": (0, 8)}.items():
         if type(config[name]) is not int or not low <= config[name] <= high:
             raise ValueError(f"{name} must be an integer between {low} and {high}.")
     if config["reward_exit"] is not None and not config["arrival_responses"]:
         raise ValueError("A reward is given in the responses after arriving. Give each arrival at least one.")
+    if assigned is not None and len(assigned) > config["laps"]:
+        raise ValueError(f"Assigned exits list {len(assigned)} laps, and the run has {config['laps']}.")
     if config["team_reward"] and config["reward_exit"] is None:
         raise ValueError("A reward for the team is given when an agent reaches the reward exit. Name one.")
     for name in ("taste", "paired_exits"):
@@ -519,7 +538,6 @@ class Episode:
             self.config["required_checkpoint"] = checkpoint
         if team and rewarded(self.config):
             check_rewards(self.config, self.maze)
-        exits = self.exits
         # A team starts with none unless it asks, as every team did before it could.
         supplied = int(self.config.get("supplied_moves", 0 if team else 3))
         names = agent_names(self.config.get("agents", 1))
@@ -527,12 +545,16 @@ class Episode:
         for index, name in enumerate(names):
             instruction = self.config["instruction"]
             if team:
-                instruction = "\n".join(filter(None, [instruction, team_paragraph(
-                    name, names, self.config["team_goal"], self.config["communication"], bool(exits))]))
+                paragraph = team_paragraph(name, names, self.config["team_goal"], self.config["communication"],
+                                           bool(self.exits))
+                if self.rewarded and self.config["assigned_exits"]:
+                    paragraph += " " + assigned_text(self.config, index)
+                instruction = "\n".join(filter(None, [instruction, paragraph]))
             messages, events, position = initial_history(
                 self.maze, supplied, goal_mode=self.config["goal_mode"], goal_hint=self.config["goal_hint"],
                 system=self.config["system_prompt"], instruction=instruction, waypoint=self.config.get("waypoint"),
-                describe=(lambda state, name=name: self.framed(name, state)) if team else None, exits=exits)
+                describe=(lambda state, name=name: self.framed(name, state)) if team else None,
+                exits=self.exits, assigned=self.assigned_exit(index))
             if team:
                 for event in events:
                     event["agent"] = index
@@ -574,6 +596,21 @@ class Episode:
     def lap(self):
         """The lap the run is on, counted from 1."""
         return 1 + len(self.lap_rounds)
+
+    def assigned_exit(self, index):
+        """The exit assigned to agent ``index`` in the lap the run is on, or None in a lap that assigns none."""
+        assigned = self.config.get("assigned_exits") if self.rewarded else None
+        return assigned[self.lap - 1][index] if assigned and self.lap <= len(assigned) else None
+
+    def agent_exits(self, index):
+        """The exits that are a way out for agent ``index`` in the lap the run is on, as ``exits`` gives them.
+
+        In an assigned lap that is the agent's assigned exit alone, and every
+        other exit is an ordinary open cell to it. Otherwise every exit is
+        open to every agent.
+        """
+        label = self.assigned_exit(index)
+        return self.exits if label is None else {label: self.exits[label]}
 
     def responders(self):
         """The agents the next round asks, in order: every one still moving, and every one that owes a response.
@@ -667,7 +704,8 @@ class Episode:
         agent = self.agents[index]
         state = self.current_maze.state(agent["position"], error, goal_mode=self.config["goal_mode"],
                                         goal_hint=self.config["goal_hint"], waypoint=self.config.get("waypoint"),
-                                        waypoint_reached=self.waypoint_turn_of(index) is not None, exits=self.exits)
+                                        waypoint_reached=self.waypoint_turn_of(index) is not None,
+                                        exits=self.exits, assigned=self.assigned_exit(index))
         return self.framed(agent["name"], state, inbox) if self.team else state
 
     def framed(self, name, state, inbox=()):
@@ -1860,17 +1898,19 @@ def resolve_rewarded_round(episode, actions):
     """Apply a round of a run with exits and rewards: its moves, its messages, its arrivals and the lap they end.
 
     Moves land as in any team round, each judged from where its agent stood
-    when the round began, and every exit is a way out. A response given in
-    place of a move, the taste before the maze or one after arriving, joins
-    its agent's history as written, cut off or not, and one after arriving is
-    sent to every teammate as a message when the team can talk.
+    when the round began, and every exit open to its agent in that lap is a
+    way out: its assigned exit alone in an assigned lap, and otherwise every
+    exit. A response given in place of a move, the taste before the maze or
+    one after arriving, joins its agent's history as written, cut off or not,
+    and one after arriving is sent to every teammate as a message when the
+    team can talk.
 
     A message waits for each teammate until its next reply from the
     simulator, after its next move or at the start of the next lap, so a
     teammate busy writing after its own arrival reads it later rather than
     never. One still waiting when the run ends stays in that teammate's inbox.
     """
-    round_index, config, exits = episode.rounds, episode.config, episode.exits
+    round_index, config = episode.rounds, episode.config
     for turn in episode.round_turns(round_index):
         if turn.get("outcome") in DROPPED:
             episode.agents[turn["agent"]]["status"] = DROPPED[turn["outcome"]]
@@ -1889,7 +1929,7 @@ def resolve_rewarded_round(episode, actions):
                      "error": action["error"], "arrived": False, "progress": False}
         else:
             event = apply_call(episode.current_maze, agent["position"], action["args"],
-                               goal_mode=config["goal_mode"], exits=exits)
+                               goal_mode=config["goal_mode"], exits=episode.agent_exits(action["agent"]))
             message = action["args"].get("message", "").strip()
             if message:
                 event["message"] = message
@@ -1986,6 +2026,8 @@ def start_lap(episode):
     new lap, so it stops there with the limit it reached instead, keeping the
     exit its last lap ended at.
     """
+    # First, so the state and message each agent is sent at the start name
+    # the exit it is assigned in the new lap, if any.
     episode.lap_rounds.append(episode.rounds)
     spent = episode.agent_tokens()
     for index, agent in enumerate(episode.agents):
@@ -2001,7 +2043,7 @@ def start_lap(episode):
         agent.update(position=tuple(episode.maze.start), status="active", exit=None)
         inbox, agent["inbox"] = agent["inbox"], []
         state = json.dumps(episode.agent_state(index, None, inbox), separators=(",", ":"))
-        agent["messages"].append({"role": "user", "content": lap_text(episode.config, episode.lap, state)})
+        agent["messages"].append({"role": "user", "content": lap_text(episode.config, episode.lap, state, index)})
 
 
 def settle_rewarded(episode, actions, sent):
