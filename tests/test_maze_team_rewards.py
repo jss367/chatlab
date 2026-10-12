@@ -525,6 +525,125 @@ class PairedExitTests(unittest.TestCase):
         self.assertEqual(parting_cell(LONG, (0, 0), (0, 6)), ((0, 2), 0))
 
 
+# Three laps on the hall, the first two assigned: agent-1 is given B and then
+# A, agent-2 A and then B, and lap 3 is free.
+ASSIGNED = dict(REWARD, taste=False, laps=3, assigned_exits=[["B", "A"], ["A", "B"]])
+# In lap 1 agent-1 walks onto A, which is not its exit, and on to B; agent-2
+# reaches A. In lap 2 each reaches its assigned exit, and in lap 3 each
+# reaches the other one.
+ASSIGNED_SCRIPT = [move("west"), move("west"),
+                   move("west"), move("west"),
+                   move("east"), say("A was mine."),
+                   move("east"), move("east"), move("east"), say("B at last."),
+                   move("west"), move("east"), move("west"), move("east"), say("A again."), say("B again."),
+                   move("east"), move("west"), move("east"), move("west"), say("B."), say("A.")]
+
+
+def lap_starts(ep, agent):
+    """The messages that start each lap after the first, for one agent."""
+    return [m["content"] for m in ep.agents[agent]["messages"]
+            if m["role"] == "user" and m["content"].startswith("Lap ")]
+
+
+def tool_states(ep, agent):
+    return [json.loads(m["content"]) for m in ep.agents[agent]["messages"] if m["role"] == "tool"]
+
+
+class AssignedExitTests(unittest.TestCase):
+    def test_an_agent_on_an_exit_it_is_not_assigned_does_not_arrive(self):
+        ep, _ = run(ASSIGNED_SCRIPT, **ASSIGNED)
+        self.assertEqual(ep.phase, "arrived", ep.detail)
+        self.assertEqual(ep.lap_rounds, [7, 10])
+        first = [e for e in ep.events if e["round"] < 2]
+        # Progress is toward the agent's own exit: west is away from B and toward A.
+        self.assertEqual([(e["agent"], e["after"], e["arrived"], e["progress"]) for e in first],
+                         [(0, [0, 1], False, False), (1, [0, 1], False, True),
+                          (0, [0, 0], False, False), (1, [0, 0], True, True)])
+        self.assertNotIn("exit", first[2])
+        # Standing on A, agent-1 is told every exit, that B is its own, and that it may walk on.
+        state = tool_states(ep, 0)[1]
+        self.assertEqual((state["exits"], state["assigned_exit"]), ({"A": [0, 0], "B": [0, 4]}, "B"))
+        self.assertEqual((state["arrived"], state["valid_directions"]), (False, ["east"]))
+        self.assertNotIn("exit", state)
+        self.assertEqual([(e["agent"], e["exit"]) for e in ep.events if e["arrived"]],
+                         [(1, "A"), (0, "B"), (0, "A"), (1, "B"), (0, "B"), (1, "A")])
+        # The reward is unchanged: only the responses after arriving at B are steered.
+        self.assertEqual([(t["round"], t["agent"]) for t in ep.turns if t["steered"]], [(6, 0), (9, 1), (12, 0)])
+        self.assertIn("**Assigned exits:** lap 1: agent-1 B, agent-2 A · lap 2: agent-1 A, agent-2 B · every exit "
+                      "open to every agent from lap 3", reward_status(ep))
+
+    def test_states_carry_every_exit_and_the_assigned_one_until_the_free_laps(self):
+        ep, _ = run(ASSIGNED_SCRIPT, **ASSIGNED)
+        for agent, (lap_1, lap_2) in enumerate((("B", "A"), ("A", "B"))):
+            opening = ep.agents[agent]["messages"][1]["content"]
+            self.assertIn(f'"exits":{{"A":[0,0],"B":[0,4]}},"assigned_exit":"{lap_1}"', opening)
+            states = [json.loads(text.split("\n", 1)[1]) for text in lap_starts(ep, agent)]
+            self.assertEqual([s["exits"] for s in states], [{"A": [0, 0], "B": [0, 4]}] * 2)
+            self.assertEqual(states[0]["assigned_exit"], lap_2)
+            self.assertNotIn("assigned_exit", states[1])
+
+    def test_each_agent_is_told_its_exit_in_lap_1_each_assigned_lap_and_the_first_free_one(self):
+        ep, _ = run(ASSIGNED_SCRIPT, **ASSIGNED)
+        rules = ("In laps 1 to 2, the simulator assigns each agent one exit per lap: in that lap only the assigned "
+                 "exit ends the lap for that agent, and every other exit is an ordinary open cell. From lap 3 on, "
+                 "every exit is open to every agent.")
+        for agent, (lap_1, lap_2) in enumerate((("B", "A"), ("A", "B"))):
+            opening = ep.agents[agent]["messages"][1]["content"]
+            self.assertIn(f"{rules} In lap 1, your exit is {lap_1}.\n", opening)
+            self.assertNotIn("reward", opening.lower())
+            self.assertEqual([text.split("\n", 1)[0] for text in lap_starts(ep, agent)], [
+                f"Lap 2 of 3 begins. Every agent still in the run is back at the start. In this lap, your exit is {lap_2}.",
+                "Lap 3 of 3 begins. Every agent still in the run is back at the start. From this lap on, every exit "
+                "is open to you."])
+        # The lap prompt keeps its place after the header.
+        ep, _ = run(ASSIGNED_SCRIPT, **ASSIGNED, lap_prompt="Go.")
+        self.assertTrue(lap_starts(ep, 0)[0].startswith("Lap 2 of 3 begins. Every agent still in the run is back at "
+                                                        "the start. Go. In this lap, your exit is A.\n"))
+        # Every lap assigned: one lap is "lap 1", and no lap is free.
+        one = team_episode(HALL, ASSIGNED | dict(laps=1, assigned_exits=[["B", "A"]]))
+        self.assertIn("In lap 1, the simulator assigns each agent one exit: in that lap only the assigned exit ends "
+                      "the lap for that agent, and every other exit is an ordinary open cell. In lap 1, your exit is "
+                      "A.\n", one.agents[1]["messages"][1]["content"])
+        both = team_episode(HALL, ASSIGNED | dict(laps=2))
+        self.assertIn("In laps 1 to 2, the simulator assigns each agent one exit per lap: in that lap only the "
+                      "assigned exit ends the lap for that agent, and every other exit is an ordinary open cell. In "
+                      "lap 1, your exit is B.\n", both.agents[0]["messages"][1]["content"])
+
+    def test_a_run_replays_and_a_file_whose_arrivals_break_its_assignment_is_refused(self):
+        ep, _ = run(ASSIGNED_SCRIPT, **ASSIGNED)
+        payload = saved(ep)
+        self.assertEqual(payload["config"]["assigned_exits"], [["B", "A"], ["A", "B"]])
+        self.assertEqual(saved(from_payload(payload)), payload)
+        # Assigned A in lap 1, agent-1 would have arrived on reaching it, so its
+        # walk on to B is not one the run could have made.
+        forged = copy.deepcopy(payload)
+        forged["config"]["assigned_exits"][0] = ["A", "A"]
+        with self.assertRaisesRegex(ValueError, "kind of response"):
+            from_payload(forged)
+        # A run with no assignment, in which agent-1 reaches A in lap 1, said to have assigned it B.
+        free, _ = run(ASSIGNED_SCRIPT[:2] + [move("west"), move("west"), say("A."), say("A too.")],
+                      **dict(ASSIGNED, laps=1, assigned_exits=None))
+        self.assertEqual(free.phase, "arrived", free.detail)
+        forged = saved(free)
+        forged["config"]["assigned_exits"] = [["B", "A"]]
+        with self.assertRaisesRegex(ValueError, "kind of response"):
+            from_payload(forged)
+
+    def test_assignments_no_run_could_use_are_refused(self):
+        cases = {
+            "more than one exit": dict(exits=[], reward_exit="A", assigned_exits=[["A", "A"]]),
+            "one list for each assigned lap": dict(assigned_exits=["B", "A"]),
+            "for every one of the 2 agents": dict(assigned_exits=[["B", "A", "A"]]),
+            "each naming one exit": dict(assigned_exits=[]),
+            "one of the run's exits: A, B": dict(assigned_exits=[["B", "C"]]),
+            "list 4 laps, and the run has 3": dict(assigned_exits=[["A", "B"]] * 4),
+        }
+        for message, changes in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(ValueError, message):
+                team_episode(HALL, ASSIGNED | changes)
+        self.assertIsNone(team_episode(HALL, REWARD).config["assigned_exits"])
+
+
 class RewardPageTests(unittest.TestCase):
     def test_paired_exits_cannot_silently_drop_a_required_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -618,6 +737,39 @@ class RewardPageTests(unittest.TestCase):
                 self.assertEqual(rebuilt.maze, new.maze)
                 with self.assertRaisesRegex(gr.Error, "Leave Extra exits blank"):
                     prepare.fn(ep, False, "s", None, *scenario(**settings, exits="0, 1"))
+            finally:
+                demo.close()
+
+    def test_assigned_exits_reload_into_the_same_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = SimpleNamespace(tokens=TokenInspector(), models=Manager([]), data_dir=Path(directory),
+                                      navigation=SimpleNamespace(open_models=lambda button, model_id=None: None))
+            with gr.Blocks() as demo:
+                build_page(context)
+            try:
+                callbacks = listeners_by_name(demo)
+                prepare, load = callbacks["prepare_episode"], callbacks["load"]
+                ep = team_episode(HALL, {})
+                settings = dict(agents=4, team_goal="all", distance=4, vector=VECTOR, strength=3., layer=1,
+                                steer="reward", reward_exit="B", arrival_responses=1, paired_exits=True, laps=3,
+                                assigned_exits="A, B, A, B\n B,A,B,A \n")
+                new = prepare.fn(ep, False, "s", None, *scenario(**settings))[0]
+                self.assertEqual(new.config["assigned_exits"], [["A", "B", "A", "B"], ["B", "A", "B", "A"]])
+                loaded = load.fn(str(new.export()), ep, False, "s", None)
+                filled = {block._id: value.get("value") if isinstance(value, dict) and value.get("__type__") == "update"
+                          else value for block, value in zip(load.outputs, loaded)}
+                box = next(block for block in prepare.inputs if getattr(block, "elem_id", None) == "maze-assigned-exits")
+                self.assertEqual(filled[box._id], "A, B, A, B\nB, A, B, A")
+                rebuilt = prepare.fn(ep, False, "s", None, *[filled[block._id] for block in prepare.inputs[4:]])[0]
+                self.assertEqual(rebuilt.config, new.config)
+                self.assertEqual(rebuilt.maze, new.maze)
+                # Blank is none, and a run left otherwise plain stays a plain team run.
+                blank = prepare.fn(ep, False, "s", None, *scenario(**dict(settings, assigned_exits="")))[0]
+                self.assertIsNone(blank.config["assigned_exits"])
+                plain = prepare.fn(ep, False, "s", None, *scenario(agents=2, team_goal="all", distance=4))[0]
+                self.assertFalse(plain.rewarded)
+                with self.assertRaisesRegex(gr.Error, "one of the run's exits"):
+                    prepare.fn(ep, False, "s", None, *scenario(**dict(settings, assigned_exits="A, B, A, C")))
             finally:
                 demo.close()
 
