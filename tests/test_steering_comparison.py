@@ -57,6 +57,30 @@ class StatisticsTests(unittest.TestCase):
         self.assertAlmostEqual(row['random_t'], 3)
         self.assertEqual(row['random50'], 1)
 
+    def test_random_direct_baseline_retains_candidates_for_zero_floor_browsing(self):
+        aggregate = analysis.Aggregate()
+        aggregate.add([[80, 100]], [[90, 120]], [[100, 100]], [[10, 80]])
+        aggregate.add([[80, 100]], [[90, 120]], [[100, 100]], [[20, 80]])
+        rows = aggregate.rows(0)
+        self.assertEqual([row['id'] for row in rows], [0])
+        row = rows[0]
+        self.assertAlmostEqual(row['factor'], 90 / 80)
+        self.assertAlmostEqual(row['random_t'], np.log(.1 * .2) / np.log(2))
+        self.assertEqual((row['top50'], row['base50'], row['random50']), (0, 0, 0))
+        self.assertEqual(list(aggregate.traces()), ['0'])
+        self.assertAlmostEqual(aggregate.traces()['0'][0], 90 / 80)
+        row['token'] = 'random baseline only'
+        self.assertEqual(analysis.select(rows, floor=0), rows)
+
+    def test_random_direct_baseline_requires_matching_positive_finite_rank_arrays(self):
+        for baseline in ([[1, 2]], [1], [[0]], [[-1]], [[np.nan]], [[np.inf]]):
+            with self.subTest(baseline=baseline):
+                aggregate = analysis.Aggregate()
+                with self.assertRaisesRegex(ValueError, 'Rank arrays'):
+                    aggregate.add([[80]], [[90]], [[100]], baseline)
+                self.assertEqual(aggregate.n, 0)
+                self.assertIsNone(aggregate.total)
+
     def test_candidates_and_rejected_inputs(self):
         aggregate = analysis.Aggregate()
         aggregate.add([[80, 5]], [[90, 60]], [[70, 100]])

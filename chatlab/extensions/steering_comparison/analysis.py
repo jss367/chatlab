@@ -12,15 +12,18 @@ class Aggregate:
 
     def add(self, steered, comparison, random, random_comparison=None):
         arrays = [np.asarray(a) for a in (steered, comparison, random)]
+        if random_comparison is not None:
+            arrays.append(np.asarray(random_comparison))
         if any(a.shape != arrays[0].shape or a.ndim != 2 or not np.isfinite(a).all()
                or (a < 1).any() for a in arrays):
             raise ValueError("Rank arrays must have equal block × vocabulary shapes and positive finite ranks.")
-        s, b, r = arrays
+        s, b, r = arrays[:3]
+        random_baseline = b if random_comparison is None else arrays[3]
         delta = np.log(b) - np.log(s)
-        control = np.log(b if random_comparison is None else random_comparison) - np.log(r)
+        control = np.log(random_baseline) - np.log(r)
         values = np.stack([delta, delta ** 2, control, control ** 2,
                            s <= 50, b <= 50, s <= 10, b <= 10, r <= 50]).astype(float)
-        mask = np.minimum(np.minimum(s, b), r) <= 50
+        mask = np.minimum.reduce(arrays) <= 50
         if self.total is None:
             self.total = values
             self.candidates = mask
