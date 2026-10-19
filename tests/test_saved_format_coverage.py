@@ -88,6 +88,9 @@ COVERAGE = {
     "chatlab-steering-1": (
         "saved/steering/02-extracted-be75ba8.json",
         "test_saved_formats_steering.ExtractedTests.test_round_trip"),
+    "chatlab-steering-comparison-1": (
+        "saved/steering_comparison/paired-ranks.json",
+        "test_saved_formats_steering_comparison.SavedComparisonTests.test_resaved_by_todays_page_it_reads_the_same"),
     "chatlab-steering-reference-1": (
         "saved/library/03-steering-392ad4d/conversations.json",
         "test_saved_formats_library.SteeringEraTests.test_resave"),
