@@ -1025,7 +1025,7 @@ class InspectionMixin:
     @_guards_device_memory
     def lens_log_probs(
         self, token_ids: Sequence[int], targets, blocks: Sequence[int], positions: Sequence[int], *,
-        load_id: str | None = None, cancelled=None, held=False,
+        load_id: str | None = None, cancelled=None, held=False, _ranks=False,
     ) -> np.ndarray:
         """The imported Jacobian lens's log probability of each target, at chosen blocks and positions.
 
@@ -1056,7 +1056,7 @@ class InspectionMixin:
         positions = [int(value) for value in positions]
         groups = [[int(target)] if isinstance(target, (int, np.integer)) else [int(value) for value in target]
                   for target in targets]
-        if not ids or not blocks or not positions or not groups or not all(groups):
+        if not ids or not blocks or not positions or (not _ranks and (not groups or not all(groups))):
             raise ValueError("Give tokens, blocks, positions and at least one target to read.")
         if not all(0 <= position < len(ids) for position in positions):
             raise ValueError(f"Read positions between 0 and {len(ids) - 1}.")
@@ -1090,7 +1090,10 @@ class InspectionMixin:
                 raise ValueError(f"That is {len(fed):,} tokens, above the {limit:,} one reading may be. Shorten it.")
             last = len(layout.blocks) - 1
             index = torch.tensor(positions, dtype=torch.long)
-            answer = np.empty((len(blocks), len(positions), len(groups)), dtype=np.float64)
+            if _ranks and len(blocks) * len(positions) * vocabulary > 8_000_000:
+                raise ValueError("Read at most 8 million vocabulary ranks at once; choose fewer blocks or positions.")
+            answer = np.empty((len(blocks), len(positions), vocabulary if _ranks else len(groups)),
+                              dtype=np.int32 if _ranks else np.float64)
             rows_by_block = {block: [row for row, value in enumerate(blocks) if value == block]
                              for block in set(blocks)}
             seen = set()
@@ -1117,6 +1120,15 @@ class InspectionMixin:
                             scores = jacobian_lens.unembed(engine, layout, selected @ matrix)
                             if not torch.isfinite(scores).all():
                                 raise ValueError("The Jacobian readout produced non-finite scores.")
+                            if _ranks:
+                                # Competition ranks: ties share a rank, exactly 1 + count(scores > score).
+                                ordered = scores.sort(dim=-1).values
+                                ranks = (vocabulary + 1 - torch.searchsorted(
+                                    ordered, scores.contiguous(), right=True)).numpy()
+                                for row in rows_by_block[layer]:
+                                    answer[row, start:stop] = ranks
+                                del selected, scores, ordered, ranks
+                                continue
                             normalizer = torch.logsumexp(scores.double(), dim=-1)
                             for column, group in enumerate(groups):
                                 values = (scores[:, group].double().mean(dim=-1) - normalizer).numpy()

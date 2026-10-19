@@ -351,6 +351,10 @@ reproduction of that paper's attention-head or sequential interventions.
 Tests use a deterministic causal network and tiny, randomly initialized
 Transformers models for all three supported architectures, without downloads.
 
+### Aggregate steering comparison
+
+Enable the **Steering comparison** extension to compare Jacobian vocabulary ranks across fixed decision prefixes and steering vectors. It shows paired rank improvements, geometric rank changes, top-50/top-10 frequency, matched-norm random controls, and total versus computed changes, with token filters and offline result files. See [the steering comparison guide](STEERING_COMPARISON.md).
+
 ### Jacobian concept inspection
 
 In **Chat → Layers and attention**, select **Jacobian** and import a fitted

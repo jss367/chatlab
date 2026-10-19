@@ -138,3 +138,9 @@ The desktop packaging specification includes the bundled extension modules even 
 ## Checks
 
 The automated suite covers default-disabled startup without importing Maze, preference persistence and restart behavior, independent page registration, import/API/builder failure handling, model ownership, cancellation, stream cleanup and snapshot isolation. The Maze controller tests exercise the shared model service as well as movement, interruption accounting and replay validation.
+
+## Steering comparison
+
+**Steering comparison** adds a Steering page for aggregate Jacobian vocabulary-rank comparisons across example prefixes and vectors, with random controls, top-50/top-10 shares, filters, and saved offline results. See [the steering comparison guide](STEERING_COMPARISON.md).
+
+The model session exposes `lens_ranks(ids, blocks, positions)`, returning exact competition ranks for the complete vocabulary with shape `(blocks, positions, vocabulary)`. It uses the same cancellation, chunked scoring, model checks and final-layer replay as `lens_log_probs`, and accepts at most eight million rank elements per request.
