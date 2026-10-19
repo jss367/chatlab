@@ -2,6 +2,7 @@
 
 Fixture written through 072f85c's publication path; never regenerate it.
 """
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -62,6 +63,23 @@ class SavedComparisonTests(unittest.TestCase):
         self.assertEqual(opened[2]['choices'], ['Return to task', 'End of turn'])
         self.assertEqual(opened[-1], 'Comparison ready.')
         self.assert_facts(experiment.read_result(opened[-2]))
+
+    def test_saved_examples_use_the_normalized_values_in_the_view(self):
+        original = json.loads(FIXTURE.read_text())
+        for field in ('recovered', 'point'):
+            with self.subTest(field=field):
+                result = json.loads(json.dumps(original))
+                for example in result['examples']:
+                    if field == 'recovered' and example[field] is not None:
+                        example[field] = str(example[field])
+                    elif field == 'point':
+                        example[field] = f"  {example[field]}  "
+                self.path.write_text(json.dumps(result))
+                loaded = experiment.read_result(self.path)
+                self.assertEqual(loaded['examples'], original['examples'])
+                self.assert_facts(loaded)
+                self.path.write_text(json.dumps(loaded))
+                self.assert_facts(experiment.read_result(self.path))
 
 
 if __name__ == '__main__':

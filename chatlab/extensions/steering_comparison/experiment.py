@@ -129,6 +129,7 @@ def read_result(path):
     if not isinstance(value.get("model_id"), str) or not value["model_id"].strip():
         raise ValueError("A result needs a model ID.")
     samples = examples([[e["point"], e["text"], e["recovered"]] for e in value["examples"]])
+    value["examples"] = samples
     points = {sample["point"] for sample in samples}
     for vector in value["vectors"]:
         if not isinstance(vector.get("name"), str) or not vector.get("points"):
