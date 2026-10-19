@@ -328,6 +328,18 @@ class GenerationSession:
                                             load_id=self.load_id, cancelled=self._cancelled.is_set,
                                             held=self._held)
 
+    def lens_ranks(self, ids, blocks, positions):
+        """Exact full-vocabulary ranks, shaped (blocks, positions, vocabulary).
+
+        Rank is 1 plus the number of strictly higher scores. Uses the same
+        bounded scoring, cancellation and final-output check as lens_log_probs.
+        At most eight million rank elements may be requested in one pass.
+        """
+        self._check()
+        return self._manager.lens_log_probs(list(ids), [], list(blocks), list(positions),
+                                            load_id=self.load_id, cancelled=self._cancelled.is_set,
+                                            held=self._held, _ranks=True)
+
     @contextlib.contextmanager
     def block_hooks(self, edits):
         """Rewrite decoder block outputs while the body runs; inside :meth:`transformers_model` only.
