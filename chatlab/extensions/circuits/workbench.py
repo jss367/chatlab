@@ -379,6 +379,84 @@ class Workbench:
                 effects["token_text"] = {str(t): session.decode([t]) for t in [*pivot, *alternatives]}
                 return effects
 
+    # Native components and feature validation -------------------------------
+
+    def inspect_components(self, prompt, component, target_texts, scales, offset, prefix_texts,
+                           donor_prompt, donor_offset, hub, hub_offset, progress, cancelled, graph=None, nearby=False):
+        """Native components or graph features, tested under a pinned model session."""
+        from functools import partial
+        from . import validation
+        from .feature_validation import FeatureModel
+        from .native import NativeModel
+
+        scales = validation.factors(scales)
+        if not 1 <= len(target_texts) <= 16:
+            raise ValueError("List 1–16 output tokens, one per line.")
+        if any(not isinstance(t, str) or len(t) > 4096 for t in target_texts):
+            raise ValueError("Output tokens must be text of at most 4096 characters each.")
+        if len(prefix_texts) > 255 or any(not isinstance(t, str) or len(t) > 32768 for t in prefix_texts):
+            raise ValueError("Use at most 255 additional replies, each at most 32768 characters.")
+        extra_passes = 9 if nearby and graph is None and component[0] == "neuron" else 0
+        passes = (1 + len(prefix_texts)) * (1 + len(scales) + (donor_prompt is not None) + (hub is not None)) + (donor_prompt is not None)
+        if passes + extra_passes > validation.MAX_PASSES:
+            raise ValueError("Reduce prefixes or factors to stay under 1024 model passes, including neighbor discovery.")
+        attribution._check_cancelled(cancelled)
+        with self.models.open_session() as session:
+            if graph is not None:
+                self._same_model(graph, session)
+            targets = self.single_tokens(session, target_texts, "Output tokens", cancelled)
+            if len(set(targets)) != len(targets):
+                raise ValueError("Choose distinct output tokens.")
+            ids = graph["ids"] if graph is not None else self.encoded_prompt(session, prompt)
+            prefixes = [ids]
+            for text in prefix_texts:
+                attribution._check_cancelled(cancelled)
+                prefixes.append(self.encoded_prompt(session, {**prompt, "prefix": text}))
+            donor = None if donor_prompt is None else self.encoded_prompt(session, donor_prompt)
+            for prefix_ids in prefixes:
+                validation.position(offset, len(prefix_ids))
+                if hub is not None:
+                    validation.position(hub_offset, len(prefix_ids), "Later component token offset")
+            if donor is not None:
+                validation.position(donor_offset, len(donor), "Source token offset")
+            with self._model(session) as model:
+                if graph is not None:
+                    blocks, held, _ = self._held(model, progress, cancelled,
+                                                revision=graph.get("transcoder_revision"),
+                                                model_revision=session.model_revision)
+                    self._same_transcoders(graph, held)
+                    self._measurement_ids(graph, blocks)
+                    backend = FeatureModel(blocks, held)
+                else:
+                    backend = NativeModel(model)
+                    backend.site(component)
+                    if hub is not None:
+                        backend.site(hub)
+                result = validation.experiment(partial(backend.forward, cancelled=cancelled), prefixes,
+                                               component, targets, scales, offset=offset, donor=donor,
+                                               donor_offset=donor_offset, hub=hub, hub_offset=hub_offset,
+                                               progress=progress, cancelled=cancelled)
+                if graph is None:
+                    row = result["prefixes"][0]
+                    if extra_passes:
+                        progress("Finding nearby neurons", 0, 1)
+                        result["neighborhood"] = backend.neighborhood(ids, component, row["position"], cancelled=cancelled)
+                        result["model_passes"] += result["neighborhood"]["model_passes"]
+                    up, down = backend.writes(component, row["conditions"][0]["activation"])
+                    result["writes"] = {"promotes": [session.decode([t]) for t in up],
+                                        "suppresses": [session.decode([t]) for t in down]}
+            # Keep rendering and token decoding outside model computation.
+            for row in result["prefixes"]:
+                row["tokens"] = [session.decode([t]) for t in row["ids"]]
+            result.update(format="chatlab-component-inspection-1", id=uuid4().hex,
+                          model_id=session.model_id, model_revision=session.model_revision,
+                          load_id=session.load_id, created=time.time(), prompt=prompt,
+                          source_prompt=donor_prompt, target_texts=[session.decode([t]) for t in targets])
+            if graph is not None:
+                result.update(graph_id=graph["id"], transcoder_revision=graph.get("transcoder_revision"),
+                              transcoders=graph.get("transcoders"))
+            return result
+
     # Saving -----------------------------------------------------------------
 
     def graphs_dir(self):

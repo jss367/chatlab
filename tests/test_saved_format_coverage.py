@@ -17,6 +17,7 @@ MARKER = re.compile(r"""["'](chatlab-[a-z-]+-\d+)["']""")
 # Formats ChatLab writes for download and never reads back.
 WRITE_ONLY = {
     "chatlab-activation-patching-2",
+    "chatlab-component-inspection-1",
     "chatlab-hangman-batch-1",
     "chatlab-maze-batch-1",
 }

@@ -41,7 +41,7 @@ CATALOGUE = (
                   "Fit a logistic probe at every layer from labelled examples and read any reply with it, token by token.",
                   "Probes", "chatlab.extensions.probes", icon="layers"),
     ExtensionSpec("circuits", "Circuit tracing",
-                  "Trace which transcoder features carried the model to a token, then ablate or boost groups of them.",
+                  "Trace and test feature circuits, or inspect and patch native neurons and attention heads without transcoders.",
                   "Circuits", "chatlab.extensions.circuits", icon="network"),
     ExtensionSpec("direction_edits", "Direction edits",
                   "Inject a vector, erase or clamp a direction at chosen blocks, and see whether later blocks and the lens rebuild it.",

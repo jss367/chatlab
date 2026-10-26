@@ -16,6 +16,8 @@ from chatlab.ui.token_menu import MENU_BRIDGE_CLASS
 
 from . import render, transcoders
 from .browser import build_browser
+from .inspection_page import build_inspection
+from .inspection_render import CSS as INSPECTION_CSS
 from .attribution import Cancelled, Settings
 from .interventions import DEFAULT_BOOST
 from .workbench import Workbench, load_graph, parse_prefixes, parse_tokens
@@ -27,7 +29,7 @@ EXPLAIN = {"The likeliest next tokens": "top", "Chosen tokens": "tokens",
 EXAMPLE = "What language is spoken in the country whose capital is Paris? Answer in one word."
 NO_GRAPH = '<div class="cg-root viz-root cg-empty">Write a prompt and press <b>Trace</b>.</div>'
 
-CSS = render.CSS
+CSS = render.CSS + INSPECTION_CSS
 
 JS = r"""
 () => {
@@ -42,7 +44,7 @@ JS = r"""
   };
   let featureClick = 0;
   document.addEventListener('click', event => {
-    const node = event.target.closest('#circuits-graph .cg-node[data-node]');
+    const node = event.target.closest('#circuits-graph .cg-node[data-node], #circuits-neighborhood .cg-node[data-node]');
     if (node) {
       const svg = node.closest('svg');
       const id = node.dataset.node;
@@ -204,12 +206,11 @@ def build_page(context):
         next_action_sequence = "(window.chatlabCircuitsSequence = (window.chatlabCircuitsSequence || 0) + 1)"
         selection = gr.State([])
         focus = gr.State(None)
-        gr.Markdown("# Circuit tracing\nWhich transcoder features carried the model to a token. Each MLP is "
-                    "replaced by a transcoder, attention and normalization are frozen, and every edge is one "
-                    "feature's direct effect on another. The graph is a claim about the model; the "
-                    "interventions under **Groups** test it on the real one.")
+        gr.Markdown("# Circuit tracing\nInspect components, follow their connections, and test their effect on a token.")
         with gr.Tabs():
             with gr.Tab("Trace"):
+                gr.Markdown("Attribution graphs hold attention and normalization fixed. "
+                            "Interventions test their hypotheses in the real model.", elem_classes=["ci-intro"])
                 with gr.Row():
                     status = gr.Markdown(status_text(bench.status()))
                 with gr.Row():
@@ -294,8 +295,15 @@ def build_page(context):
                                         run = gr.Button("Run interventions", variant="primary")
                                         stop_run = gr.Button("Stop")
                                     run_progress = gr.Markdown("")
+                            with gr.Tab("Neighborhood"):
+                                neighbors_shown = gr.Slider(1, 12, value=6, step=1, label="Contributors on each side")
+                                neighborhood = gr.HTML(render.neighborhood_view(None, None), elem_id="circuits-neighborhood")
+                            with gr.Tab("Validate feature"):
+                                build_inspection(context, bench, graph_state, focus)
             with gr.Tab("Features"):
                 build_browser(context, bench)
+            with gr.Tab("Neurons and heads"):
+                build_inspection(context, bench)
         # What the page's script writes when a node or a group is clicked.
         pick = gr.Textbox(elem_id="circuits-pick", elem_classes=[MENU_BRIDGE_CLASS])
         group_pick_bridge = gr.Textbox(elem_id="circuits-group-pick", elem_classes=[MENU_BRIDGE_CLASS])
@@ -307,6 +315,18 @@ def build_page(context):
             return NO_GRAPH
         return render.graph_view(graph, nodes_shown=int(shown), show_errors=bool(errors), selected=chosen,
                                  labels=graph.get("labels"), groups=graph.get("groups"))
+
+    def show_neighborhood(graph, focused, count, session_id):
+        fresh, stamp = checked_version(graph, session_id)
+        if not fresh:
+            return render.neighborhood_view(None, None)
+        view = render.neighborhood_view(graph, focused, count)
+        with version_lock:
+            return view if version(session_id) == stamp and current_graph(graph, session_id) else gr.skip()
+
+    for control in (graph_state, focus, neighbors_shown):
+        control.change(show_neighborhood, [graph_state, focus, neighbors_shown, owner], neighborhood,
+                       concurrency_id="circuits-read", trigger_mode="always_last", show_progress="hidden")
 
     def decoder(graph):
         texts = (graph.get("effects") or {}).get("token_text", {})
