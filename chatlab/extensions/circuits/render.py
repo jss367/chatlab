@@ -99,6 +99,62 @@ def _edges(graph, ids):
     return drawn
 
 
+def neighborhood_view(graph, focused, limit=6):
+    """A node's strongest direct incoming and outgoing edges, with their signs."""
+    if not graph or focused is None:
+        return '<div class="cg-root cg-empty">Select a node in Graph to inspect its neighborhood.</div>'
+    nodes = {n["id"]: n for n in graph["nodes"]}
+    if focused not in nodes:
+        return '<div class="cg-root cg-empty">The selected node is no longer in this graph.</div>'
+    limit = max(1, min(12, int(limit)))
+    incoming = sorted((e for e in graph["edges"] if e["target"] == focused),
+                      key=lambda e: -abs(e["weight"]))[:limit]
+    outgoing = sorted((e for e in graph["edges"] if e["source"] == focused),
+                      key=lambda e: -abs(e["weight"]))[:limit]
+    height = max(210, max(len(incoming), len(outgoing)) * 76 + 70)
+    center = height / 2
+    labels = graph.get("labels") or {}
+    parts = [f'<div class="ci-root"><section class="ci-panel"><div class="ci-panel-heading">'
+             '<div><h4>Feature neighborhood</h4><p>Strongest direct incoming and outgoing contributions</p></div>'
+             '<span class="ci-badge">Attribution graph</span></div><div class="ci-canvas">'
+             f'<svg width="1040" height="{height}" style="width:100%;height:auto;min-width:780px" '
+             f'viewBox="0 0 1040 {height}" role="img" aria-label="Selected node neighborhood">',
+             '<text x="12" y="22" class="ci-column-label">INCOMING CONTRIBUTORS</text>',
+             '<text x="734" y="22" class="ci-column-label">DOWNSTREAM EFFECTS</text>']
+
+    def box(node, x, y, selected=False):
+        label = html.escape(_short(node_label(node, labels), 32))
+        if node["kind"] == "feature":
+            detail = f'layer {node["layer"]} · feature {node["feature"]} · position {node["position"]}'
+        else:
+            detail = f'{node["kind"]} · position {node["position"]}'
+        parts.append(f'<g class="cg-node ci-feature-node{" sel" if selected else ""}" data-node="{html.escape(node["id"])}" '
+                     'style="cursor:pointer">'
+                     f'<title>{html.escape(_title(node, node_label(node, labels), None, graph["tokens"]))}</title>'
+                     f'<rect x="{x}" y="{y-26}" width="294" height="54" rx="10"/>'
+                     f'<text x="{x+14}" y="{y-5}" class="ci-node-title">{label}</text>'
+                     f'<text x="{x+14}" y="{y+15}" class="ci-node-detail">{html.escape(detail)}</text></g>')
+
+    for edges, incoming_side in ((incoming, True), (outgoing, False)):
+        for i, edge in enumerate(edges):
+            y = 58 + i * 76
+            x1, y1, x2, y2 = (306, y, 373, center) if incoming_side else (667, center, 734, y)
+            direction = "positive" if edge["weight"] > 0 else "negative"
+            parts.append(f'<path class="ci-flow {direction}" d="M{x1} {y1} C{x1+32} {y1} {x2-32} {y2} {x2} {y2}" '
+                         'style="stroke-width:2"/>'
+                         f'<text x="{x1+5}" y="{y1-8}" class="ci-node-detail">{edge["weight"]:+.3g}</text>')
+            box(nodes[edge["source"] if incoming_side else edge["target"]], 12 if incoming_side else 734, y)
+    box(nodes[focused], 373, center, True)
+    parts.append('</svg></div><div class="ci-legend"><span><i class="positive"></i>Excitatory contribution</span>'
+                 '<span><i class="negative"></i>Inhibitory contribution</span></div>'
+                 '<details class="ci-method"><summary>Reading attribution edges</summary><p>'
+                 'Blue edges excite; red edges inhibit. Edge values are direct '
+                 'contributions in the frozen attribution model, not measured ablation effects. '
+                 'Only edges retained by graph pruning are available. Use Validate feature to test the selection.</p>'
+                 '</details></section></div>')
+    return ''.join(parts)
+
+
 def graph_view(graph, *, nodes_shown=40, show_errors=False, selected=(), labels=None, groups=None):
     """The attribution graph: layers bottom to top, prompt positions left to right."""
     labels = labels or {}

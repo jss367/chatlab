@@ -1,12 +1,42 @@
 # Circuit tracing
 
-The **Circuit tracing** extension adds **Circuits** to the sidebar. It builds an attribution graph for the token after a prompt: the transcoder features that carried the model to that token, joined by their direct effects on one another. You can then group features and test the groups by ablating or boosting them in the real model.
+The **Circuit tracing** extension adds **Circuits** to the sidebar. It builds an attribution graph for the token after a prompt: the transcoder features that carried the model to that token, joined by their direct effects on one another. You can then group features and test the groups by ablating or boosting them in the real model. **Neurons and heads** inspects native model components without transcoders; **Validate feature** tests a graph feature with strength sweeps, source-activation patches, and downstream restoration.
 
 The method follows Ameisen et al., [*Circuit Tracing*](https://transformer-circuits.pub/2025/attribution-graphs/methods.html) (2025), with per-layer transcoders, and makes the same choices as [circuit-tracer](https://github.com/safety-research/circuit-tracer) where the paper leaves room. The code lives in `chatlab/extensions/circuits/`.
 
+## Inspecting native neurons and attention heads
+
+Enable **Circuit tracing** under **Extensions**, restart ChatLab, and open **Circuits → Neurons and heads**. This mode needs no transcoder downloads. It supports the Llama, Qwen 2, Qwen 3, OLMo 3, Gemma 2, and Gemma 3 text architectures, with full-precision Transformers weights on one device. MLX and quantized loads are refused.
+
+Choose **MLP neuron** or **Attention head**, then enter its layer and index, both counted from zero. A native neuron is one channel after the MLP's gate and up projections are multiplied, immediately before its down projection. A head is its full output vector immediately before the attention output projection. These indices identify actual model components; they are separate from the learned transcoder features in **Trace** and **Features**.
+
+Write a user message and, optionally, the reply so far. List the output tokens whose next-token probabilities you want to measure, one per line. Leading spaces matter; each line must encode to exactly one token. **Edited token offset from end** selects where the component is changed: 0 is the last prompt token, 1 is the token before it. The baseline activation strip shows each token and its offset when hovered.
+
+**Inspect and test** runs an ordinary baseline forward pass and a separate pass for each **Scale factor**. Zero ablates the component, one is a no-op control, and two doubles its activation at the selected token. Up to eleven distinct factors, including zero and one, are accepted between -10 and 10. Negative factors reverse the activation and can leave the range of naturally occurring activations. Attention and normalization run normally in every intervention.
+
+The results show:
+
+- baseline activations across the prompt: signed scalar activations for neurons, vector norms for heads;
+- the component's effective activation under every intervention;
+- each output token's probability, its multiple of baseline, and its change in log probability;
+- a compact summary of the measured ablation effect;
+- a vocabulary projection heuristic for the neuron's output direction per unit activation, or the head's baseline output at the selected position. This omits downstream layers and normalization, so it is not a measured causal effect.
+
+For MLP neurons, **Find nearby neurons at the edited token** also draws a local neighborhood for the first destination prefix. It ranks candidates in the immediately preceding layer by activation times the local gradient into the selected activation, then ablates the top six individually and reports their measured effect on that activation. It shows neurons in the immediately following layer whose activations change most when the selection is ablated. This search covers those adjacent layers at the selected token; it does not enumerate every neuron, earlier token, or attention path. At a boundary layer, only the available side is shown. These extra partial forwards count toward the run's pass limit. Head inspection uses the output and restoration tests without this neuron search.
+
+**Additional destination replies** tests the same component on further prefixes with the same system and user message. Separate replies with lines holding only `---`. Each prefix gets its own results instead of being averaged with the others. The offset is applied from each prefix's end; choose prefixes with comparable token positions when testing a common mechanism.
+
+### Patching and testing a proposed pathway
+
+Under **Patch from a contrasting prompt**, enable copying the source activation and provide the source user message, reply so far, and token offset. The source uses the destination's system prompt and template setting. ChatLab records a source baseline, then copies only the selected neuron's scalar activation or head's output vector into the destination at its edited token. The source and destination may have different lengths; their explicit offsets define the alignment. This is an activation replacement, not an added steering direction or a replacement of the entire residual stream.
+
+Under **Test a proposed pathway**, choose a component in a later layer. ChatLab first measures the upstream ablation, then runs it again while restoring the later component to its original destination baseline activation. Its table shows whether upstream ablation changed the later activation and whether restoring it rescues the output probability. All other computation runs normally. A rescue supports investigating that pathway, but does not by itself establish a unique circuit or prove that a human-assigned interpretation is correct. Head interventions inspect or change head outputs; they do not explain how a head chooses its attention pattern.
+
+Each prompt is limited to 512 tokens. A run accepts up to 256 destination prefixes and 1,024 model passes, checked before intervention forwards begin. **Stop** interrupts between decoder blocks or passes and removes the temporary hooks. Inspection results are offered as JSON and saved under the extension's data directory in `inspections/`. They record exact source and destination token IDs, model revision/load, component indices, offsets, factors, activations, and per-prefix measurements.
+
 ## Models
 
-A graph needs a transcoder for every layer of the model, trained on that model. Circuits works with the models whose transcoders circuit-tracer publishes on the Hub:
+A graph needs a transcoder for every layer of the model, trained on that model. Graph tracing works with the models whose transcoders circuit-tracer publishes on the Hub:
 
 | Model | Transcoders | Weights |
 | --- | --- | --- |
@@ -54,6 +84,12 @@ Layers run from the bottom up and prompt positions from left to right. The graph
 **Features shown** sets how many of the most influential features are drawn. Click a feature to read it on the right: its activation, total effect on the output, graph influence, activation frequency, the tokens its decoder promotes and suppresses, and its top-activating examples from the transcoder training data. A feature is labelled with the two tokens it promotes most until you give it a name of your own with **Rename**.
 
 **Ablate this feature** sets the feature to zero at its own position in the real model, with nothing frozen, and reports how each output node's log-probability moves. For a contrast node, it reports the change in log-odds.
+
+### Focused neighborhoods and feature validation
+
+Select a node and open **Neighborhood** to see its strongest incoming contributors and downstream effects around a central box. Click a neighboring node to follow the circuit. The number on each edge is its signed direct contribution in the frozen attribution model. Only edges retained by graph pruning are available; these values are distinct from measured ablation effects.
+
+For a selected feature, **Validate feature** provides the same strength sweeps, contrasting-prompt activation patches, per-prefix results, and later-component restoration described above. It starts at the feature's traced token offset; selecting a later feature to restore also fills in its traced offset. You can change either offset explicitly. These interventions subtract or replace the feature's decoded contribution while preserving the transcoder reconstruction error, and later features read the changed model state. They use the graph's model and immutable transcoder revision, with the same compatibility checks as group interventions. Validation downloads identify the originating graph and transcoder revision.
 
 ## Groups and interventions
 

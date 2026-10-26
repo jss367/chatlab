@@ -1980,7 +1980,10 @@ class WorkbenchTests(unittest.TestCase):
                 cancellations = [set(dependency["cancels"]) for dependency in demo.config["dependencies"]
                                  if dependency.get("cancels")]
                 self.assertEqual(len(jobs), 4)
-                self.assertEqual(cancellations, [jobs, jobs])
+                inspection_jobs = {fn._id for fn in demo.fns.values() if fn.name == "run_inspection"}
+                self.assertEqual(len(inspection_jobs), 2)
+                self.assertEqual(cancellations[-2:], [jobs, jobs])
+                self.assertEqual({job for group in cancellations[:-2] for job in group}, inspection_jobs)
                 handlers = handlers_by_name(demo)
                 request = handlers["begin_trace"]("view")
                 handlers["stop_now"]("view")
