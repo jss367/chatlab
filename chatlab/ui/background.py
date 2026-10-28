@@ -70,7 +70,11 @@ class ConversationJob:
         self.lock = threading.RLock()
         self.cancel = threading.Event()
         self.worker = None
+        # ``running`` holds from the first frame through the final save;
+        # ``streaming`` only while the reply itself is being produced, which
+        # is what another session's Stop and controls go by.
         self.running = False
+        self.streaming = False
         self.started = 0.0
         self.owner = None
         self.saved = None
@@ -157,6 +161,7 @@ class ConversationJob:
             self.pending = {}
             self.cancel = threading.Event()
             self.running = True
+            self.streaming = True
             self.started = time.monotonic()
             self.rendered = None
             self.fork_created = False
@@ -199,6 +204,7 @@ class ConversationJob:
 
     def _finish(self, error=None):
         with self.lock:
+            self.streaming = False
             frame = {}
             turns = self.frame.get("turns")
             if isinstance(turns, list):
@@ -226,18 +232,19 @@ class ConversationJob:
 
         The model is one slot shared by every browser session; a page
         reloaded mid-reply, or a second window, finds the reply it is told to
-        stop in the session that started it. A job stays running while it
-        flushes its final save after the model is released, and the next
-        reply can start during that flush, so the latest start is the one
-        streaming. The flags are read without that job's lock: this is
-        called under this job's own lock, and the other session takes its
-        lock the same way, so taking both would deadlock.
+        stop in the session that started it. A job stays ``running`` while
+        it flushes its final save after the model is released, and the next
+        reply can start during that flush, so only a job still ``streaming``
+        counts, the latest started if ever more than one. The flags are read
+        without that job's lock: this is called under this job's own lock,
+        and the other session takes its lock the same way, so taking both
+        would deadlock.
         """
 
         with _JOBS_LOCK:
             jobs = list(_JOBS)
-        running = [job for job in jobs if job is not self and job.running]
-        return max(running, key=lambda job: job.started, default=None)
+        streaming = [job for job in jobs if job is not self and job.streaming]
+        return max(streaming, key=lambda job: job.started, default=None)
 
     def stop(self):
         """Cancel the streaming reply, this session's or another's; the owner stopped, or ``None``."""

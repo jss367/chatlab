@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -855,19 +856,46 @@ class BackgroundSnapshotTests(unittest.TestCase):
         self.assertNotIn(MAIN_BRANCH, job.unread)
 
     def test_stop_from_another_session_reaches_the_reply_streaming_not_the_one_flushing(self):
-        # A finished reply stays running while its final save flushes, and
-        # the next reply can start meanwhile; Stop must reach the new one.
-        flushing, streaming, bystander = ConversationJob(), ConversationJob(), ConversationJob()
-        for job, started in ((flushing, 1.0), (streaming, 2.0)):
-            job.owner = "Main" if job is flushing else "Chat 1"
-            job.running = True
-            job.started = started
-        self.assertIs(bystander.other_running(), streaming)
-        self.assertEqual(bystander.stop(), "Chat 1")
-        self.assertTrue(streaming.cancel.is_set())
-        self.assertFalse(flushing.cancel.is_set())
-        stop = bystander.controls(new_forks())[1]
-        self.assertEqual(stop, gr.update(visible=True, interactive=False, value="Stopping…"))
+        # Session A's reply has finished and is flushing its final save, so
+        # its job is still running; session B's reply is streaming meanwhile.
+        # Polling and Stop from a third session C must find B, and leave A's
+        # save to complete as it would have.
+        a, b, c = ConversationJob(), ConversationJob(), ConversationJob()
+        a.owner, a.saved, a.running, a.streaming = MAIN_BRANCH, new_forks(), True, True
+        entered, release = threading.Event(), threading.Event()
+
+        def flush(receipt):
+            entered.set()
+            return release.wait(5)
+
+        with mock.patch.object(library_writer, "submit"), mock.patch.object(library_writer, "flush", flush):
+            a._publish({"turns": [make_turn("assistant", "finished")]})
+            worker = threading.Thread(target=a._finish)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(a.running)
+                self.assertFalse(a.streaming)
+                b.owner, b.running, b.streaming = "Chat 1", True, True
+                b.started = time.monotonic()
+
+                self.assertIs(c.other_running(), b)
+                send, stop = c.controls(new_forks())
+                self.assertFalse(send["interactive"])
+                self.assertEqual(stop, gr.update(visible=True, interactive=True, value=STOP_LABEL))
+                self.assertEqual(c.stop(), "Chat 1")
+                self.assertTrue(b.cancel.is_set())
+                self.assertFalse(a.cancel.is_set())
+                self.assertTrue(a.running)
+                self.assertIn(MAIN_BRANCH, a.unread)
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(a.running)
+        self.assertIn(MAIN_BRANCH, a.unread)
+        b.running = b.streaming = False
+        self.assertIsNone(c.other_running())
+        self.assertIsNone(c.stop())
 
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):
         class ImmutableMetric(dict):
