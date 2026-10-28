@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -17,7 +18,7 @@ import settings_sandbox
 from chatlab.ui import conversations
 from chatlab.conversation import ARCHIVED_VIEW, FAMILY_VIEW, MAIN_BRANCH, make_turn, new_forks, put_branch
 from chatlab.ui import runtime
-from chatlab.ui.background import ConversationJob
+from chatlab.ui.background import STOP_LABEL, ConversationJob
 from fakes import THINK_EOS, THINK_PIECES
 from conversation_support import SETTINGS
 from fakes import loaded_manager
@@ -149,14 +150,17 @@ class BackgroundConversationTests(unittest.TestCase):
         put_branch(forks, "Chat 1", [make_turn("user", "Another conversation")])
         self.state[self.forks._id] = forks
 
-    def call(self, name, overrides=None, event_data=None):
+    def call(self, name, overrides=None, event_data=None, session=None):
+        """Fire a listener in this session, or in ``session``: a (state, view) pair."""
+
+        state, view = session or (self.state, self.view)
         fn = listener_named(self.demo, name)
         inputs = []
         for component in fn.inputs:
             inputs.append(
                 None
                 if isinstance(component, gr.State)
-                else self.view.get(component._id, component.value)
+                else view.get(component._id, component.value)
             )
         for i, value in (overrides or {}).items():
             inputs[i] = value
@@ -164,7 +168,7 @@ class BackgroundConversationTests(unittest.TestCase):
             self.demo.process_api(
                 fn,
                 inputs,
-                state=self.state,
+                state=state,
                 event_data=event_data,
             )
         )
@@ -173,10 +177,23 @@ class BackgroundConversationTests(unittest.TestCase):
                 continue
             if isinstance(value, dict) and value.get("__type__") == "update":
                 if "value" in value:
-                    self.view[component._id] = value["value"]
+                    view[component._id] = value["value"]
             else:
-                self.view[component._id] = value
+                view[component._id] = value
         return result
+
+    def published(self, name, result, listener):
+        """What ``listener`` returned for the output called ``name``, update or value."""
+
+        fn = listener_named(self.demo, listener)
+        return result["data"][fn.outputs.index(self.demo.conversation_outputs[name])]
+
+    def other_session(self):
+        """A second browser session over the same library, as a page reload opens."""
+
+        state = SessionState(self.demo)
+        state[self.forks._id] = copy.deepcopy(self.state[self.forks._id])
+        return state, {}
 
     def start(self):
         self.call("chat", {0: "hi", **dict(enumerate(SETTINGS, 2))})
@@ -236,6 +253,127 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(self.state[self.turns._id], before)
         self.assertFalse(self.manager.busy)
         self.assertTrue(library.read()["branches"][MAIN_BRANCH][-1].get("content"))
+
+    def test_another_session_sees_the_reply_and_can_stop_it(self):
+        # The page reloaded mid-reply, or a second window: its Send is
+        # refused with "Press Stop first", so Stop must be there to press.
+        self.start()
+        session = self.other_session()
+        other = session[0][self.job_state._id]
+        self.assertIsNot(other, self.job)
+        self.assertFalse(other.running)
+
+        result = self.call("poll", session=session)
+        self.assertFalse(self.published("send", result, "poll")["interactive"])
+        self.assertEqual(self.published("stop", result, "poll"),
+                         gr.update(visible=True, interactive=True, value=STOP_LABEL))
+        self.assertIn("another window", self.published("status", result, "poll"))
+
+        result = self.call("chat", {0: "hi again", **dict(enumerate(SETTINGS, 2))}, session=session)
+        self.assertIn("Stop", self.published("status", result, "chat"))
+        self.assertFalse(other.running)
+
+        result = self.call("stop_generation", session=session)
+        self.assertEqual(self.published("status", result, "stop_generation"), "Stopping Main…")
+        self.assertTrue(self.job.cancel.is_set())
+        result = self.call("poll", session=session)
+        self.assertEqual(self.published("stop", result, "poll"),
+                         gr.update(visible=True, interactive=False, value="Stopping…"))
+
+        self.finish()
+        self.call("poll")
+        self.assertFalse(self.job.running)
+        result = self.call("poll", session=session)
+        self.assertEqual(self.published("stop", result, "poll")["visible"], False)
+        self.assertTrue(self.published("send", result, "poll")["interactive"])
+        self.assertEqual(self.published("status", result, "poll"), "Main finished in another window.")
+
+        result = self.call("stop_generation", session=session)
+        self.assertEqual(self.published("status", result, "stop_generation"), "No response is running.")
+
+    def test_stop_during_a_final_flush_reaches_the_reply_streaming_in_another_session(self):
+        # Session A's reply has finished and is flushing its final save while
+        # session B streams the next one, through the real job lifecycle.
+        # Stop pressed in A, and in an idle session C, must reach B; a Send
+        # refused in C must not be mistaken for the reply streaming; and A's
+        # save must complete as it would have.
+        self.start()
+        a_entered, a_release = threading.Event(), threading.Event()
+        real_flush = library_writer.flush
+        held = []
+
+        def holding_flush(receipt):
+            if not held:
+                held.append(receipt)
+                a_entered.set()
+                if not a_release.wait(5):
+                    raise RuntimeError("Test did not release the flush")
+                flushed.append(real_flush(receipt))
+                return flushed[-1]
+            return real_flush(receipt)
+
+        flushed = []
+
+        b_entered, b_release = threading.Event(), threading.Event()
+
+        def slow_again(*args, **kwargs):
+            b_entered.set()
+            if not b_release.wait(5):
+                raise RuntimeError("Test did not release generation")
+            yield from self.generate(*args, **kwargs)
+
+        with mock.patch.object(library_writer, "flush", holding_flush):
+            self.release.set()
+            self.assertTrue(a_entered.wait(5))
+            a = self.job
+            self.assertTrue(a.running)
+            self.assertFalse(a.streaming)
+            self.assertFalse(self.manager.busy)
+
+            self.manager.generate = slow_again
+            session_b, session_c = self.other_session(), self.other_session()
+            b, c = session_b[0][self.job_state._id], session_c[0][self.job_state._id]
+            # The picker's choices reach a session with its first repaint.
+            self.call("poll", session=session_b)
+            self.call("switch_fork", {0: "Chat 1"}, session=session_b)
+            self.call("chat", {0: "hi", **dict(enumerate(SETTINGS, 2))}, session=session_b)
+            self.assertTrue(b_entered.wait(5))
+            self.assertTrue(b.streaming)
+            self.assertEqual(b.owner, "Chat 1")
+            try:
+                result = self.call("poll", session=session_c)
+                self.assertFalse(self.published("send", result, "poll")["interactive"])
+                self.assertEqual(self.published("stop", result, "poll"),
+                                 gr.update(visible=True, interactive=True, value=STOP_LABEL))
+                self.assertIn("Chat 1 is generating in another window", self.published("status", result, "poll"))
+
+                result = self.call("chat", {0: "me too", **dict(enumerate(SETTINGS, 2))}, session=session_c)
+                self.assertIn("Stop", self.published("status", result, "chat"))
+                self.assertFalse(c.streaming)
+                self.assertIs(c.other_running(), b)
+                self.assertIs(a.other_running(), b)
+
+                result = self.call("stop_generation")
+                self.assertEqual(self.published("status", result, "stop_generation"), "Stopping Chat 1…")
+                self.assertTrue(b.cancel.is_set())
+                self.assertFalse(a.cancel.is_set())
+                self.assertTrue(a.running)
+                result = self.call("poll", session=session_c)
+                self.assertEqual(self.published("status", result, "poll"), "Chat 1 is stopping in another window.")
+            finally:
+                b_release.set()
+                a_release.set()
+                b.worker.join(5)
+                self.finish()
+        self.assertFalse(a.running)
+        self.assertFalse(b.running)
+        # A's final save went through once released, with the whole reply.
+        self.assertEqual(flushed, [True])
+        self.assertEqual(a.saved["branches"][MAIN_BRANCH][-1]["content"], "Hello world")
+        self.assertTrue(library.read()["branches"]["Chat 1"][-1].get("content"))
+        result = self.call("poll", session=session_c)
+        self.assertEqual(self.published("status", result, "poll"), "Chat 1 finished in another window.")
+        self.assertTrue(self.published("send", result, "poll")["interactive"])
 
     def test_second_send_is_refused_without_losing_draft_or_starting_a_run(self):
         self.start()
@@ -800,6 +938,72 @@ class BackgroundSnapshotTests(unittest.TestCase):
                 release.set()
                 worker.join(5)
         self.assertNotIn(MAIN_BRANCH, job.unread)
+
+    def test_stop_from_another_session_reaches_the_reply_streaming_not_the_one_flushing(self):
+        # Session A's reply has finished and is flushing its final save, so
+        # its job is still running; session B's reply is streaming meanwhile.
+        # Polling and Stop from a third session C must find B, and leave A's
+        # save to complete as it would have.
+        a, b, c = ConversationJob(), ConversationJob(), ConversationJob()
+        a.owner, a.saved, a.running, a.streaming = MAIN_BRANCH, new_forks(), True, True
+        entered, release = threading.Event(), threading.Event()
+
+        def flush(receipt):
+            entered.set()
+            return release.wait(5)
+
+        with mock.patch.object(library_writer, "submit"), mock.patch.object(library_writer, "flush", flush):
+            a._publish({"turns": [make_turn("assistant", "finished")]})
+            worker = threading.Thread(target=a._finish)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(a.running)
+                self.assertFalse(a.streaming)
+                b.owner, b.running, b.streaming = "Chat 1", True, True
+                b.started = time.monotonic()
+
+                self.assertIs(c.other_running(), b)
+                send, stop = c.controls(new_forks())
+                self.assertFalse(send["interactive"])
+                self.assertEqual(stop, gr.update(visible=True, interactive=True, value=STOP_LABEL))
+                self.assertEqual(c.stop(), "Chat 1")
+                self.assertTrue(b.cancel.is_set())
+                self.assertFalse(a.cancel.is_set())
+                self.assertTrue(a.running)
+                self.assertIn(MAIN_BRANCH, a.unread)
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(a.running)
+        self.assertIn(MAIN_BRANCH, a.unread)
+        b.running = b.streaming = False
+        self.assertIsNone(c.other_running())
+        self.assertIsNone(c.stop())
+
+    def test_stop_during_this_sessions_own_flush_reaches_the_reply_streaming_elsewhere(self):
+        # This session's reply has finished and is flushing its save while
+        # another session streams; Stop here must reach that reply, and the
+        # controls must show it.
+        mine, other = ConversationJob(), ConversationJob()
+        mine.owner, mine.saved, mine.running, mine.streaming = MAIN_BRANCH, new_forks(), True, False
+        other.owner, other.running, other.streaming = "Chat 1", True, True
+        other.started = time.monotonic()
+
+        self.assertIs(mine.other_running(), other)
+        send, stop = mine.controls(new_forks())
+        self.assertFalse(send["interactive"])
+        self.assertEqual(stop, gr.update(visible=True, interactive=True, value=STOP_LABEL))
+        self.assertEqual(mine.stop(), "Chat 1")
+        self.assertTrue(other.cancel.is_set())
+        self.assertFalse(mine.cancel.is_set())
+
+        # With nothing streaming anywhere, Stop during the flush still
+        # marks this reply as seen, as it always has.
+        other.running = other.streaming = False
+        mine.unread.add(MAIN_BRANCH)
+        self.assertEqual(mine.stop(), MAIN_BRANCH)
+        self.assertNotIn(MAIN_BRANCH, mine.unread)
 
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):
         class ImmutableMetric(dict):

@@ -486,6 +486,29 @@ class AttributionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Edge threshold"):
             attribution.Settings(edge_threshold=0).check()
 
+    def test_a_graph_keeps_no_more_edges_than_the_reader_accepts(self):
+        # A traced graph must open again from Saved graphs, so the writer
+        # stops at the reader's edge limit, keeping the strongest edges.
+        blocks, held, _ = self.frozen("qwen3")
+        settings = attribution.Settings(max_feature_nodes=16, batch_size=8, edge_threshold=1.0)
+        full = attribution.attribute(blocks, held, IDS, self.decode, settings=settings)
+        limit = len(full["edges"]) // 2
+        self.assertGreater(limit, 0)
+        metadata = dict(id="abc123", model_id="test/tiny", transcoders="tiny", labels={}, groups={},
+                        effects=None, prompt={"system": "", "user": "hi", "prefix": "", "raw": False})
+        with mock.patch.object(attribution, "MAX_EDGES", limit):
+            capped = attribution.attribute(blocks, held, IDS, self.decode, settings=settings)
+            self.assertEqual(len(capped["edges"]), limit)
+            kept = {(edge["source"], edge["target"]) for edge in capped["edges"]}
+            self.assertTrue(kept <= {(edge["source"], edge["target"]) for edge in full["edges"]})
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "graph.json"
+                path.write_text(json.dumps(capped | metadata))
+                self.assertEqual(len(workbench.load_graph(path)["edges"]), limit)
+                path.write_text(json.dumps(full | metadata))
+                with self.assertRaisesRegex(ValueError, "not a valid"):
+                    workbench.load_graph(path)
+
 
 class InterventionTests(unittest.TestCase):
     def setUp(self):
