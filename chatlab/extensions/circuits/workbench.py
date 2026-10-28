@@ -571,7 +571,7 @@ def load_graph(path):
         nodes, edges = graph["nodes"], graph["edges"]
         max_nodes = min(20000, 4096 + (layers + 1) * len(tokens) + attribution.MAX_CHOSEN_TARGETS)
         if (not isinstance(nodes, list) or not 1 <= len(nodes) <= max_nodes
-                or not isinstance(edges, list) or len(edges) > min(200000, len(nodes) ** 2)):
+                or not isinstance(edges, list) or len(edges) > min(attribution.MAX_EDGES, len(nodes) ** 2)):
             raise ValueError
         ids = {n["id"] for n in nodes}
         if len(ids) != len(nodes) or not all(isinstance(value, str) and 1 <= len(value) <= 128 for value in ids):

@@ -218,12 +218,31 @@ class ConversationJob:
         with self.lock:
             self.running = False
 
+    def other_running(self):
+        """Another session's job whose reply is streaming, or ``None``.
+
+        The model is one slot shared by every browser session; a page
+        reloaded mid-reply, or a second window, finds the reply it is told to
+        stop in the session that started it. The flags are read without that
+        job's lock: this is called under this job's own lock, and the other
+        session takes its lock the same way, so taking both would deadlock.
+        """
+
+        with _JOBS_LOCK:
+            jobs = list(_JOBS)
+        return next((job for job in jobs if job is not self and job.running), None)
+
     def stop(self):
+        """Cancel the streaming reply, this session's or another's; the owner stopped, or ``None``."""
+
         with self.lock:
             if self.running:
                 self.cancel.set()
                 # Stop can land after _finish marked the run, during its save.
                 self.unread.discard(self.owner)
+                return self.owner
+        other = self.other_running()
+        return other.stop() if other is not None else None
 
     def merge(self, forks, turns):
         """Bring the source transcript up to date without claiming another branch."""
@@ -257,15 +276,16 @@ class ConversationJob:
 
     def controls(self, forks):
         with self.lock:
-            if not self.running:
+            job = self if self.running else self.other_running()
+            if job is None:
                 return gr.update(visible=True, interactive=True), gr.update(
                     visible=False, value=STOP_LABEL
                 )
-            label = "Stopping…" if self.cancel.is_set() else STOP_LABEL
+            stopping = job.cancel.is_set()
             return gr.update(visible=True, interactive=False), gr.update(
                 visible=True,
-                interactive=not self.cancel.is_set(),
-                value=label,
+                interactive=not stopping,
+                value="Stopping…" if stopping else STOP_LABEL,
             )
 
     def choices(self, forks, turns):
@@ -279,7 +299,9 @@ class ConversationJob:
         with self.lock:
             forks, turns = self.merge(forks, turns)
             active = forks["active"]
-            key = (active, self.version, self.running, self.cancel.is_set())
+            other = None if self.running else self.other_running()
+            elsewhere = (other.owner, other.cancel.is_set()) if other is not None else None
+            key = (active, self.version, self.running, self.cancel.is_set(), elsewhere)
             if key == self.rendered:
                 return {}, forks, turns
             switched = self.rendered is None or self.rendered[0] != active
@@ -314,6 +336,17 @@ class ConversationJob:
                 values["status"] = (
                     f"{self.owner}: {self.frame.get('status', 'Finished.')}"
                 )
+            # A reply streaming in another session is said here, and its end,
+            # over whatever this session's last run left: a Send refused
+            # while that reply ran is a run of this session's too.
+            if not self.running and not (self.rendered is not None and self.rendered[2]):
+                if other is not None:
+                    values["status"] = (
+                        f"{other.owner} is generating in another window. "
+                        "Wait for it to finish or press Stop before sending another message."
+                    )
+                elif self.rendered is not None and self.rendered[4] is not None:
+                    values["status"] = f"{self.rendered[4][0]} finished in another window."
             values["send"], values["stop"] = self.controls(forks)
             self.pending = {}
             self.rendered = key
@@ -408,9 +441,9 @@ class ConversationEvents:
             data[self.forks], data[self.turns] = forks, turns
             result = {}
             if stop:
-                job.stop()
+                stopped = job.stop()
                 result[status_output] = (
-                    f"Stopping {job.owner}…" if job.running else "No response is running."
+                    f"Stopping {stopped}…" if stopped else "No response is running."
                 )
             elif job.running and (
                 generation or exclusive
@@ -477,7 +510,7 @@ class ConversationEvents:
                     # this run's cached metrics, without restoring its draft.
                     if navigation or forks["active"] != active_before:
                         with job.lock:
-                            job.rendered = ("", -1, job.running, False)
+                            job.rendered = ("", -1, job.running, False, None)
                     put_branch(forks, forks["active"], turns)
                     if navigation and job.running:
                         result[status_output] = (

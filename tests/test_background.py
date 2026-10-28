@@ -17,7 +17,7 @@ import settings_sandbox
 from chatlab.ui import conversations
 from chatlab.conversation import ARCHIVED_VIEW, FAMILY_VIEW, MAIN_BRANCH, make_turn, new_forks, put_branch
 from chatlab.ui import runtime
-from chatlab.ui.background import ConversationJob
+from chatlab.ui.background import STOP_LABEL, ConversationJob
 from fakes import THINK_EOS, THINK_PIECES
 from conversation_support import SETTINGS
 from fakes import loaded_manager
@@ -149,14 +149,17 @@ class BackgroundConversationTests(unittest.TestCase):
         put_branch(forks, "Chat 1", [make_turn("user", "Another conversation")])
         self.state[self.forks._id] = forks
 
-    def call(self, name, overrides=None, event_data=None):
+    def call(self, name, overrides=None, event_data=None, session=None):
+        """Fire a listener in this session, or in ``session``: a (state, view) pair."""
+
+        state, view = session or (self.state, self.view)
         fn = listener_named(self.demo, name)
         inputs = []
         for component in fn.inputs:
             inputs.append(
                 None
                 if isinstance(component, gr.State)
-                else self.view.get(component._id, component.value)
+                else view.get(component._id, component.value)
             )
         for i, value in (overrides or {}).items():
             inputs[i] = value
@@ -164,7 +167,7 @@ class BackgroundConversationTests(unittest.TestCase):
             self.demo.process_api(
                 fn,
                 inputs,
-                state=self.state,
+                state=state,
                 event_data=event_data,
             )
         )
@@ -173,10 +176,23 @@ class BackgroundConversationTests(unittest.TestCase):
                 continue
             if isinstance(value, dict) and value.get("__type__") == "update":
                 if "value" in value:
-                    self.view[component._id] = value["value"]
+                    view[component._id] = value["value"]
             else:
-                self.view[component._id] = value
+                view[component._id] = value
         return result
+
+    def published(self, name, result, listener):
+        """What ``listener`` returned for the output called ``name``, update or value."""
+
+        fn = listener_named(self.demo, listener)
+        return result["data"][fn.outputs.index(self.demo.conversation_outputs[name])]
+
+    def other_session(self):
+        """A second browser session over the same library, as a page reload opens."""
+
+        state = SessionState(self.demo)
+        state[self.forks._id] = copy.deepcopy(self.state[self.forks._id])
+        return state, {}
 
     def start(self):
         self.call("chat", {0: "hi", **dict(enumerate(SETTINGS, 2))})
@@ -236,6 +252,43 @@ class BackgroundConversationTests(unittest.TestCase):
         self.assertEqual(self.state[self.turns._id], before)
         self.assertFalse(self.manager.busy)
         self.assertTrue(library.read()["branches"][MAIN_BRANCH][-1].get("content"))
+
+    def test_another_session_sees_the_reply_and_can_stop_it(self):
+        # The page reloaded mid-reply, or a second window: its Send is
+        # refused with "Press Stop first", so Stop must be there to press.
+        self.start()
+        session = self.other_session()
+        other = session[0][self.job_state._id]
+        self.assertIsNot(other, self.job)
+        self.assertFalse(other.running)
+
+        result = self.call("poll", session=session)
+        self.assertFalse(self.published("send", result, "poll")["interactive"])
+        self.assertEqual(self.published("stop", result, "poll"),
+                         gr.update(visible=True, interactive=True, value=STOP_LABEL))
+        self.assertIn("another window", self.published("status", result, "poll"))
+
+        result = self.call("chat", {0: "hi again", **dict(enumerate(SETTINGS, 2))}, session=session)
+        self.assertIn("Stop", self.published("status", result, "chat"))
+        self.assertFalse(other.running)
+
+        result = self.call("stop_generation", session=session)
+        self.assertEqual(self.published("status", result, "stop_generation"), "Stopping Main…")
+        self.assertTrue(self.job.cancel.is_set())
+        result = self.call("poll", session=session)
+        self.assertEqual(self.published("stop", result, "poll"),
+                         gr.update(visible=True, interactive=False, value="Stopping…"))
+
+        self.finish()
+        self.call("poll")
+        self.assertFalse(self.job.running)
+        result = self.call("poll", session=session)
+        self.assertEqual(self.published("stop", result, "poll")["visible"], False)
+        self.assertTrue(self.published("send", result, "poll")["interactive"])
+        self.assertEqual(self.published("status", result, "poll"), "Main finished in another window.")
+
+        result = self.call("stop_generation", session=session)
+        self.assertEqual(self.published("status", result, "stop_generation"), "No response is running.")
 
     def test_second_send_is_refused_without_losing_draft_or_starting_a_run(self):
         self.start()

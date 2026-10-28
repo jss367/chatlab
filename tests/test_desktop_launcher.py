@@ -65,6 +65,22 @@ class DesktopPortTests(unittest.TestCase):
             held.bind((LOOPBACK_ADDRESS, port))
             self.assertFalse(port_is_free(port))
 
+    def test_a_port_left_in_time_wait_by_the_last_instance_is_free(self):
+        # The last instance closed its connections on its way out; the port
+        # is still the usual one, as the server's own bind would find it.
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((LOOPBACK_ADDRESS, 0))
+        server.listen()
+        port = server.getsockname()[1]
+        client = socket.create_connection((LOOPBACK_ADDRESS, port))
+        self.addCleanup(client.close)
+        accepted, _ = server.accept()
+        accepted.close()
+        server.close()
+
+        self.assertTrue(port_is_free(port))
+
     def test_a_window_gives_up_the_usual_port_rather_than_refusing_to_open(self):
         # A second instance, or anything else holding the port, is no reason
         # not to open a window; it is only a reason for that window to be a

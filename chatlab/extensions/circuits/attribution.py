@@ -38,6 +38,10 @@ FORMAT = "chatlab-attribution-graph-1"
 MAX_PREFIX = 512
 MAX_TARGETS = 10
 MAX_CHOSEN_TARGETS = 4096
+# The most edges a graph keeps: the strongest ones, after the edge-share cut.
+# The reader refuses a file past this, so the writer stops at it too, and a
+# graph that was traced can always be opened again.
+MAX_EDGES = 200000
 TARGET_MASS = 0.95
 # Budget for CPU edge, pruning, and sorting allocations before the run is refused.
 MAX_ROW_BYTES = 6 * 1024 ** 3
@@ -573,7 +577,7 @@ def _prune(recording, targets, rows, weights, chosen, settings, decode, cancelle
         order = torch.argsort(values, descending=True)
         cumulative = torch.cumsum(values[order], 0)
         cut = int(torch.searchsorted(cumulative, settings.edge_threshold * cumulative[-1]).item()) + 1
-        edge_keep[nonzero[order[:cut]]] = True
+        edge_keep[nonzero[order[:min(cut, MAX_EDGES)]]] = True
     edge_keep = edge_keep.view(total, total)
 
     _check_cancelled(cancelled)

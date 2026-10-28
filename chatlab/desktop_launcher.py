@@ -85,10 +85,19 @@ def find_available_port() -> int:
 
 
 def port_is_free(port: int) -> bool:
-    """Whether the window can be served on ``port`` right now."""
+    """Whether the window can be served on ``port`` right now.
+
+    The probe binds the way the server will: with ``SO_REUSEADDR``, as
+    uvicorn and ssh's ``-L`` listener do. Without it, connections the last
+    instance closed on its way out sit in TIME_WAIT on this port for a
+    minute, and a restart or an update's relaunch would read the port as
+    taken and open on a random one, a new origin that has none of what the
+    browser kept under the usual one. A live listener still reads as taken.
+    """
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind((LOOPBACK_ADDRESS, port))
     except OSError:
         return False
