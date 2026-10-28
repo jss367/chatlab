@@ -291,6 +291,90 @@ class BackgroundConversationTests(unittest.TestCase):
         result = self.call("stop_generation", session=session)
         self.assertEqual(self.published("status", result, "stop_generation"), "No response is running.")
 
+    def test_stop_during_a_final_flush_reaches_the_reply_streaming_in_another_session(self):
+        # Session A's reply has finished and is flushing its final save while
+        # session B streams the next one, through the real job lifecycle.
+        # Stop pressed in A, and in an idle session C, must reach B; a Send
+        # refused in C must not be mistaken for the reply streaming; and A's
+        # save must complete as it would have.
+        self.start()
+        a_entered, a_release = threading.Event(), threading.Event()
+        real_flush = library_writer.flush
+        held = []
+
+        def holding_flush(receipt):
+            if not held:
+                held.append(receipt)
+                a_entered.set()
+                if not a_release.wait(5):
+                    raise RuntimeError("Test did not release the flush")
+                flushed.append(real_flush(receipt))
+                return flushed[-1]
+            return real_flush(receipt)
+
+        flushed = []
+
+        b_entered, b_release = threading.Event(), threading.Event()
+
+        def slow_again(*args, **kwargs):
+            b_entered.set()
+            if not b_release.wait(5):
+                raise RuntimeError("Test did not release generation")
+            yield from self.generate(*args, **kwargs)
+
+        with mock.patch.object(library_writer, "flush", holding_flush):
+            self.release.set()
+            self.assertTrue(a_entered.wait(5))
+            a = self.job
+            self.assertTrue(a.running)
+            self.assertFalse(a.streaming)
+            self.assertFalse(self.manager.busy)
+
+            self.manager.generate = slow_again
+            session_b, session_c = self.other_session(), self.other_session()
+            b, c = session_b[0][self.job_state._id], session_c[0][self.job_state._id]
+            # The picker's choices reach a session with its first repaint.
+            self.call("poll", session=session_b)
+            self.call("switch_fork", {0: "Chat 1"}, session=session_b)
+            self.call("chat", {0: "hi", **dict(enumerate(SETTINGS, 2))}, session=session_b)
+            self.assertTrue(b_entered.wait(5))
+            self.assertTrue(b.streaming)
+            self.assertEqual(b.owner, "Chat 1")
+            try:
+                result = self.call("poll", session=session_c)
+                self.assertFalse(self.published("send", result, "poll")["interactive"])
+                self.assertEqual(self.published("stop", result, "poll"),
+                                 gr.update(visible=True, interactive=True, value=STOP_LABEL))
+                self.assertIn("Chat 1 is generating in another window", self.published("status", result, "poll"))
+
+                result = self.call("chat", {0: "me too", **dict(enumerate(SETTINGS, 2))}, session=session_c)
+                self.assertIn("Stop", self.published("status", result, "chat"))
+                self.assertFalse(c.streaming)
+                self.assertIs(c.other_running(), b)
+                self.assertIs(a.other_running(), b)
+
+                result = self.call("stop_generation")
+                self.assertEqual(self.published("status", result, "stop_generation"), "Stopping Chat 1…")
+                self.assertTrue(b.cancel.is_set())
+                self.assertFalse(a.cancel.is_set())
+                self.assertTrue(a.running)
+                result = self.call("poll", session=session_c)
+                self.assertEqual(self.published("status", result, "poll"), "Chat 1 is stopping in another window.")
+            finally:
+                b_release.set()
+                a_release.set()
+                b.worker.join(5)
+                self.finish()
+        self.assertFalse(a.running)
+        self.assertFalse(b.running)
+        # A's final save went through once released, with the whole reply.
+        self.assertEqual(flushed, [True])
+        self.assertEqual(a.saved["branches"][MAIN_BRANCH][-1]["content"], "Hello world")
+        self.assertTrue(library.read()["branches"]["Chat 1"][-1].get("content"))
+        result = self.call("poll", session=session_c)
+        self.assertEqual(self.published("status", result, "poll"), "Chat 1 finished in another window.")
+        self.assertTrue(self.published("send", result, "poll")["interactive"])
+
     def test_second_send_is_refused_without_losing_draft_or_starting_a_run(self):
         self.start()
         worker = self.job.worker

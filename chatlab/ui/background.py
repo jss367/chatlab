@@ -71,8 +71,9 @@ class ConversationJob:
         self.cancel = threading.Event()
         self.worker = None
         # ``running`` holds from the first frame through the final save;
-        # ``streaming`` only while the reply itself is being produced, which
-        # is what another session's Stop and controls go by.
+        # ``streaming`` only while this job holds the generation slot and
+        # the reply is being produced, which is what Stop and the controls
+        # go by, here and from another session.
         self.running = False
         self.streaming = False
         self.started = 0.0
@@ -161,7 +162,13 @@ class ConversationJob:
             self.pending = {}
             self.cancel = threading.Event()
             self.running = True
-            self.streaming = True
+            # A refusal - the slot was another session's, or a load's - is
+            # worded in the status and touches nothing else (see
+            # generation.busy_state), so an opening frame that publishes
+            # more than the status is one that holds the generation slot.
+            self.streaming = any(
+                name != "status" and not skipped(value) for name, value in first.items()
+            )
             self.started = time.monotonic()
             self.rendered = None
             self.fork_created = False
@@ -360,17 +367,23 @@ class ConversationJob:
                 values["status"] = (
                     f"{self.owner}: {self.frame.get('status', 'Finished.')}"
                 )
-            # A reply streaming in another session is said here, and its end,
-            # over whatever this session's last run left: a Send refused
-            # while that reply ran is a run of this session's too.
-            if not self.streaming and not (self.rendered is not None and self.rendered[2]):
+            # A reply streaming in another session is said when it is first
+            # seen, when it is told to stop, and when it ends, after whatever
+            # this session's own run has to say: a Send refused while that
+            # reply ran is a run of this session's too, and its end can land
+            # in the same poll as the other reply's start.
+            before = self.rendered[4] if self.rendered is not None else None
+            if not self.streaming and elsewhere != before:
                 if other is not None:
-                    values["status"] = (
-                        f"{other.owner} is generating in another window. "
+                    said = (
+                        f"{other.owner} is stopping in another window."
+                        if other.cancel.is_set()
+                        else f"{other.owner} is generating in another window. "
                         "Wait for it to finish or press Stop before sending another message."
                     )
-                elif self.rendered is not None and self.rendered[4] is not None:
-                    values["status"] = f"{self.rendered[4][0]} finished in another window."
+                else:
+                    said = f"{before[0]} finished in another window."
+                values["status"] = f"{values['status']} {said}" if "status" in values else said
             values["send"], values["stop"] = self.controls(forks)
             self.pending = {}
             self.rendered = key
