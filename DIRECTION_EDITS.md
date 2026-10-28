@@ -26,7 +26,7 @@ Every direction is scaled to unit length, so a coordinate along it is in the res
 
 ## Injection
 
-**Injection** is optional. Open a `chatlab-steering-1` vector, the kind Chat's **Steering vector** imports and **Extract a vector** writes, and choose a **Strength** and a token range. The vector is added as strength × vector at the vector's own block over those passage tokens only. Chat's steering adds at every position; this does not. The strength starts at the file's own. A vector for another model is refused.
+**Injection** is optional. Open a `chatlab-steering-1` vector, the kind Chat's **Steering** imports and **Extract a vector** writes, and choose a **Strength** and a token range. The vector is added as strength × vector at the vector's own block over those passage tokens only. Chat's steering adds at every position; this does not. The strength starts at the file's own. A vector for another model is refused.
 
 ## The edit
 

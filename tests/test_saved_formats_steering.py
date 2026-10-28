@@ -6,12 +6,15 @@ and the vector it stores on the conversation is checked number by number.
 """
 
 from pathlib import Path
+import json
 import unittest
 from unittest import mock
 
 from chatlab import steering
+from chatlab import conversation
 from chatlab.conversation import new_forks
 from chatlab.ui.steering import download_extracted, import_vector
+from chatlab.ui.steering import load_with_steering
 
 from saved_formats_support import SAVED, sandbox
 
@@ -98,6 +101,32 @@ class ExtractedTests(SavedVectorCase):
 
     def test_round_trip(self):
         self.assert_round_trip()
+
+
+class NeuronSettingsTests(unittest.TestCase):
+    def test_saved_neuron_conversation_preserves_operations_and_zero_ablation(self):
+        box = sandbox(self)
+        path = box.copy(STEERING / "03-neuron-conversation.json")
+        frame = load_with_steering(str(path), [], "Raw rank", new_forks())
+        current = frame["steering_state"]
+        expected = dict(format="chatlab-neuron-steering-1", model_id="test/tiny",
+                        layer=1, neuron=3, operation="scale", strength=0.0, enabled=True)
+        self.assertEqual(current, expected)
+        self.assertIn("Enabled", frame["steering_status"])
+        turns, prompt = conversation.from_json(path.read_text())
+        self.assertEqual(prompt, "Compare neuron interventions.")
+        self.assertEqual(len(turns), 8)
+        for turn, operation, strength, enabled, active in zip(
+            turns[1::2], ("add", "scale", "set", "set"), (-2.5, 0, 0, 4),
+            (True, True, True, False), (True, True, True, False), strict=True,
+        ):
+            self.assertEqual(turn["steering"], dict(expected, layer=0, operation=operation,
+                                                  strength=strength, enabled=enabled))
+            self.assertEqual(steering.active(turn["steering"]), active)
+        resaved = conversation.to_json(turns, system_prompt=prompt, steering=current)
+        self.assertEqual(conversation.from_json(resaved), (turns, prompt))
+        self.assertEqual(json.loads(resaved)["steering"], expected)
+        self.assertNotIn("steering_vectors", json.loads(resaved))
 
 
 if __name__ == "__main__":

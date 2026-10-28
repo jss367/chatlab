@@ -1,0 +1,91 @@
+{
+  "format": "chatlab-conversation-1",
+  "system_prompt": "Compare neuron interventions.",
+  "turns": [
+    {
+      "role": "user",
+      "content": "Try add at -2.5.",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded neuron settings.",
+      "reasoning": "",
+      "steering": {
+        "format": "chatlab-neuron-steering-1",
+        "model_id": "test/tiny",
+        "layer": 0,
+        "strength": -2.5,
+        "enabled": true,
+        "neuron": 3,
+        "operation": "add"
+      }
+    },
+    {
+      "role": "user",
+      "content": "Try scale at 0.",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded neuron settings.",
+      "reasoning": "",
+      "steering": {
+        "format": "chatlab-neuron-steering-1",
+        "model_id": "test/tiny",
+        "layer": 0,
+        "strength": 0.0,
+        "enabled": true,
+        "neuron": 3,
+        "operation": "scale"
+      }
+    },
+    {
+      "role": "user",
+      "content": "Try set at 0.",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded neuron settings.",
+      "reasoning": "",
+      "steering": {
+        "format": "chatlab-neuron-steering-1",
+        "model_id": "test/tiny",
+        "layer": 0,
+        "strength": 0.0,
+        "enabled": true,
+        "neuron": 3,
+        "operation": "set"
+      }
+    },
+    {
+      "role": "user",
+      "content": "Try set at 4.",
+      "reasoning": ""
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded neuron settings.",
+      "reasoning": "",
+      "steering": {
+        "format": "chatlab-neuron-steering-1",
+        "model_id": "test/tiny",
+        "layer": 0,
+        "strength": 4.0,
+        "enabled": false,
+        "neuron": 3,
+        "operation": "set"
+      }
+    }
+  ],
+  "steering": {
+    "format": "chatlab-neuron-steering-1",
+    "model_id": "test/tiny",
+    "layer": 1,
+    "strength": 0.0,
+    "enabled": true,
+    "neuron": 3,
+    "operation": "scale"
+  }
+}

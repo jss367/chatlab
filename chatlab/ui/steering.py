@@ -15,20 +15,26 @@ import gradio as gr
 
 from chatlab.files import write_private_text
 from chatlab.conversation import MAIN_BRANCH, branch_sampling, copy_forks, put_branch_sampling
-from chatlab.steering import compact, from_controls, normalize, read_vector
+from chatlab.steering import NEURON_FORMAT, active, compact, from_controls, normalize, read_vector
 from chatlab.ui.conversations import load_conversation
 from chatlab.ui.outputs import STEERED_LOAD_OUTPUT_NAMES, STEERING_OUTPUT_NAMES, Frame, skipped
 
 
 STEERING_LOCK = threading.RLock()
 
-EMPTY_STATUS = "Import a JSON vector to steer this conversation. Layers count from 0."
+EMPTY_STATUS = "Import a JSON vector or choose a neuron to steer this conversation. Layers count from 0."
 
 
 def description(value):
     if value is None:
         return EMPTY_STATUS
-    state = "Enabled" if value["enabled"] and value["strength"] else "Off"
+    state = "Enabled" if active(value) else "Off"
+    if value["format"] == NEURON_FORMAT:
+        return (
+            f"{state} · {value['model_id']} · layer {value['layer']} · neuron {value['neuron']} · "
+            f"{value['operation']} {value['strength']:g}. "
+            "Edits the MLP activation before its output projection at every prompt and response token."
+        )
     # Model names are file-supplied text, so keep them out of Markdown markup.
     return (
         f"{state} · {value['model_id']} · layer {value['layer']} · "
@@ -39,10 +45,16 @@ def description(value):
 
 def controls(value):
     value = compact(value)
+    neuron = value is not None and value["format"] == NEURON_FORMAT
+    info = {
+        "add": "Adds this amount to the activation; 0 leaves it unchanged.",
+        "scale": "Multiplies the activation; 0 silences the neuron, 1 leaves it unchanged.",
+        "set": "Sets the activation to this value; 0 silences the neuron.",
+    }[value["operation"]] if neuron else "0 disables the addition; negative values reverse its direction."
     return (
         value,
         gr.update(value=value["enabled"] if value else False, interactive=value is not None),
-        gr.update(value=value["strength"] if value else 1, interactive=value is not None),
+        gr.update(value=value["strength"] if value else 1, interactive=value is not None, info=info),
         gr.update(value=value["layer"] if value else 0, interactive=value is not None),
         description(value),
     )
@@ -119,6 +131,34 @@ def apply_vector(forks, value, *, commit=None):
 
 def remove_vector(forks):
     return store(forks, None), *controls(None)
+
+
+def use_neuron(forks, layer, neuron, operation, strength, load_id):
+    """Validate against the load present at the click before changing the conversation."""
+    from chatlab.ui import runtime
+
+    manager = runtime.MANAGER
+    held = manager.claim_generation()
+    if held:
+        raise gr.Error("Wait for the model to finish loading or generating before choosing a neuron.")
+    try:
+        if not manager.loaded:
+            raise ValueError("Download and load a model first.")
+        if load_id != manager.load_id:
+            raise ValueError("The loaded model changed; choose the neuron again.")
+        for name, index in (("Layer", layer), ("Neuron", neuron)):
+            if isinstance(index, bool) or not isinstance(index, (int, float)) or not index >= 0 or int(index) != index:
+                raise ValueError(f"{name} must be a zero-based, non-negative integer.")
+        value = normalize(dict(format=NEURON_FORMAT, model_id=manager.model_id,
+                               layer=int(layer), neuron=int(neuron), operation=operation,
+                               strength=strength, enabled=True))
+        # Check the target even for an identity operation (add 0 / scale 1).
+        manager.check_steering(dict(value, operation="set"))
+        return store(forks, value), *controls(value)
+    except (ValueError, TypeError, OverflowError) as error:
+        raise gr.Error(str(error)) from error
+    finally:
+        manager.release_generation()
 
 
 def remember_steering(forks, value, enabled, strength, layer):

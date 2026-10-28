@@ -1,7 +1,8 @@
-"""Portable activation vectors and response-scoped decoder output hooks.
+"""Portable activation vectors, neuron settings, and response-scoped hooks.
 
 Layer indices are zero based. The addition is applied at every token position,
 including prompt prefill, to the selected decoder block's residual output.
+Neuron interventions edit one MLP channel before its output projection instead.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from chatlab.files import replace_private_text
 
 FORMAT = "chatlab-steering-1"
 REFERENCE_FORMAT = "chatlab-steering-reference-1"
+NEURON_FORMAT = "chatlab-neuron-steering-1"
 MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_WIDTH = 65536
 
@@ -26,10 +28,10 @@ class SteeringError(ValueError):
 
 
 def normalize(value: dict | None) -> dict | None:
-    """Validate and copy a vector, without importing the model runtime."""
+    """Validate and copy a steering setting without importing the model runtime."""
     if value is None:
         return None
-    if not isinstance(value, dict) or value.get("format", FORMAT) not in (FORMAT, REFERENCE_FORMAT):
+    if not isinstance(value, dict) or value.get("format", FORMAT) not in (FORMAT, REFERENCE_FORMAT, NEURON_FORMAT):
         raise SteeringError(f"Expected a {FORMAT} JSON object.")
     model_id = value.get("model_id")
     if not isinstance(model_id, str) or not model_id.strip():
@@ -57,7 +59,14 @@ def normalize(value: dict | None) -> dict | None:
         "strength": float(strength),
         "enabled": enabled,
     }
-    if result["format"] == REFERENCE_FORMAT:
+    if result["format"] == NEURON_FORMAT:
+        neuron, operation = value.get("neuron"), value.get("operation", "add")
+        if type(neuron) is not int or neuron < 0:
+            raise SteeringError("Neuron must be a zero-based, non-negative integer.")
+        if operation not in ("add", "scale", "set"):
+            raise SteeringError("Neuron operation must be add, scale, or set.")
+        result.update(neuron=neuron, operation=operation)
+    elif result["format"] == REFERENCE_FORMAT:
         vector_id, width = value.get("vector_id"), value.get("width")
         if not isinstance(vector_id, str) or not re.fullmatch(r"[0-9a-f]{64}", vector_id):
             raise SteeringError("Invalid steering vector identifier.")
@@ -89,7 +98,7 @@ def _asset_text(value):
 def compact(value):
     """Store immutable vector data once; return small, serializable provenance."""
     value = normalize(value)
-    if value is None or value["format"] == REFERENCE_FORMAT:
+    if value is None or value["format"] != FORMAT:
         return value
     text = _asset_text(value)
     vector_id = hashlib.sha256(text.encode()).hexdigest()
@@ -129,7 +138,7 @@ def export_assets(values):
     assets = {}
     for value in values:
         reference = compact(value)
-        if reference is not None and reference["vector_id"] not in assets:
+        if reference is not None and reference["format"] == REFERENCE_FORMAT and reference["vector_id"] not in assets:
             assets[reference["vector_id"]] = json.loads(_asset_text(expand(reference)))
     return assets
 
@@ -170,7 +179,7 @@ def cleanup_unused_assets():
         forks = parse(payload)
     values = [turn.get("steering") for turns in forks["branches"].values() for turn in turns]
     values.extend(settings.get("steering") for settings in forks["sampling"].values())
-    referenced = {value["vector_id"] for value in values if value is not None}
+    referenced = {value["vector_id"] for value in values if value is not None and value["format"] == REFERENCE_FORMAT}
     removed = total_bytes = 0
     for path in asset_directory().glob("*.json"):
         if re.fullmatch(r"[0-9a-f]{64}", path.stem) and path.stem not in referenced and path.is_file():
@@ -344,7 +353,13 @@ def from_controls(value, enabled=None, strength=None, layer=None):
 
 
 def active(value: dict | None) -> bool:
-    return bool(value and value.get("enabled", True) and value.get("strength", 1) != 0)
+    if not value or not value.get("enabled", True):
+        return False
+    strength = value.get("strength", 1)
+    if value.get("format") == NEURON_FORMAT:
+        operation = value.get("operation", "add")
+        return operation == "set" or strength != (1 if operation == "scale" else 0)
+    return strength != 0
 
 
 def decoder_layers(model):
@@ -372,6 +387,17 @@ def validate_model(model, model_id: str | None, value: dict):
     layers = decoder_layers(model)
     if value["layer"] >= len(layers):
         raise SteeringError(f"This model has {len(layers)} layers; choose 0–{len(layers) - 1}.")
+    if value["format"] == NEURON_FORMAT:
+        import torch
+
+        if getattr(model, "is_quantized", False) or getattr(model, "is_loaded_in_4bit", False) or getattr(model, "is_loaded_in_8bit", False):
+            raise SteeringError("Neuron steering requires unquantized Transformers weights.")
+        projection = getattr(getattr(layers[value["layer"]], "mlp", None), "down_proj", None)
+        if not isinstance(projection, torch.nn.Linear):
+            raise SteeringError("Neuron steering requires a dense MLP with a linear down_proj at this layer.")
+        if value["neuron"] >= projection.in_features:
+            raise SteeringError(f"This layer has {projection.in_features} neurons; choose 0–{projection.in_features - 1}.")
+        return projection
     config = getattr(model, "config", None)
     if callable(getattr(config, "get_text_config", None)):
         config = config.get_text_config()
@@ -394,6 +420,10 @@ def applied(model, model_id: str | None, value: dict | None):
     import torch
 
     block = validate_model(model, model_id, value)
+    if value["format"] == NEURON_FORMAT:
+        with _neuron_applied(block, value):
+            yield
+        return
     cached = None
 
     def add_vector(_module, _inputs, output):
@@ -413,6 +443,40 @@ def applied(model, model_id: str | None, value: dict | None):
     # Transformers may already have hooks recording hidden states for the
     # inspector. They must see the modified output, including on later clicks.
     handle = block.register_forward_hook(add_vector, prepend=True)
+    try:
+        yield
+    finally:
+        handle.remove()
+
+
+@contextmanager
+def _neuron_applied(projection, value):
+    """Edit one post-gate MLP channel at every prefill and decode position."""
+    import torch
+
+    def change(_module, args, kwargs):
+        hidden = args[0] if args else kwargs.get("input")
+        if not isinstance(hidden, torch.Tensor) or hidden.ndim < 2 or hidden.shape[-1] != projection.in_features:
+            raise SteeringError("The selected neuron does not receive a compatible activation tensor.")
+        original = hidden[..., value["neuron"]]
+        # Calculate in higher precision before casting, including small
+        # products that would otherwise lose their multiplier in float16.
+        source = original if original.dtype == torch.float64 else original.float()
+        strength = value["strength"]
+        if value["operation"] == "add":
+            replacement = source + strength
+        elif value["operation"] == "scale":
+            replacement = source * strength
+        else:
+            replacement = torch.full_like(source, strength)
+        replacement = replacement.to(hidden.dtype)
+        if not torch.isfinite(replacement).all().item():
+            raise SteeringError("Neuron steering overflows this model's activation precision.")
+        changed = hidden.clone()
+        changed[..., value["neuron"]] = replacement
+        return ((changed, *args[1:]), kwargs) if args else (args, dict(kwargs, input=changed))
+
+    handle = projection.register_forward_pre_hook(change, prepend=True, with_kwargs=True)
     try:
         yield
     finally:

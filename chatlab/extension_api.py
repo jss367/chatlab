@@ -706,7 +706,7 @@ class NavigationService:
         ``vector`` is called at the click with the values of ``inputs`` and
         returns a ``chatlab-steering-1`` object, as an imported vector file
         would hold. It replaces the vector on the conversation the reader is
-        in, which the Chat page's **Steering vector** controls then show and
+        in, which the Chat page's **Steering** controls then show and
         adjust. A ``ValueError`` it raises is shown to the reader and nothing
         changes. Whether the loaded model can take the vector is checked
         before the next response, as it is for an imported one.

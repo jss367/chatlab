@@ -86,6 +86,9 @@ COVERAGE = {
     "chatlab-probe-1": (
         "saved/probes/probe-era1-no-revision-below-chance.json",
         "test_saved_formats_probes.SavedProbeTests.test_resaving_with_todays_writer_keeps_the_facts"),
+    "chatlab-neuron-steering-1": (
+        "saved/steering/03-neuron-conversation.json",
+        "test_saved_formats_steering.NeuronSettingsTests.test_saved_neuron_conversation_preserves_operations_and_zero_ablation"),
     "chatlab-steering-1": (
         "saved/steering/02-extracted-be75ba8.json",
         "test_saved_formats_steering.ExtractedTests.test_round_trip"),

@@ -108,6 +108,7 @@ from chatlab.ui.steering import (
     remove_vector,
     reserve_steering,
     use_extracted,
+    use_neuron,
 )
 from chatlab.ui.styles import pane_handle, message_box_settings
 from chatlab.ui.token_edit import close_token_editor, open_token_editor
@@ -247,6 +248,11 @@ class Steering:
     strength: gr.Slider
     layer: gr.Number
     status: gr.Textbox
+    neuron_layer: gr.Number
+    neuron_index: gr.Number
+    neuron_operation: gr.Radio
+    neuron_value: gr.Number
+    neuron_apply: gr.Button
     extract_positive: gr.Textbox
     extract_negative: gr.Textbox
     extract_chat: gr.Checkbox
@@ -842,9 +848,9 @@ def _build_sampling(saved: settings.Settings) -> Sampling:
 def _build_steering(states: SharedState) -> Steering:
     """The steering vector's accordion, extraction included."""
 
-    with gr.Accordion("Steering vector", open=False):
+    with gr.Accordion("Steering", open=False):
         gr.Markdown(
-            "Add a vector to a model layer during this conversation. "
+            "Steer one neuron or add a vector to a model layer during this conversation. "
             "Import JSON with `model_id`, `layer` (starting at 0), "
             "and `vector` (a list of numbers). Use a vector made for "
             "the same model checkpoint."
@@ -853,7 +859,7 @@ def _build_steering(states: SharedState) -> Steering:
             steering_upload = gr.UploadButton(
                 "Import vector", file_types=[".json"], type="filepath"
             )
-            steering_remove = gr.Button("Remove vector")
+            steering_remove = gr.Button("Remove steering")
         steering_enabled = gr.Checkbox(value=False, label="Enable steering", interactive=False)
         steering_strength = gr.Slider(
             -100, 100, value=1, step=0.05, label="Steering strength", interactive=False,
@@ -863,8 +869,25 @@ def _build_steering(states: SharedState) -> Steering:
             value=0, precision=0, minimum=0, label="Target layer (starting at 0)", interactive=False,
         )
         steering_status = gr.Textbox(
-            value=EMPTY_STATUS, label="Vector status", interactive=False,
+            value=EMPTY_STATUS, label="Steering status", interactive=False,
         )
+        with gr.Accordion("Steer a neuron", open=False):
+            gr.Markdown(
+                "Change one MLP neuron's activation after gating, before the output projection, "
+                "at every prompt and response token. Requires an unquantized Transformers model "
+                "with a dense MLP. Layer and neuron numbers start at 0. "
+                "**Use neuron** replaces the conversation's current steering."
+            )
+            with gr.Row():
+                neuron_layer = gr.Number(value=0, precision=0, minimum=0, label="Neuron's layer")
+                neuron_index = gr.Number(value=0, precision=0, minimum=0, label="Neuron number")
+            neuron_operation = gr.Radio(
+                choices=[("Add to activation", "add"), ("Multiply activation", "scale"), ("Set activation", "set")],
+                value="add", label="Neuron operation",
+            )
+            neuron_value = gr.Number(value=1, minimum=-100, maximum=100, label="Neuron value",
+                                     info="Multiply by 0 or set to 0 to silence the neuron.")
+            neuron_apply = gr.Button("Use neuron")
         with gr.Accordion("Extract from examples", open=False):
             gr.Markdown(
                 "Read a direction out of the model instead of importing one. "
@@ -936,6 +959,11 @@ def _build_steering(states: SharedState) -> Steering:
         strength=steering_strength,
         layer=steering_layer,
         status=steering_status,
+        neuron_layer=neuron_layer,
+        neuron_index=neuron_index,
+        neuron_operation=neuron_operation,
+        neuron_value=neuron_value,
+        neuron_apply=neuron_apply,
         extract_positive=extract_positive,
         extract_negative=extract_negative,
         extract_chat=extract_chat,
@@ -1590,9 +1618,13 @@ def wire_sampling(sampling: Sampling, states: SharedState) -> None:
 def wire_steering(steering: Steering, states: SharedState) -> None:
     """Importing, extracting and adjusting the steering vector."""
 
-    def manual(trigger, handler, inputs, outputs, *, reverse=False, **options):
+    def manual(trigger, handler, inputs, outputs, *, reverse=False, capture_load=False, **options):
         ticket = gr.Textbox(visible=False)
         def capture(forks, *values):
+            if capture_load:
+                from chatlab.ui import runtime
+
+                values = (*values, runtime.MANAGER.load_id)
             return reserve_steering(forks, values)
         capture.__name__ = "capture_" + handler.__name__
         def apply(forks, request):
@@ -1606,6 +1638,9 @@ def wire_steering(steering: Steering, states: SharedState) -> None:
     manual(steering.upload.upload, import_vector, [steering.upload],
            [states.forks, *steering.outputs], reverse=True)
     manual(steering.remove.click, remove_vector, [], [states.forks, *steering.outputs])
+    manual(steering.neuron_apply.click, use_neuron,
+           [steering.neuron_layer, steering.neuron_index, steering.neuron_operation, steering.neuron_value],
+           [states.forks, *steering.outputs], capture_load=True)
     steering.extract_button.click(
         extract_vector,
         [steering.extract_positive, steering.extract_negative, steering.extract_chat, steering.extract_pool],
