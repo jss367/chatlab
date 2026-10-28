@@ -854,6 +854,21 @@ class BackgroundSnapshotTests(unittest.TestCase):
                 worker.join(5)
         self.assertNotIn(MAIN_BRANCH, job.unread)
 
+    def test_stop_from_another_session_reaches_the_reply_streaming_not_the_one_flushing(self):
+        # A finished reply stays running while its final save flushes, and
+        # the next reply can start meanwhile; Stop must reach the new one.
+        flushing, streaming, bystander = ConversationJob(), ConversationJob(), ConversationJob()
+        for job, started in ((flushing, 1.0), (streaming, 2.0)):
+            job.owner = "Main" if job is flushing else "Chat 1"
+            job.running = True
+            job.started = started
+        self.assertIs(bystander.other_running(), streaming)
+        self.assertEqual(bystander.stop(), "Chat 1")
+        self.assertTrue(streaming.cancel.is_set())
+        self.assertFalse(flushing.cancel.is_set())
+        stop = bystander.controls(new_forks())[1]
+        self.assertEqual(stop, gr.update(visible=True, interactive=False, value="Stopping…"))
+
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):
         class ImmutableMetric(dict):
             def __deepcopy__(self, memo):

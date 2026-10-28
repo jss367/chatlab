@@ -17,6 +17,7 @@ import copy
 import inspect
 import logging
 import threading
+import time
 import typing
 import weakref
 
@@ -70,6 +71,7 @@ class ConversationJob:
         self.cancel = threading.Event()
         self.worker = None
         self.running = False
+        self.started = 0.0
         self.owner = None
         self.saved = None
         self.frame = {}
@@ -155,6 +157,7 @@ class ConversationJob:
             self.pending = {}
             self.cancel = threading.Event()
             self.running = True
+            self.started = time.monotonic()
             self.rendered = None
             self.fork_created = False
             self.new_branch = None
@@ -223,14 +226,18 @@ class ConversationJob:
 
         The model is one slot shared by every browser session; a page
         reloaded mid-reply, or a second window, finds the reply it is told to
-        stop in the session that started it. The flags are read without that
-        job's lock: this is called under this job's own lock, and the other
-        session takes its lock the same way, so taking both would deadlock.
+        stop in the session that started it. A job stays running while it
+        flushes its final save after the model is released, and the next
+        reply can start during that flush, so the latest start is the one
+        streaming. The flags are read without that job's lock: this is
+        called under this job's own lock, and the other session takes its
+        lock the same way, so taking both would deadlock.
         """
 
         with _JOBS_LOCK:
             jobs = list(_JOBS)
-        return next((job for job in jobs if job is not self and job.running), None)
+        running = [job for job in jobs if job is not self and job.running]
+        return max(running, key=lambda job: job.started, default=None)
 
     def stop(self):
         """Cancel the streaming reply, this session's or another's; the owner stopped, or ``None``."""
