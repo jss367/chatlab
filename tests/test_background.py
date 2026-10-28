@@ -897,6 +897,30 @@ class BackgroundSnapshotTests(unittest.TestCase):
         self.assertIsNone(c.other_running())
         self.assertIsNone(c.stop())
 
+    def test_stop_during_this_sessions_own_flush_reaches_the_reply_streaming_elsewhere(self):
+        # This session's reply has finished and is flushing its save while
+        # another session streams; Stop here must reach that reply, and the
+        # controls must show it.
+        mine, other = ConversationJob(), ConversationJob()
+        mine.owner, mine.saved, mine.running, mine.streaming = MAIN_BRANCH, new_forks(), True, False
+        other.owner, other.running, other.streaming = "Chat 1", True, True
+        other.started = time.monotonic()
+
+        self.assertIs(mine.other_running(), other)
+        send, stop = mine.controls(new_forks())
+        self.assertFalse(send["interactive"])
+        self.assertEqual(stop, gr.update(visible=True, interactive=True, value=STOP_LABEL))
+        self.assertEqual(mine.stop(), "Chat 1")
+        self.assertTrue(other.cancel.is_set())
+        self.assertFalse(mine.cancel.is_set())
+
+        # With nothing streaming anywhere, Stop during the flush still
+        # marks this reply as seen, as it always has.
+        other.running = other.streaming = False
+        mine.unread.add(MAIN_BRANCH)
+        self.assertEqual(mine.stop(), MAIN_BRANCH)
+        self.assertNotIn(MAIN_BRANCH, mine.unread)
+
     def test_large_frames_share_immutable_metrics_and_isolate_mutable_containers(self):
         class ImmutableMetric(dict):
             def __deepcopy__(self, memo):

@@ -250,13 +250,21 @@ class ConversationJob:
         """Cancel the streaming reply, this session's or another's; the owner stopped, or ``None``."""
 
         with self.lock:
-            if self.running:
+            if self.streaming:
                 self.cancel.set()
-                # Stop can land after _finish marked the run, during its save.
                 self.unread.discard(self.owner)
                 return self.owner
         other = self.other_running()
-        return other.stop() if other is not None else None
+        if other is not None:
+            return other.stop()
+        with self.lock:
+            # Stop can land after _finish marked the run, during its save:
+            # nothing streams, but the reader has seen the reply.
+            if self.running:
+                self.cancel.set()
+                self.unread.discard(self.owner)
+                return self.owner
+        return None
 
     def merge(self, forks, turns):
         """Bring the source transcript up to date without claiming another branch."""
@@ -290,7 +298,9 @@ class ConversationJob:
 
     def controls(self, forks):
         with self.lock:
-            job = self if self.running else self.other_running()
+            job = self if self.streaming else self.other_running()
+            if job is None and self.running:
+                job = self
             if job is None:
                 return gr.update(visible=True, interactive=True), gr.update(
                     visible=False, value=STOP_LABEL
@@ -313,7 +323,7 @@ class ConversationJob:
         with self.lock:
             forks, turns = self.merge(forks, turns)
             active = forks["active"]
-            other = None if self.running else self.other_running()
+            other = None if self.streaming else self.other_running()
             elsewhere = (other.owner, other.cancel.is_set()) if other is not None else None
             key = (active, self.version, self.running, self.cancel.is_set(), elsewhere)
             if key == self.rendered:
@@ -353,7 +363,7 @@ class ConversationJob:
             # A reply streaming in another session is said here, and its end,
             # over whatever this session's last run left: a Send refused
             # while that reply ran is a run of this session's too.
-            if not self.running and not (self.rendered is not None and self.rendered[2]):
+            if not self.streaming and not (self.rendered is not None and self.rendered[2]):
                 if other is not None:
                     values["status"] = (
                         f"{other.owner} is generating in another window. "
