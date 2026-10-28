@@ -16,6 +16,7 @@ token.
 
 from __future__ import annotations
 
+from chatlab.steering import NEURON_FORMAT, active as steering_active
 from chatlab.token_metrics import (
     SEQUENTIAL_FILLS,
     UNSCORED_FILL,
@@ -441,11 +442,14 @@ def configuration(run: dict | None) -> dict:
     if not steering:
         steered = "off"
     else:
-        state = "on" if steering.get("enabled") and steering.get("strength") else "off"
+        state = "on" if steering_active(steering) else "off"
+        target = (f"neuron {steering['neuron']}, {steering['operation']}"
+                  if steering.get("format") == NEURON_FORMAT
+                  else f"vector {str(steering.get('vector_id') or '')[:8] or 'inline'}")
         steered = (
             f"{state}, layer {steering.get('layer')}, "
             f"strength {steering.get('strength'):g}, "
-            f"vector {str(steering.get('vector_id') or '')[:8] or 'inline'}"
+            f"{target}"
         )
     reading = {
         "Filled by": "Writing a reply" if run["kind"] == REPLY else "Measuring fixed text",

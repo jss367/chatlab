@@ -415,7 +415,7 @@ def checkpoint_values(ep):
 
 def vector_note(vector):
     if vector is None:
-        return "No steering vector imported. Download one from **Chat → Conversation tools → Steering vector**."
+        return "No steering vector imported. Download one from **Chat → Conversation tools → Steering**."
     return (f"**Vector:** {html.escape(vector['model_id'])} · {len(vector['vector']):,} entries · "
             f"layer {vector['layer']} · strength {vector['strength']:g}")
 

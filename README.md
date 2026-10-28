@@ -35,7 +35,7 @@ drove.
 - A **Skip top choice below** control that refuses the model's first choice at the positions it was unsure of, so a reply diverts where the model was torn and holds together everywhere else
 - Every setting saved to one JSON file you can edit by hand or share between machines
 - Temperature, top-p, top-k, the top-choice skip and response length kept per conversation, so two forks can be compared at different settings
-- Per-conversation activation steering: import a vector, choose its layer and strength, and compare forks with steering enabled or disabled
+- Per-conversation activation steering: target an MLP neuron or import a vector, and compare forks with steering enabled or disabled
 - Steering vectors read out of the model itself: give examples of what you want and of the opposite, and every layer's direction is taken in one pass, with a reading of how cleanly each separates the two sets
 - Optional assistant prefill text that the model must continue from
 - Retry, edit, and undo for any turn, and saving or loading a whole conversation
@@ -706,9 +706,10 @@ text as `assistant_prefill` and the replayed token count as
 
 ### Steering a conversation
 
-Open **Chat → Conversation tools → Steering vector** and choose **Import vector**.
+Open **Chat → Conversation tools → Steering** and choose **Import vector**.
 The JSON file contains a direction previously extracted from the model. ChatLab
-imports one vector per conversation; it does not extract vectors from examples.
+uses one steering intervention per conversation. You can also extract a vector
+from examples or target a neuron directly, as described below.
 This is the file shape (the three-entry vector below is only an illustration):
 
 ```json
@@ -769,6 +770,40 @@ setting, including inactive forks and disabled steering. It uses the same
 `CHATLAB_LIBRARY_PATH` / `XDG_DATA_HOME` location as the app and refuses cleanup
 if the saved library is unreadable or invalid. Cleanup runs only when explicitly
 requested; keeping ChatLab closed protects references still held by live sessions.
+
+### Steering a neuron during generation
+
+Load the model, then open **Chat → Conversation tools → Steering → Steer a neuron**.
+Enter the layer and neuron number, choose an operation and value, and press
+**Use neuron**. For example, layer **34** and neuron **3900** target those
+zero-based indices, provided the loaded model has them. The neuron is one
+coordinate of the MLP activation after gating, just before `mlp.down_proj`.
+
+- **Add to activation** adds the value to that neuron.
+- **Multiply activation** scales it; **0** silences it and **1** leaves it unchanged.
+- **Set activation** replaces it with the value at every position; **0** silences it.
+
+The intervention applies during prompt processing and every generation step.
+After applying it, **Steering strength** adjusts the amount, multiplier, or set
+value (−100 to 100); **Target layer** moves the intervention to another layer.
+The status names the active neuron and operation. **Enable steering** switches
+it off without losing the configuration. **Use neuron** replaces any vector
+already selected, and importing or extracting a vector replaces neuron steering.
+To change the neuron or operation, fill in **Steer a neuron** and press **Use neuron** again.
+
+This requires unquantized Transformers weights and a dense MLP with a linear
+`down_proj`. Dense Qwen3.5 text decoders, including the text decoder inside the
+multimodal model, use this layout. MLX, quantized weights, and layers without
+this layout are refused. This does not add architecture support to the separate
+Circuits inspection tool. Weights are never edited; hooks are removed on
+completion, cancellation, or failure.
+
+Neuron settings follow forks, saved conversations, trace exports, comparisons,
+and token inspection, just as vectors do. They are stored inline as
+`chatlab-neuron-steering-1`, with `model_id`, `layer`, `neuron`, `operation`,
+`strength`, and `enabled`; no extracted vector file is needed. Saved settings
+should be replayed with the same checkpoint. The model ID and index checks
+cannot establish that two checkpoints give a neuron the same meaning.
 
 ### Extracting a vector from examples
 
