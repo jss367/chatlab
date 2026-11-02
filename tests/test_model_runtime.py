@@ -421,6 +421,12 @@ class CacheStatusTests(unittest.TestCase):
         self.assertEqual(format_bytes(3_418_357_760), "3.4 GB")
         self.assertEqual(format_bytes(146_800_640), "147 MB")
         self.assertEqual(format_bytes(15_000_000_000), "15.0 GB")
+        # Rounding never shows 1000 of a unit.
+        self.assertEqual(format_bytes(999_950_000), "1.0 GB")
+        self.assertEqual(format_bytes(999_999), "1.0 MB")
+        self.assertEqual(format_bytes(999_499), "999 KB")
+        self.assertEqual(format_bytes(999), "999 B")
+        self.assertEqual(format_bytes(1000), "1.0 KB")
 
 
 class CachedModelsTests(unittest.TestCase):

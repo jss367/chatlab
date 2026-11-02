@@ -436,8 +436,11 @@ def draw_request(request: ImageRequest, *, expected_load_id: str | None = None):
     except GeneratorExit:
         # Gradio closed this handler - the browser went away, or something
         # cancelled it. The pipeline does not notice a closed generator, so
-        # it is asked to wind down; it releases the slot as it does.
-        runtime.MANAGER.stop_image_run()
+        # it is asked to wind down; it releases the slot as it does. Its own
+        # token, not the manager's: Gradio closes an abandoned handler after
+        # its last frame went out, by which time the run may have ended and
+        # another tab's run may hold the manager's token.
+        cancel.set()
         raise
 
 

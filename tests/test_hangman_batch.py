@@ -255,6 +255,25 @@ class BatchTests(Fixture):
         row = self.run_batch(host, [dict(id="close", seed=1)], guesser=["x", "c", "r", "a", "n", "e"])[2][0]
         self.assertEqual((row["outcome"], row["responses"], row["contradictions"]), ("solved", 7, 0))
 
+    def test_a_completing_guess_after_replies_without_a_board_is_solved(self):
+        # The host answered r and n without a Board: line. The board before
+        # c is the last one shown with those two letters filled in, since
+        # the final board says they were in the word, so c completes it.
+        turns = [
+            dict(guess="a", board=list("__a_e")),
+            dict(guess="r", board=None),
+            dict(guess="n", board=None),
+            dict(guess="z", board=None),
+            finish_turn(dict(guess="c", text="Board: C R A N E\nWrong guesses left: 3")),
+        ]
+        self.assertEqual(batch.board_before(turns), list("_rane"))
+        self.assertEqual(batch.ended(turns[-1], batch.board_before(turns)), "solved")
+        # The stale board alone would have called the same guess a reveal.
+        self.assertEqual(batch.ended(turns[-1], turns[0]["board"]), "revealed")
+        # No board ever shown, or one of another length, is left as it was.
+        self.assertIsNone(batch.board_before(turns[1:]))
+        self.assertEqual(batch.board_before([dict(guess="a", board=list("__a_")), *turns[1:]]), list("__a_"))
+
     def test_how_a_game_ended_follows_what_the_guess_did(self):
         def ended(guess, reply, previous=("c", "r", "a", "n", "_")):
             return batch.ended(finish_turn(dict(guess=guess, text=reply)), previous)

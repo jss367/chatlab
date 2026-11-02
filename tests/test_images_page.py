@@ -436,6 +436,35 @@ class DrawTests(ImagePageTestCase):
         self.assertIn("Stopping", status)
 
 
+class HandlerCloseTests(ImagePageTestCase):
+    def test_closing_a_handler_whose_run_ended_leaves_another_tabs_run_alone(self):
+        # Gradio closes an abandoned handler after its last frame went out.
+        # By then its run has given the slot back and another tab's run may
+        # hold the manager's token, which the close must not set.
+        import threading
+
+        self.load_pipeline()
+        first = images_page.draw("a red bicycle", "", 4, 7.5, 32, 7, False, True)
+        for _ in range(100):
+            next(first)
+            if self.manager._image_cancel is None:
+                break
+        self.assertIsNone(self.manager._image_cancel, "the first run should have ended")
+
+        release = threading.Event()
+        self.manager.pipeline = FakePipeline(watcher=lambda step: release.wait(5))
+        second = images_page.draw("another", "", 6, 7.5, 32, 7, False, True)
+        next(second)
+        cancel = self.manager._image_cancel
+        self.assertIsNotNone(cancel)
+        try:
+            first.close()
+            self.assertFalse(cancel.is_set())
+        finally:
+            release.set()
+            list(second)
+
+
 class _Exploding(FakePipeline):
     def __call__(self, *args, **kwargs):
         raise RuntimeError("the device fell over")

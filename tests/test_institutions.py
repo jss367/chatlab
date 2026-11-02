@@ -230,6 +230,11 @@ class BundleTests(unittest.TestCase):
         path.write_bytes(path.read_bytes()[:30])
         with self.assertRaisesRegex(ValueError, "not a readable game"):
             read_game(runs[0], runs[0].games[1])
+        # A gzip header over a corrupted body fails inside zlib, not at EOF.
+        whole = gzip.compress(json.dumps(anarchy_game()).encode())
+        path.write_bytes(whole[:12] + bytes(byte ^ 0x5A for byte in whole[12:-8]) + whole[-8:])
+        with self.assertRaisesRegex(ValueError, "not a readable game"):
+            read_game(runs[0], runs[0].games[1])
         path.write_bytes(gzip.compress(json.dumps({**anarchy_game(), "turns": [{"agent": "Zed"}]}).encode()))
         with self.assertRaisesRegex(ValueError, "turn 0 is malformed"):
             read_game(runs[0], runs[0].games[1])

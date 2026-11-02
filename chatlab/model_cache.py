@@ -1086,7 +1086,9 @@ def format_bytes(count: int) -> str:
 
     size = float(count)
     for unit in ("B", "KB", "MB", "GB"):
-        if size < 1000 or unit == "GB":
+        # The rendering below rounds to whole units past 100, so a value
+        # that would read as 1000 moves up a unit rather than showing it.
+        if size < 999.5 or unit == "GB":
             break
         size /= 1000
     if unit == "B":
@@ -1099,7 +1101,7 @@ def format_count(count: int) -> str:
 
     size = float(count)
     for unit in ("", "K", "M", "B"):
-        if size < 1000 or unit == "B":
+        if size < 999.5 or unit == "B":
             break
         size /= 1000
     if unit == "":
