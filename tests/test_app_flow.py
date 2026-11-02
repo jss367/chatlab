@@ -18,6 +18,7 @@ from gradio.utils import get_function_with_locals
 
 from chatlab import app
 from chatlab.ui import runtime
+from chatlab.ui.generation import COLOR_SCALE_SETTING
 from chatlab.ui.token_edit import close_token_editor, open_token_editor, save_token_edit
 from chatlab import charts
 from chatlab.conversation import (
@@ -2962,6 +2963,35 @@ class BranchFromTokenTests(unittest.TestCase):
         self.assertEqual(len(frames), 1)
         self.assertEqual(frames[0]["status"], app.BRANCH_MODEL_CHANGED)
         self.assertEqual(frames[0]["turns"], final["turns"])
+
+    def test_a_refusal_that_clears_the_token_view_keeps_the_chosen_scale(self):
+        # A load landing inside the handler makes it clear the token view
+        # and redraw it; in the reader's scale, not the default one, or the
+        # colors stop matching the dropdown.
+        final = self.respond()[-1]
+        selected = click_token(final, 1)
+        _detail, pick = self.pick_alternative(final)
+        chosen = list(SETTINGS)
+        chosen[COLOR_SCALE_SETTING] = "Surprise"
+        # The picked branch reaches the runtime's replay, the typed one is
+        # turned back at its length check; each refusal clears the view. The
+        # load each lands is undone before the next, or the next would be
+        # turned back at its stamp check, which leaves the view alone.
+        load_count = runtime.MANAGER.load_count
+        self.reload_before("generate")
+        picked = list(app.branch_from(pick, "", final["turns"], *chosen))
+        runtime.MANAGER.load_count = load_count
+        self.reload_before("validate_generation_prefix")
+        typed = list(app.branch_with_text(selected, "Hello", "", final["turns"], *chosen))
+        for frames in (typed, picked):
+            self.assertEqual(frames[-1]["status"], app.BRANCH_MODEL_CHANGED)
+            self.assertEqual(
+                frames[-1]["strip"]["color_map"], app.COLOR_SCALES["Surprise"].color_map
+            )
+        runtime.MANAGER.load_count += 1
+        frames = list(app.next_token(None, "", final["turns"], *chosen))
+        self.assertEqual(frames[-1]["status"], app.BRANCH_MODEL_CHANGED)
+        self.assertEqual(frames[-1]["strip"]["color_map"], app.COLOR_SCALES["Surprise"].color_map)
 
     def reload_before(self, method_name):
         """Land a model load inside the branch handler, after its stamp check.

@@ -156,6 +156,25 @@ def next_guess(game, guesser, asked):
     return next((letter for letter in ENGLISH if letter not in guessed), None)
 
 
+def board_before(turns):
+    """The board the guesses before the last turn had produced, as far as can be told.
+
+    A reply without a Board: line leaves no board behind, so the last
+    readable one is taken and every cell that a letter guessed since would
+    have revealed is filled in from the latest board, which shows the word.
+    Without that, a guess completing the word after such replies would look
+    as if it revealed the letters those guesses had earned.
+    """
+    shown = next((i for i in range(len(turns) - 2, -1, -1) if turns[i].get("board") is not None), None)
+    if shown is None:
+        return None
+    before, board = turns[shown]["board"], turns[-1].get("board")
+    if board is None or len(board) != len(before):
+        return before
+    letters = {value for kind, value in (guess_of(t["guess"]) for t in turns[shown + 1:-1]) if kind == "letter"}
+    return [after if cell == HIDDEN and after in letters else cell for cell, after in zip(before, board)]
+
+
 def ended(turn, previous_board=None):
     """How the game stands after ``turn``: solved, lost, revealed, or None to play on.
 
@@ -261,8 +280,7 @@ def play(trial, session, control, save, stamp=None):
         if outcome is not None:
             # The answer to the question that ended the game.
             return game, outcome, None
-        previous_board = next((t["board"] for t in reversed(game["turns"][:-1]) if t.get("board") is not None), None)
-        state = ended(turn, previous_board)
+        state = ended(turn, board_before(game["turns"]))
         if turn.get("revealed_word"):
             return game, state, None
         guess = None if state else next_guess(game, trial["guesser"], asked)

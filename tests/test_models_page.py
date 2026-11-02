@@ -258,6 +258,8 @@ class FormatCountTests(unittest.TestCase):
         for count, text in [
             (0, "0"),
             (999, "999"),
+            (999_950, "1.0M"),
+            (999_499, "999K"),
             (1500, "1.5K"),
             (45_000, "45K"),
             (1_484_916_736, "1.5B"),

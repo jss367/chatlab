@@ -18,6 +18,7 @@ import math
 from pathlib import Path
 import statistics
 import threading
+import zlib
 
 RUN_FORMAT = "chatlab-institutions-run-1"
 GAME_FORMAT = "chatlab-institutions-game-1"
@@ -443,7 +444,7 @@ def read_game(run, entry):
         if len(raw) > MAX_GAME_BYTES:
             raise ValueError(f"{entry['file']} exceeds the 256 MB limit")
         game = json.loads(raw.decode("utf-8"))
-    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, zlib.error, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{entry['file']} is not a readable game: {exc}") from exc
     _check_game(game, entry["file"])
     _check_game_index(run, entry, game)
@@ -601,7 +602,7 @@ def _read_scenario_game(run, entry):
             raise ValueError("decompressed game exceeds size limit")
         game = json.loads(raw.decode("utf-8"))
         adapter(run.scenario).validate_game(run, entry, game)
-    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, EOFError, zlib.error, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"{entry['file']} is not a readable game: {exc}") from exc
     with _cache_lock:
         _cache[key] = game

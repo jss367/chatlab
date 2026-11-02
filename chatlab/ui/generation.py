@@ -610,14 +610,25 @@ def retry_message(event: gr.RetryData, prompt_text, turns, *settings):
     yield from regenerate_from(position, prompt_text, turns, *settings)
 
 
-def edit_message(event: gr.EditData, prompt_text, turns, *settings):
-    # Steering follows the display/generation settings. This path clears
-    # strips itself and needs the color scale, not the vector snapshot.
-    scale_name = (
+def scale_setting(settings: tuple) -> str:
+    """The color scale among the ``*settings`` a handler was handed.
+
+    For the paths that clear the token view without generating: a refusal
+    that repainted it in the default scale would leave the strip colored by
+    one measurement while the dropdown names another.
+    """
+
+    return (
         settings[COLOR_SCALE_SETTING]
         if len(settings) > COLOR_SCALE_SETTING
         else DEFAULT_COLOR_SCALE
     )
+
+
+def edit_message(event: gr.EditData, prompt_text, turns, *settings):
+    # Steering follows the display/generation settings. This path clears
+    # strips itself and needs the color scale, not the vector snapshot.
+    scale_name = scale_setting(settings)
     held = occupied()
     if held:
         # Not just the branch that regenerates: editing an assistant turn
@@ -864,7 +875,7 @@ def _branch_with_text(
             prompt_override_ids=prompt_edit["ids"] if prompt_edit else None,
         )
     except ModelChanged:
-        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True, scale_name=scale_setting(settings))
         return
     except (ValueError, RuntimeError) as error:
         yield idle_state(prompt_text, turns, f"🌱 {error}")
@@ -909,10 +920,10 @@ def _branch_with_text(
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
-        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True, scale_name=scale_setting(settings))
     except SteeringError as error:
         yield idle_state(
-            prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True
+            prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True, scale_name=scale_setting(settings)
         )
 
 
@@ -987,7 +998,7 @@ def _answer_edited_prompt(
         )
     except ModelChanged:
         yield idle_state(
-            prompt_text, turns, PROMPT_EDIT_MODEL_CHANGED, clear_tokens=True
+            prompt_text, turns, PROMPT_EDIT_MODEL_CHANGED, clear_tokens=True, scale_name=scale_setting(settings)
         )
         return
     except (ValueError, RuntimeError) as error:
@@ -1031,13 +1042,13 @@ def _answer_edited_prompt(
             )
         )
     except ModelChanged:
-        yield idle_state(prompt_text, turns, PROMPT_EDIT_MODEL_CHANGED, clear_tokens=True)
+        yield idle_state(prompt_text, turns, PROMPT_EDIT_MODEL_CHANGED, clear_tokens=True, scale_name=scale_setting(settings))
     except SteeringError as error:
         yield idle_state(
             prompt_text,
             turns,
             failure_status("Could not answer again", str(error)),
-            clear_tokens=True,
+            clear_tokens=True, scale_name=scale_setting(settings),
         )
 
 
@@ -1176,7 +1187,7 @@ def _branch_from(
             prompt_override_ids=prompt_edit["ids"] if prompt_edit else None,
         )
     except ModelChanged:
-        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True, scale_name=scale_setting(settings))
         return
     except (ValueError, RuntimeError) as error:
         yield idle_state(prompt_text, turns, f"🌱 {error}")
@@ -1219,10 +1230,10 @@ def _branch_from(
         )
     except ModelChanged:
         # ``turns`` is still the whole conversation, old response included.
-        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+        yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True, scale_name=scale_setting(settings))
     except SteeringError as error:
         yield idle_state(
-            prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True
+            prompt_text, turns, failure_status("Could not branch", str(error)), clear_tokens=True, scale_name=scale_setting(settings)
         )
 
 
@@ -1244,7 +1255,7 @@ def next_token(pick, prompt_text, turns, *settings):
             yield idle_state(prompt_text, turns, "Generate a reply and choose a token alternative first.")
             return
         if turn_load(turn) != runtime.MANAGER.load_id:
-            yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True)
+            yield idle_state(prompt_text, turns, BRANCH_MODEL_CHANGED, clear_tokens=True, scale_name=scale_setting(settings))
             return
         if turn.get("ends_on_stop_token"):
             yield idle_state(prompt_text, turns, "This reply has ended. Choose an earlier token alternative to branch from.")
