@@ -1,5 +1,6 @@
 """Real archived support evidence and contract corruption regressions; no inference."""
 import copy
+from functools import lru_cache
 import gzip
 import hashlib
 import json
@@ -8,6 +9,7 @@ import shutil
 import tempfile
 from types import SimpleNamespace
 import unittest
+import weakref
 
 from chatlab.conversation import from_json, to_json, recorded_profile_note
 from chatlab.extensions.institutions import bundles, support
@@ -29,6 +31,58 @@ def move_event_to_next_phase(game, event_id):
     game['phases'][index]['event_refs'].remove(event_id)
     game['phases'][index + 1]['event_refs'].insert(0, event_id)
     event['phase_id'] = game['phases'][index + 1]['phase_id']
+
+
+class DistinctCaseCellTests(unittest.TestCase):
+    column = {'label': 'Distinct affected cases', 'distinct_cases': 'False closure claim'}
+
+    def test_counts_distinct_cases_per_game_and_filters_diagnostics(self):
+        games = [
+            {'diagnostics': [
+                {'category': 'False closure claim', 'case_id': 'C001'},
+                {'category': 'False closure claim', 'case_id': 'C001'},
+                {'category': 'False closure claim', 'case_id': 'C002'},
+                {'category': 'Other', 'case_id': 'C003'},
+                {'category': 'False closure claim', 'case_id': None},
+                {'category': 'False closure claim'},
+            ]},
+            {'diagnostics': [{'category': 'False closure claim', 'case_id': 'C001'}]},
+            {'diagnostics': []},
+        ]
+        self.assertEqual(support.cell(self.column, range(len(games)), games.__getitem__), 3)
+        self.assertEqual(support.cell(self.column, [], games.__getitem__), 0)
+
+    def test_games_evicted_from_cache_can_be_released_during_counting(self):
+        class Game(dict):
+            pass
+
+        references = []
+
+        @lru_cache(maxsize=bundles.MAX_CACHED_GAMES)
+        def read_game(index):
+            if index > bundles.MAX_CACHED_GAMES:
+                self.assertIsNone(references[index - bundles.MAX_CACHED_GAMES - 1]())
+            game = Game(diagnostics=[{'category': 'False closure claim', 'case_id': 'C001'}])
+            references.append(weakref.ref(game))
+            return game
+
+        count = bundles.MAX_CACHED_GAMES + 3
+        self.assertEqual(support.cell(self.column, range(count), read_game), count)
+        self.assertEqual(len(references), count)
+
+    def test_malformed_game_anywhere_makes_count_unreadable(self):
+        for damaged_index in range(3):
+            with self.subTest(damaged_index=damaged_index):
+                reads = []
+
+                def read_game(index):
+                    reads.append(index)
+                    if index == damaged_index:
+                        raise ValueError('malformed game')
+                    return {'diagnostics': [{'category': 'False closure claim', 'case_id': 'C001'}]}
+
+                self.assertEqual(support.cell(self.column, range(3), read_game), 'unreadable')
+                self.assertEqual(reads, list(range(damaged_index + 1)))
 
 
 class SupportTests(unittest.TestCase):
@@ -357,6 +411,16 @@ class NewExperimentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'composition disagrees'):
                 support.validate_game(run, entry, damaged)
 
+
+    def test_a_damaged_game_costs_its_count_not_the_overview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            six_seat_bundle(Path(tmp))
+            run = bundles.read_run(Path(tmp))[0]
+            (Path(tmp) / run.games[0]['file']).write_bytes(gzip.compress(b'{"tampered": true}'))
+            rows, keys = overview_rows(run)
+            self.assertEqual(rows, [['Jury vote', '2 cheater + 3 base + judge', 1, f"3 / {run.games[0]['scores']['cases']}",
+                                     'unreadable']])
+            self.assertEqual(keys, [('jury', 'six')])
 
 class SupportContractRegressionTests(unittest.TestCase):
     def test_malformed_score_profile_ids_are_reported_as_contract_errors(self):

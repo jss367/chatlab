@@ -11,8 +11,8 @@ import gradio as gr
 
 from chatlab.extensions.maze_experiments.dynamic_maze import (FORMAT, ChangingMaze, changing, check_closure,
                                                       close_cell, environment_id, load_maze)
-from chatlab.extensions.maze_experiments.maze import GOAL_MODES, Maze
-from chatlab.extensions.maze_experiments.page import board, build_page, scenario_values, status
+from chatlab.extensions.maze_experiments.maze import GOAL_MODES, Maze, generate
+from chatlab.extensions.maze_experiments.page import board, build_page, recovered_openness, scenario_values, status
 from chatlab.extensions.maze_experiments import runner
 from chatlab.extensions.maze_experiments.runner import TERMINAL, Episode, fork_token_edit, from_payload, stream_episode
 from chatlab.extension_api import TokenInspector
@@ -65,6 +65,10 @@ class ChangingMapTests(unittest.TestCase):
         # as much here as it does on a fixed maze.
         self.assertEqual(maze.environment_id, Maze(GRID, OPEN.start, (3, 3)).tool_id("hidden"))
         self.assertEqual(environment_id(OPEN), maze.environment_id)
+
+    def test_a_changing_map_from_before_the_recorded_setting_recovers_its_openness(self):
+        drawn = generate(7, 11, 8, .6)
+        self.assertEqual(recovered_openness(changing(drawn)), .6)
 
     def test_a_closure_has_to_leave_a_maze_the_run_could_have_begun_with(self):
         maze = changing(OPEN)

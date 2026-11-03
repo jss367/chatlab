@@ -182,6 +182,21 @@ class ReadTests(unittest.TestCase):
 
         self.assertIsNone(saved.mps_memory_fraction)
 
+    def test_a_metal_cap_that_is_not_a_number_falls_back_to_no_cap(self):
+        for value in ("0.5", True, [0.5], {"fraction": 0.5}):
+            with self.subTest(value=value):
+                self.write_file({"mps_memory_fraction": value})
+                saved, _unknown = settings.read(self.path)
+
+                self.assertIsNone(saved.mps_memory_fraction)
+
+    def test_a_metal_cap_out_of_range_is_pulled_into_it(self):
+        _low, high = settings.MPS_MEMORY_FRACTION_RANGE
+        self.write_file({"mps_memory_fraction": high + 1})
+        saved, _unknown = settings.read(self.path)
+
+        self.assertEqual(saved.mps_memory_fraction, high)
+
     def test_keys_this_version_does_not_know_are_handed_back(self):
         self.write_file({"temperature": 0.5, "from_a_later_version": 7})
         saved, unknown = settings.read(self.path)

@@ -549,6 +549,21 @@ class RefusalTests(ApiTestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertIn(expected, response.json()["error"]["message"])
 
+    def test_null_leaves_a_field_at_its_default(self):
+        # OpenAI's clients send null for a parameter nobody set, numeric or
+        # not, and it means the same as leaving the field out.
+        response = self.post(
+            messages=[{"role": "user", "content": "hi"}],
+            temperature=None,
+            stream=None,
+            logprobs=None,
+            top_logprobs=None,
+            prompt_logprobs=None,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["choices"][0]["logprobs"])
+
     def test_a_refusal_on_the_way_to_the_first_token_is_an_http_error(self):
         # A prompt past the context limit is raised as the generator starts.
         # Streaming it inside a 200 would tell a client it had succeeded.

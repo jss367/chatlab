@@ -783,24 +783,11 @@ class LoadingMixin:
         )
         if kind == MLX_KIND and vision.checkpoint_has_vision(local_path):
             vision_note = vision.MLX_VISION
-        self.model = model
-        self.tokenizer = tokenizer
-        self.processor = processor
-        self.vision_note = vision_note
-        self.pipeline = pipeline
-        self.kind = kind
-        self.engine = (
+        engine = (
             mlx_runtime.MlxEngine.from_snapshot(model, local_path)
             if kind == MLX_KIND
             else None
         )
-        self.model_id = model_id
-        self.local_path = local_path
-        self.device_name = device_name
-        self.precision = precision
-        self.loaded_bytes = estimated
-        self.load_count += 1
-        load_id = f"{model_id}#{self.load_count}"
         # A Transformers model knows the revision it was read at, both halves
         # of a merged adapter included; the other kinds are their snapshot. An
         # adapter that grew the embeddings without saving them has rows no
@@ -811,7 +798,23 @@ class LoadingMixin:
         )
         if getattr(model, "chatlab_unsaved_weights", False):
             revision = None
+        # Under the lock :attr:`load_id` reads by, so nothing reads the new
+        # weights beside the old model ID or the previous load's count.
         with self._loaded_lock:
+            self.model = model
+            self.tokenizer = tokenizer
+            self.processor = processor
+            self.vision_note = vision_note
+            self.pipeline = pipeline
+            self.kind = kind
+            self.engine = engine
+            self.model_id = model_id
+            self.local_path = local_path
+            self.device_name = device_name
+            self.precision = precision
+            self.loaded_bytes = estimated
+            self.load_count += 1
+            load_id = f"{model_id}#{self.load_count}"
             self._loaded = LoadedModel(model_id, device_name, precision, load_id)
             if revision is not None:
                 self._load_weights[load_id] = (kind, model_id, revision, precision, device_name)
@@ -918,19 +921,19 @@ class LoadingMixin:
         self._inspect_cache = None
         self._image_features = None
         self._jacobian_lens = None
-        self.model = None
-        self.tokenizer = None
-        self.processor = None
-        self.vision_note = None
-        self.pipeline = None
-        self.engine = None
-        self.kind = None
-        self.model_id = None
-        self.local_path = None
-        self.device_name = None
-        self.precision = None
-        self.loaded_bytes = None
         with self._loaded_lock:
+            self.model = None
+            self.tokenizer = None
+            self.processor = None
+            self.vision_note = None
+            self.pipeline = None
+            self.engine = None
+            self.kind = None
+            self.model_id = None
+            self.local_path = None
+            self.device_name = None
+            self.precision = None
+            self.loaded_bytes = None
             self._loaded = LoadedModel()
         gc.collect()
         self._release_device_cache(torch)

@@ -197,6 +197,13 @@ class RecordTests(unittest.TestCase):
             path.write_text(json.dumps(broken))
             with self.assertRaisesRegex(ValueError, "Response 2 of the saved game is malformed"):
                 load(path)
+            for branch in ({"parent": "x"}, {"token_index": "3", "forced_tokens": 1}, [1]):
+                with self.subTest(branch=branch):
+                    broken = json.loads(saved(game))
+                    broken["turns"][1]["branch"] = branch
+                    path.write_text(json.dumps(broken))
+                    with self.assertRaisesRegex(ValueError, "Response 2 of the saved game is malformed"):
+                        load(path)
         child = rewound(game, 1)
         self.assertEqual(len(child["turns"]), 1)
         self.assertEqual(child["parent"], dict(id=game["id"], turns=1))

@@ -604,6 +604,17 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(saved["predictions"][0]["status"], "error")
         self.assertEqual(saved["scores"]["completed"], 0)
 
+    def test_a_refused_session_writes_no_run_and_frees_the_view(self):
+        self.assertIsNone(self.manager.claim_generation())
+        try:
+            with self.assertRaisesRegex(ValueError, "busy in another view"):
+                list(self.batch("owner", demo_cases()))
+        finally:
+            self.manager.release_generation()
+        self.assertFalse(self.runner.data_dir.exists())
+        run, _ = list(self.batch("owner", demo_cases()))[-1]
+        self.assertEqual(run["status"], "completed")
+
     def test_screenshot_only_case_is_recorded_as_skipped(self):
         run, path = list(self.batch("owner", [dict(demo_cases()[0], state_text="")]))[-1]
         self.assertEqual(run["status"], "completed")

@@ -618,6 +618,31 @@ class ChatFlowTests(unittest.TestCase):
         self.assertEqual(final["turns"][1]["reasoning"], "revised")
         self.assertEqual(final["turns"][1]["content"], "answer")
 
+    def test_editing_a_user_turns_reasoning_leaves_its_message_alone(self):
+        turns = [
+            {"role": "user", "content": "one", "reasoning": "imported thought"},
+            make_turn("assistant", "stale"),
+        ]
+        event = gr.EditData(
+            None, {"index": 0, "previous_value": "imported thought", "value": "revised"}
+        )
+        final = self.last(app.edit_message(event, "", turns, *SETTINGS))[-1]
+        self.assertEqual(final["turns"][0]["reasoning"], "revised")
+        self.assertEqual(final["turns"][0]["content"], "one")
+        self.assertEqual(final["turns"][1]["content"], "Hello world")
+
+    def test_blanking_a_user_turns_only_text_through_its_reasoning_is_refused(self):
+        turns = [
+            {"role": "user", "content": "", "reasoning": "imported thought"},
+            make_turn("assistant", "stale"),
+        ]
+        event = gr.EditData(
+            None, {"index": 0, "previous_value": "imported thought", "value": " "}
+        )
+        final = self.last(app.edit_message(event, "draft", turns, *SETTINGS))[-1]
+        self.assertEqual(final["turns"], turns)
+        self.assertEqual(final["status"], "A user message cannot be empty.")
+
     def test_blanking_an_assistant_message_is_refused(self):
         # An empty assistant turn is still drawn as a bubble but skipped by
         # model_messages(), so the screen and the model would disagree and the

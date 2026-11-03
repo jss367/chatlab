@@ -350,9 +350,10 @@ class ConversationJob:
                 if metrics is not None:
                     restore_chat_metrics_generation(metrics[0])
                 values["strip"] = transcript_update(turns, scale)
-                # Navigation must never resurrect the message that launched a job.
+                # Navigation must never resurrect the message that launched a
+                # job, nor the seed it used over one typed since it was shown.
                 if switched and self.rendered is not None:
-                    for name in COMPOSER_OUTPUT_NAMES:
+                    for name in (*COMPOSER_OUTPUT_NAMES, "seed"):
                         values.pop(name, None)
                 # Editor controls and token selections are local to the view.
                 if switched and self.rendered is not None:

@@ -385,6 +385,14 @@ def _probability(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def _readable_branch(branch):
+    """No branch, or one naming the token it was cut at and how many it replayed, as the note shows them."""
+    if not branch:
+        return True
+    return (isinstance(branch, dict)
+            and all(type(branch.get(key)) is int and branch[key] >= 0 for key in ("token_index", "forced_tokens")))
+
+
 def load(path):
     path = Path(path)
     if path.stat().st_size > MAX_FILE_BYTES:
@@ -407,7 +415,7 @@ def load(path):
         metrics = turn.get("metrics", [])
         if (not isinstance(metrics, list) or not all(map(_readable_metric, metrics))
                 or not isinstance(turn.get("sampling", {}), dict)
-                or not isinstance(turn.get("branch") or {}, dict)
+                or not _readable_branch(turn.get("branch"))
                 or not isinstance(turn.get("forced_prefix_tokens", 0), int)
                 or not _readable_probes(turn.get("probes", []))):
             raise ValueError(f"Response {number} of the saved game is malformed.")

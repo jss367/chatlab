@@ -240,7 +240,11 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
         PREFILL_TOKEN_LIMIT_RANGE,
         DEFAULTS.prefill_token_limit,
     )
-    fraction = values.get("mps_memory_fraction", DEFAULTS.mps_memory_fraction)
+    # No cap is the default, so a value that is not a number falls back to
+    # that rather than to the strictest cap the range allows.
+    fraction = _number(values.get("mps_memory_fraction", DEFAULTS.mps_memory_fraction))
+    if fraction is not None and fraction != fraction:  # NaN
+        fraction = None
     scale = _text(values.get("color_scale", DEFAULTS.color_scale), DEFAULTS.color_scale)
     theme = _text(values.get("theme", DEFAULTS.theme), DEFAULTS.theme)
     appearance = _text(
@@ -324,9 +328,7 @@ def sanitize(values: Mapping[str, Any]) -> Settings:
         mps_memory_fraction=(
             None
             if fraction is None
-            else _clamped_float(
-                fraction, MPS_MEMORY_FRACTION_RANGE, DEFAULTS.mps_memory_fraction or 1.0
-            )
+            else _clamped_float(fraction, MPS_MEMORY_FRACTION_RANGE, 1.0)
         ),
         image_negative_prompt=_text(
             values.get("image_negative_prompt", DEFAULTS.image_negative_prompt),
