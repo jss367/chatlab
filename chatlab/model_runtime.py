@@ -247,9 +247,12 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
         too, so a picture's maps can be told from the next load's.
         """
 
-        if not self.in_memory:
-            return None
-        return f"{self.model_id}#{self.load_count}"
+        # A load assigns the weights, the ID and the count under this lock,
+        # so the three are read together.
+        with self._loaded_lock:
+            if not self.in_memory:
+                return None
+            return f"{self.model_id}#{self.load_count}"
 
     def load_for(self, load_id: str | None) -> str | None:
         """The load in memory if it holds the weights ``load_id`` held, else ``load_id``.

@@ -114,8 +114,12 @@ class Runner:
                 copied = last_write
             return str(download)
 
+        # A model that refuses the session never started the batch, so there
+        # is no run to record.
+        opened = False
         try:
             with self.models.open_session() as session:
+                opened = True
                 with self._lock:
                     self._active[owner][1] = session
                     if cancel.is_set():
@@ -170,7 +174,8 @@ class Runner:
                 run["predictions"][-1]["status"] = "cancelled" if run["status"] == "cancelled" else "error"
             with self._lock:
                 self._active.pop(owner, None)
-            save()
+            if opened:
+                save()
         yield copy.deepcopy(run), checkpoint()
 
 

@@ -143,8 +143,13 @@ def lookup(record, path):
 def cell(column, records, read_game=None):
     """One column summed over records. A distinct-case count reads each record's game for its diagnostics."""
     if 'distinct_cases' in column:
-        return sum(len({d['case_id'] for d in read_game(r)['diagnostics']
-                        if d['category'] == column['distinct_cases'] and d.get('case_id') is not None}) for r in records)
+        try:
+            games = [read_game(r) for r in records]
+        except ValueError:
+            # One damaged game file costs this count, not the whole overview; opening it says what is wrong.
+            return 'unreadable'
+        return sum(len({d['case_id'] for d in g['diagnostics']
+                        if d['category'] == column['distinct_cases'] and d.get('case_id') is not None}) for g in games)
     totals = [sum(lookup(r, p) for r in records) for p in paths(column)]
     return totals[0] if len(totals) == 1 else ' / '.join(str(t) for t in totals)
 

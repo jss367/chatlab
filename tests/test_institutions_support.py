@@ -358,6 +358,16 @@ class NewExperimentTests(unittest.TestCase):
                 support.validate_game(run, entry, damaged)
 
 
+    def test_a_damaged_game_costs_its_count_not_the_overview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            six_seat_bundle(Path(tmp))
+            run = bundles.read_run(Path(tmp))[0]
+            (Path(tmp) / run.games[0]['file']).write_bytes(gzip.compress(b'{"tampered": true}'))
+            rows, keys = overview_rows(run)
+            self.assertEqual(rows, [['Jury vote', '2 cheater + 3 base + judge', 1, f"3 / {run.games[0]['scores']['cases']}",
+                                     'unreadable']])
+            self.assertEqual(keys, [('jury', 'six')])
+
 class SupportContractRegressionTests(unittest.TestCase):
     def test_malformed_score_profile_ids_are_reported_as_contract_errors(self):
         for profile_id in ([], ['base'], {}, {'profile': 'base'}, None, True, 0):

@@ -254,7 +254,7 @@ def check_rewards(config, maze):
                     todo.append(step)
         if cell not in found:
             raise ValueError(f"Exit {EXIT_LABELS[every.index(cell)]} can only be reached through another exit.")
-    if config["reward_exit"] is not None and config["reward_exit"] not in EXIT_LABELS[:len(every)]:
+    if config["reward_exit"] is not None and config["reward_exit"] not in list(EXIT_LABELS[:len(every)]):
         raise ValueError("The reward exit is one of the run's exits: " + ", ".join(EXIT_LABELS[:len(every)]) + ".")
     assigned = config["assigned_exits"]
     if assigned is not None:

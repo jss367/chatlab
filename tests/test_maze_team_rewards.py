@@ -311,6 +311,10 @@ class RewardRunTests(unittest.TestCase):
         for message, changes in cases.items():
             with self.subTest(message), self.assertRaisesRegex(ValueError, message):
                 team_episode(HALL, REWARD | changes)
+        # A label is a whole exit, not any run of the letters that name them.
+        for label in ("", "AB"):
+            with self.subTest(reward_exit=label), self.assertRaisesRegex(ValueError, "one of the run's exits"):
+                team_episode(HALL, REWARD | dict(reward_exit=label))
         from chatlab.extensions.maze_experiments.runner import Episode
         with self.assertRaisesRegex(ValueError, "a team's"):
             Episode(HALL, dict(exits=[[0, 4]], supplied_moves=0))

@@ -2154,10 +2154,10 @@ class TokenizerSupportTests(unittest.TestCase):
 class QuantizedLoadTests(unittest.TestCase):
     """What the loader asks transformers for, per device and precision."""
 
-    def load_with(self, precision, mps: bool):
+    def load_with(self, precision, mps: bool, manager=None):
         from chatlab.model_runtime import ModelManager
 
-        manager = ModelManager()
+        manager = manager or ModelManager()
         calls = []
 
         def from_pretrained(path, output_loading_info=False, **kwargs):
@@ -2196,6 +2196,35 @@ class QuantizedLoadTests(unittest.TestCase):
         self.assertEqual(kwargs["device_map"], "mps")
         self.assertEqual(kwargs["quantization_config"], ("metal", {"bits": 4, "group_size": 64}))
         self.assertEqual(check.call_args.kwargs["bits"], 4)
+
+    def test_a_load_id_read_mid_load_names_no_half_assigned_load(self):
+        # Another thread asking for the load ID while the new weights are
+        # being put in place waits for them, rather than pairing the new
+        # weights with no model ID or the previous load's count.
+        from chatlab.model_runtime import ModelManager
+
+        readings = []
+
+        class Watched(ModelManager):
+            @property
+            def tokenizer(self):
+                return self.__dict__.get("tokenizer")
+
+            @tokenizer.setter
+            def tokenizer(self, value):
+                self.__dict__["tokenizer"] = value
+                if value is not None:
+                    reader = threading.Thread(target=lambda: readings.append(self.load_id))
+                    reader.start()
+                    reader.join(0.2)
+
+        manager, _device, _calls, _check = self.load_with("full", mps=False, manager=Watched())
+        for _ in range(50):
+            if readings:
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(readings, ["org/model#1"])
 
     def test_full_weights_on_metal_are_loaded_as_before(self):
         manager, device, calls, check = self.load_with("full", mps=True)

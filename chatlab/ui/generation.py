@@ -700,8 +700,14 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
             runtime.MANAGER.release_generation()
         return
 
+    # A user turn can carry reasoning too, from an imported conversation, and
+    # its bubble edits that rather than the message under it.
+    field = "reasoning" if part == "reasoning" else "content"
     edited = new_value.strip()
-    if not edited and not turns[position].get("images"):
+    remaining = turns[position].get("images") or (
+        field == "reasoning" and (turns[position].get("content") or "").strip()
+    )
+    if not edited and not remaining:
         # An empty user turn is skipped by model_messages(), which would leave
         # the request with no user message at all.
         yield idle_state(prompt_text, turns, "A user message cannot be empty.")
@@ -716,7 +722,7 @@ def edit_message(event: gr.EditData, prompt_text, turns, *settings):
 
     original_turns = copy_turns(turns)
     turns = turns[: position + 1]
-    turns[position]["content"] = edited
+    turns[position][field] = edited
     yield from regenerate_from(position, prompt_text, turns, *settings, restore_turns=original_turns)
 
 

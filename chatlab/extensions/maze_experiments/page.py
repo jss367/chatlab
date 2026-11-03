@@ -463,11 +463,13 @@ def recovered_openness(maze):
     open only orders the search, so a recoverable run usually answers on the first
     try and an exhausted search costs a few seconds once per upload. The redrawn
     maze has to match whole: the same walls placed around a different start or
-    destination is a maze the run never used."""
+    destination is a maze the run never used. The fields are compared rather than
+    the mazes, which a changing map's own class would never let equal a drawn one."""
     share = sum(row.count(".") for row in maze.grid) / maze.size ** 2
     for value in sorted(OPENNESS_CHOICES, key=lambda v: abs(v - share)):
         try:
-            if generate(maze.size, maze.seed, len(maze.route()) - 1, value) == maze:
+            drawn = generate(maze.size, maze.seed, len(maze.route()) - 1, value)
+            if (drawn.grid, drawn.start, drawn.goal) == (maze.grid, maze.start, maze.goal):
                 return value
         except ValueError:
             pass

@@ -313,7 +313,11 @@ def loaded_model(requested: Any, manager: ModelManager) -> tuple[str, str]:
 
 
 def _flag(body: dict, name: str, default: bool = False) -> bool:
-    value = body.get(name, default)
+    # JSON null means left out, as it does for the numeric fields: OpenAI's
+    # clients send ``"logprobs": null`` for a parameter nobody set.
+    value = body.get(name)
+    if value is None:
+        return default
     if not isinstance(value, bool):
         raise ApiError(400, f"{name} must be true or false.")
     return value
@@ -497,7 +501,9 @@ def token_detail(body: dict) -> tuple[bool, int]:
     """
 
     wanted = _flag(body, "logprobs")
-    count = body.get("top_logprobs", 0)
+    count = body.get("top_logprobs")
+    if count is None:
+        count = 0
     if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 20:
         raise ApiError(400, "top_logprobs must be a whole number between 0 and 20.")
     if count and not wanted:

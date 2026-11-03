@@ -523,6 +523,18 @@ class BackgroundConversationTests(unittest.TestCase):
         self.call("poll")
         self.assertEqual(self.view[prompt._id], "My next question")
 
+    def test_returning_after_the_reply_keeps_a_seed_typed_meanwhile(self):
+        self.start()
+        self.switch("Chat 1")
+        seed = self.demo.conversation_outputs["seed"]
+        self.view[seed._id] = 1234
+        self.finish()
+        self.call("poll")
+        self.switch(MAIN_BRANCH)
+        self.call("poll")
+        self.assertEqual(self.view[seed._id], 1234)
+        self.assertEqual(self.state[self.turns._id][-1]["content"], "Hello world")
+
     def test_stop_after_partial_output_closes_iterator_on_the_worker(self):
         partial = threading.Event()
         advance = threading.Event()
