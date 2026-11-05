@@ -473,6 +473,43 @@ class JacobianLensTests(unittest.TestCase):
             self.assertEqual(rendered, request(None, None, None)[0])
             self.assertIsNone(self.manager.occupant)
 
+    def test_single_block_readout_leaves_the_next_readout_its_full_range(self):
+        from chatlab.ui import inspection, runtime
+
+        def readout(*blocks):
+            return {"kind": "jacobian", "layers": [{"layer": block - 1} for block in blocks]}
+
+        # Narrowed to blocks 1-2, then a lens fitted at block 10 alone.
+        row, first, last, bounds = inspection.show_block_range(readout(10), 1, 2, (1, 32))
+        self.assertFalse(row["visible"])
+        self.assertEqual(bounds, (10, 10))
+        self.assertEqual((first["minimum"], first["maximum"], first["value"]), (10, 10, 10))
+        self.assertEqual((last["minimum"], last["maximum"], last["value"]), (10, 10, 10))
+        first, last = first["value"], last["value"]
+        self.assertEqual(inspection.chosen_blocks(first, last, bounds), (None, None))
+        # Then a lens fitted at blocks 20-30 shows all of them.
+        wider = readout(*range(20, 31))
+        self.assertEqual(inspection.carried_blocks(wider, first, last, bounds), (20, 30))
+        _row, first_update, last_update, _bounds = inspection.show_block_range(wider, first, last, bounds)
+        self.assertEqual((first_update["value"], last_update["value"]), (20, 30))
+
+        # The first render of the next readout also draws every fitted block.
+        imported = self.import_lens()
+        args = (
+            {"generation": 7, "strip": "prompt", "index": 1},
+            (7, [{"token_id": token} for token in self.ids[2:]]),
+            (7, [{"token_id": token} for token in self.ids[:2]]),
+            (7, self.ids[:2], self.manager.load_id), 0,
+        )
+        with mock.patch.object(runtime, "MANAGER", self.manager), mock.patch.object(
+            inspection, "current_strip_generation", return_value=7,
+        ):
+            rendered = list(inspection.inspect_layers(
+                *args, lens_mode="Jacobian", imported_lens=imported,
+                first_block=first, last_block=last, block_bounds=bounds,
+            ))[-1][0]
+        self.assertIn("across blocks 1–3", rendered)
+
     def test_imported_lens_is_remembered_and_recalled_after_a_reload(self):
         from chatlab.ui import inspection, runtime
 

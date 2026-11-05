@@ -685,7 +685,9 @@ def show_block_range(insight: dict | None, first, last, bounds):
     """Fit the block sliders to a new Jacobian readout, keeping a narrowed range.
 
     Answers the slider row, both sliders and the bounds they now describe.
-    A lens fitted at a single block has no range to choose, so the row hides.
+    A lens fitted at a single block has no range to choose, so the row hides
+    and both sliders sit on that block. Both ends are then open, so the next
+    readout shows every block it was fitted at.
     """
     fitted = fitted_blocks(insight)
     if fitted is None:
@@ -693,7 +695,12 @@ def show_block_range(insight: dict | None, first, last, bounds):
     low, high = fitted
     first, last = carried_blocks(insight, first, last, bounds)
     if high <= low:
-        return gr.update(visible=False), gr.skip(), gr.skip(), fitted
+        return (
+            gr.update(visible=False),
+            gr.update(minimum=low, maximum=low, value=low),
+            gr.update(minimum=low, maximum=low, value=low),
+            fitted,
+        )
     return (
         gr.update(visible=True),
         gr.update(minimum=low, maximum=high, value=first),
