@@ -371,6 +371,19 @@ Below the grid, a table lists the five highest-scoring tokens at every fitted
 block for the clicked token. The grid covers at most the 128 tokens ending
 at the clicked one; its note says which tokens are shown.
 
+Above the grid, the concept table counts how often each token appears
+among the five highest-scoring tokens at every fitted block and position,
+and lists the 40 most frequent tokens. Each row shows its count and a strip
+with one mark per block, darker at the blocks where the token appears at
+more positions. The text of those positions sits above the table. Tick a
+token to highlight the positions where it is read; tokens you tick take
+different colors. Click a position to list its top token at every block,
+each with its own strip and a box to tick it. **First block** and **Last
+block** limit the table, the grid, the per-block table, and the pinned rank
+line to the blocks between them, and **All blocks** restores the full range.
+Changing the range redraws the readout without running the model again. A
+narrowed range carries over to the next token you inspect.
+
 Click any cell to pin its token: the inspection runs again with every cell
 carrying that token's vocabulary rank, shaded darker the closer it is to
 rank 1 on a logarithmic scale, and a line traces its rank across blocks at

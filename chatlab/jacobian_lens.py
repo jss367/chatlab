@@ -274,7 +274,8 @@ class FittedLens:
         Returns ``(rows, cells)``: ``rows`` describes the last fed position
         the way the table shows it, the top candidates per block and the
         pinned token's rank; ``cells`` holds, per block, the top token at
-        every fed position, with the pinned token's rank beside it.
+        every fed position, with the pinned token's rank beside it, and under
+        ``top`` the IDs of the top candidates at every position.
         """
         import torch
 
@@ -308,10 +309,12 @@ class FittedLens:
                     for token, score in zip(ids, values)
                 ],
             }
-            best_scores, best_ids = scores.max(dim=1)
+            # The concept table counts each position's top few, not just the
+            # top one, so the grid's cell is the first of the same list.
+            top_scores, top_ids = scores.topk(min(TOP_CANDIDATES, scores.shape[1]), dim=1)
             column = [
-                {"token_id": int(token), "text": decode(int(token)), "score": float(score)}
-                for token, score in zip(best_ids, best_scores)
+                {"token_id": int(best[0]), "text": decode(int(best[0])), "score": float(score[0])}
+                for best, score in zip(top_ids, top_scores)
             ]
             if pinned_id is not None:
                 pinned_scores = scores[:, pinned_id]
@@ -322,7 +325,7 @@ class FittedLens:
                     cell["pinned_rank"] = int(rank)
                     cell["pinned_score"] = float(score)
             rows.append(row)
-            cells.append({"layer": layer, "cells": column})
+            cells.append({"layer": layer, "cells": column, "top": top_ids.tolist()})
         return rows, cells
 
 

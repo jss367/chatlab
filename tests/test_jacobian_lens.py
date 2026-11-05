@@ -1,5 +1,6 @@
 """Numerical and lifecycle checks using small, real Transformers decoders."""
 
+import html
 import json
 import os
 import shutil
@@ -316,8 +317,9 @@ class JacobianLensTests(unittest.TestCase):
         # Four positions, two fitted blocks and the model's own output row.
         self.assertEqual(rendered.count('class="jl-cell'), 4 * 3)
         self.assertEqual(rendered.count("jl-output"), 1)
-        # The selected column: its header and one cell per row.
-        self.assertEqual(rendered.count("jl-selected"), 4)
+        # The selected column, its header and one cell per row, and the
+        # selected token in the text above the concept table.
+        self.assertEqual(rendered.count("jl-selected"), 5)
         self.assertIn("--jl-heat:", rendered)
         # Every cell, the output row's included, shows the pinned token's rank.
         self.assertEqual(rendered.count("<sup>"), 4 * 3)
@@ -336,6 +338,91 @@ class JacobianLensTests(unittest.TestCase):
         self.assertIn("Click a cell", unpinned)
         windowed = charts.jacobian_lens_chart(self.inspect(3, positions=2))
         self.assertIn("tokens 3–4 of 6", windowed)
+
+    def test_concept_table_counts_each_blocks_top_candidates_at_every_position(self):
+        result = self.inspect(3)
+        data = result["slice"]
+        # Every block lists its top candidates at all four positions, and the
+        # grid's cell is the first of them.
+        for row in data["layers"]:
+            self.assertEqual(len(row["top"]), 4)
+            self.assertTrue(all(len(top) == jacobian_lens.TOP_CANDIDATES for top in row["top"]))
+            self.assertEqual([top[0] for top in row["top"]], [cell["token_id"] for cell in row["cells"]])
+        self.assertTrue(all(token in data["texts"] for row in data["layers"] for top in row["top"] for token in top))
+        rendered = charts.jacobian_lens_chart(result)
+        counts = {}
+        for row in data["layers"]:
+            for top in row["top"]:
+                for token in top:
+                    counts[token] = counts.get(token, 0) + 1
+        best = max(counts, key=counts.get)
+        self.assertIn(f'<tr data-concept="{best}">', rendered)
+        self.assertIn(f'<td class="jl-count">{counts[best]:,}</td>', rendered)
+        self.assertEqual(rendered.count('class="jl-pick"'), min(len(counts), charts.CONCEPT_ROWS))
+        # One strip mark per fitted block on every row.
+        self.assertEqual(rendered.count('title="Block 1: '), min(len(counts), charts.CONCEPT_ROWS))
+        # Each position in the text names the concepts read there.
+        self.assertEqual(rendered.count('class="jl-word'), 4)
+        first_here = {top[0] for top in (row["top"][0] for row in data["layers"])}
+        concepts = rendered.split('data-pos="0" data-concepts="')[1].split('"')[0].split()
+        self.assertTrue({str(token) for token in first_here} <= set(concepts))
+        readout = json.loads(html.unescape(rendered.split('data-readout="')[1].split('"')[0]))
+        self.assertEqual(readout["blocks"], [1, 3])
+        self.assertEqual(readout["positions"], [1, 2, 3, 4])
+        self.assertEqual(readout["top"][1], [top[0] for top in data["layers"][1]["top"]])
+
+    def test_concept_texts_are_escaped_and_survive_a_json_round_trip(self):
+        result = self.inspect(3)
+        token = result["slice"]["layers"][0]["top"][0][0]
+        result["slice"]["texts"][token] = '<img src=x>"'
+        rendered = charts.jacobian_lens_chart(result)
+        self.assertNotIn("<img", rendered)
+        self.assertIn("&lt;img src=x&gt;", rendered)
+        # A saved inspection comes back from JSON with string keys.
+        restored = json.loads(json.dumps(result))
+        self.assertIn("&lt;img src=x&gt;", charts.jacobian_lens_chart(restored))
+
+    def test_block_range_limits_every_part_of_the_readout(self):
+        result = self.inspect(3, pinned_text="the")
+        only_third = charts.jacobian_lens_chart(result, 3, 3)
+        self.assertEqual(only_third.count('class="jl-cell'), 4 * 2)
+        self.assertIn("across block 3", only_third)
+        self.assertNotIn('title="Block 1: ', only_third)
+        self.assertNotIn("<td>1</td>", only_third)
+        both = charts.jacobian_lens_chart(result, 3, 1)
+        self.assertIn("across blocks 1–3", both)
+        self.assertIn("no fitted block between blocks 2 and 2", charts.jacobian_lens_chart(result, 2, 2))
+        self.assertEqual(charts.jacobian_lens_chart(result), charts.jacobian_lens_chart(result, None, None))
+        # The readout is not changed by drawing it over a range.
+        self.assertEqual(len(result["layers"]), 2)
+
+    def test_block_sliders_keep_a_narrowed_range_and_leave_open_ends_open(self):
+        from chatlab.ui import inspection
+
+        self.assertEqual(inspection.chosen_blocks(1, 2, None), (None, None))
+        self.assertEqual(inspection.chosen_blocks(1, 3, (1, 3)), (None, None))
+        self.assertEqual(inspection.chosen_blocks(2, 3, (1, 3)), (2, None))
+        self.assertEqual(inspection.chosen_blocks(1, 2, (1, 3)), (None, 2))
+        result = self.inspect(3)
+        row, first, last, bounds = inspection.show_block_range(result, 1, 2, None)
+        self.assertEqual(bounds, (1, 3))
+        self.assertTrue(row["visible"])
+        self.assertEqual((first["minimum"], first["maximum"], first["value"]), (1, 3, 1))
+        self.assertEqual(last["value"], 3)
+        # A lens fitted at more blocks keeps an open end open, a narrowed one narrowed.
+        wider = dict(result, layers=[*result["layers"], {"layer": 9}])
+        _row, first, last, bounds = inspection.show_block_range(wider, 2, 3, (1, 3))
+        self.assertEqual((first["value"], last["value"], bounds), (2, 10, (1, 10)))
+        _row, first, last, _bounds = inspection.show_block_range(wider, 1, 2, (1, 3))
+        self.assertEqual((first["value"], last["value"]), (1, 2))
+        single = dict(result, layers=result["layers"][:1])
+        self.assertFalse(inspection.show_block_range(single, 1, 3, None)[0]["visible"])
+        skipped = inspection.show_block_range(None, 1, 3, (1, 3))
+        self.assertTrue(all(isinstance(part, dict) and part.get("__type__") == "update" and len(part) == 1 for part in skipped))
+        self.assertIn("across block 3", inspection.render_block_range(result, 3, 3, (1, 3)))
+        first, last, rendered = inspection.all_blocks(result, (1, 3))
+        self.assertEqual((first, last), (1, 3))
+        self.assertIn("across blocks 1–3", rendered)
 
     def test_imported_lens_is_remembered_and_recalled_after_a_reload(self):
         from chatlab.ui import inspection, runtime

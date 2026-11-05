@@ -52,14 +52,17 @@ from chatlab.ui.icons import icon_classes
 from chatlab.ui.inspection import (
     INSPECT_HINT,
     INSPECTION_CONTROLS,
+    all_blocks,
     change_lens_mode,
     change_pinned_token,
     import_jacobian_lens,
     inspect_layers,
     remember_inspect_target,
     render_attention,
+    render_block_range,
     render_kv_cache,
     reset_inspection,
+    show_block_range,
 )
 from chatlab.ui.models_page import (
     BADGE_REFRESH_SECONDS,
@@ -396,6 +399,11 @@ class Layers:
     import_lens_status: gr.Markdown
     pinned_concept: gr.Textbox
     pinned_token_id: gr.Textbox
+    block_row: gr.Row
+    first_block: gr.Slider
+    last_block: gr.Slider
+    all_blocks_button: gr.Button
+    block_bounds: gr.State
     inspect_button: gr.Button
     inspect_status: gr.Markdown
     lens_panel: gr.HTML
@@ -1446,6 +1454,15 @@ def _build_layers() -> Layers:
         # bridge class, not visible=False, which would take the box
         # out of the DOM where the page script has to find it.
         pinned_token_id = gr.Textbox(elem_id="jacobian-pin-id", elem_classes=[MENU_BRIDGE_CLASS])
+        # Shown once a readout says which blocks the lens was fitted at.
+        with gr.Row(visible=False, elem_classes=["inspector-control-row"]) as block_row:
+            first_block = gr.Slider(1, 2, value=1, step=1, label="First block", scale=2)
+            last_block = gr.Slider(
+                1, 2, value=2, step=1, label="Last block", scale=2,
+                info="Release a slider to redraw the readout over those blocks.",
+            )
+            all_blocks_button = gr.Button("All blocks", size="sm", scale=0, min_width=100)
+        block_bounds = gr.State(None)
     with gr.Row(elem_classes=["inspector-control-row"]):
         inspect_button = gr.Button(
             "Inspect layers", size="sm", scale=0, min_width=160,
@@ -1493,6 +1510,11 @@ def _build_layers() -> Layers:
         import_lens_status=import_lens_status,
         pinned_concept=pinned_concept,
         pinned_token_id=pinned_token_id,
+        block_row=block_row,
+        first_block=first_block,
+        last_block=last_block,
+        all_blocks_button=all_blocks_button,
+        block_bounds=block_bounds,
         inspect_button=inspect_button,
         inspect_status=inspect_status,
         lens_panel=lens_panel,
@@ -1964,8 +1986,22 @@ def wire_inspector(page: ChatPage, states: SharedState) -> None:
             page.layers.pinned_concept,
             page.layers.inspection_session,
             page.layers.pinned_token_id,
+            page.layers.first_block,
+            page.layers.last_block,
+            page.layers.block_bounds,
         ],
         [page.layers.lens_panel, page.layers.attention_panel, page.layers.attention_layer, states.insight, page.layers.inspect_status],
+    )
+    block_range = [page.layers.first_block, page.layers.last_block, page.layers.block_bounds]
+    states.insight.change(
+        show_block_range, [states.insight, *block_range],
+        [page.layers.block_row, *block_range], **QUIET_TICK,
+    )
+    for slider in (page.layers.first_block, page.layers.last_block):
+        slider.release(render_block_range, [states.insight, *block_range], page.layers.lens_panel)
+    page.layers.all_blocks_button.click(
+        all_blocks, [states.insight, page.layers.block_bounds],
+        [page.layers.first_block, page.layers.last_block, page.layers.lens_panel],
     )
     page.layers.attention_layer.release(
         render_attention, [states.insight, page.layers.attention_layer], page.layers.attention_panel
