@@ -7,6 +7,7 @@ the app stylesheet, so light and dark themes are each stepped deliberately.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import math
@@ -716,9 +717,20 @@ def jacobian_lens_chart(insight: dict, first=None, last=None) -> str:
 
 
 def _readout_key(insight: dict) -> str:
-    """Names one readout, the same under any block range; see JACOBIAN_JS."""
+    """Names one readout, the same under any block range; see JACOBIAN_JS.
+
+    The inspected sequence is part of the name, so another prompt read at the
+    same position, through the same lens and pin, does not inherit the ticks.
+    """
     data = insight.get("slice") or {}
-    return f"{insight.get('import_id', '')}:{insight.get('index', '')}:{data.get('start', '')}:{insight.get('pinned_id', '')}"
+    target = insight.get("saved_target") or {}
+    sequence = hashlib.sha1(
+        json.dumps([token.get("token_id") for token in data.get("tokens") or []]).encode()
+    ).hexdigest()[:12]
+    return (
+        f"{insight.get('import_id', '')}:{insight.get('index', '')}:{data.get('start', '')}:"
+        f"{insight.get('pinned_id', '')}:{target.get('strip', '')}:{target.get('generation', '')}:{sequence}"
+    )
 
 
 def _jacobian_precision_note(insight: dict) -> str:

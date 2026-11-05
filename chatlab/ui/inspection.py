@@ -366,7 +366,8 @@ def inspect_layers(
     """Run the logit lens and attention readout for the clicked token.
 
     A Jacobian readout is drawn over the block range the reader chose for
-    the one before it; see :func:`chosen_blocks`.
+    the one before it, clamped to its own fitted blocks the same way the
+    sliders are; see :func:`carried_blocks`.
 
     The model's input is rebuilt from the prompt ids published with the
     response and the token ids in the response metrics, so the pass sees
@@ -546,7 +547,9 @@ def inspect_layers(
         from chatlab.experiment_runs import SESSION_ID
         insight["saved_session"] = SESSION_ID
         frame = (
-            render_lens(insight, *chosen_blocks(first_block, last_block, block_bounds)),
+            render_lens(insight, *chosen_blocks(
+                *carried_blocks(insight, first_block, last_block, block_bounds), fitted_blocks(insight),
+            )),
             render_attention(insight, layer),
             gr.update(maximum=max(layer_count, 1), value=layer),
             insight,
@@ -659,6 +662,25 @@ def chosen_blocks(first, last, bounds: tuple[int, int] | None) -> tuple[int | No
     return first, last
 
 
+def carried_blocks(insight: dict | None, first, last, bounds) -> tuple[int | None, int | None]:
+    """The chosen block range clamped to a new Jacobian readout's fitted blocks.
+
+    Open ends take the fitted ends. A carried range that no longer covers a
+    fitted block, or that clamps to first after last, falls back to every
+    fitted block. Answers ``(None, None)`` for a readout with no fitted blocks.
+    """
+    fitted = fitted_blocks(insight)
+    if fitted is None:
+        return None, None
+    low, high = fitted
+    chosen_first, chosen_last = chosen_blocks(first, last, bounds)
+    first = low if chosen_first is None else min(max(chosen_first, low), high)
+    last = high if chosen_last is None else min(max(chosen_last, low), high)
+    if first > last or not any(first <= row["layer"] + 1 <= last for row in insight["layers"]):
+        return low, high
+    return first, last
+
+
 def show_block_range(insight: dict | None, first, last, bounds):
     """Fit the block sliders to a new Jacobian readout, keeping a narrowed range.
 
@@ -669,9 +691,7 @@ def show_block_range(insight: dict | None, first, last, bounds):
     if fitted is None:
         return gr.skip(), gr.skip(), gr.skip(), gr.skip()
     low, high = fitted
-    chosen_first, chosen_last = chosen_blocks(first, last, bounds)
-    first = low if chosen_first is None else min(max(chosen_first, low), high)
-    last = high if chosen_last is None else min(max(chosen_last, low), high)
+    first, last = carried_blocks(insight, first, last, bounds)
     if high <= low:
         return gr.update(visible=False), gr.skip(), gr.skip(), fitted
     return (

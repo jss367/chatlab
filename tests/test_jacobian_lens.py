@@ -424,6 +424,55 @@ class JacobianLensTests(unittest.TestCase):
         self.assertEqual((first, last), (1, 3))
         self.assertIn("across blocks 1–3", rendered)
 
+    def test_readout_key_names_the_sequence_and_survives_a_block_range_redraw(self):
+        def key(rendered):
+            return rendered.split('data-key="')[1].split('"')[0]
+
+        result = self.inspect(3, pinned_text="the")
+        result["saved_target"] = {"generation": 7, "strip": "prompt", "index": 3}
+        whole = key(charts.jacobian_lens_chart(result))
+        self.assertEqual(key(charts.jacobian_lens_chart(result, 3, 3)), whole)
+        # Another prompt read at the same position, window, lens and pin.
+        other = json.loads(json.dumps(result))
+        other["slice"]["tokens"][0]["token_id"] += 1
+        self.assertNotEqual(key(charts.jacobian_lens_chart(other)), whole)
+        later = dict(result, saved_target={"generation": 8, "strip": "prompt", "index": 3})
+        self.assertNotEqual(key(charts.jacobian_lens_chart(later)), whole)
+
+    def test_carried_range_outside_the_fitted_blocks_is_clamped_before_the_first_render(self):
+        from chatlab.ui import inspection, runtime
+
+        imported = self.import_lens()
+        args = (
+            {"generation": 7, "strip": "prompt", "index": 1},
+            (7, [{"token_id": token} for token in self.ids[2:]]),
+            (7, [{"token_id": token} for token in self.ids[:2]]),
+            (7, self.ids[:2], self.manager.load_id), 0,
+        )
+
+        def request(first, last, bounds):
+            return list(inspection.inspect_layers(
+                *args, lens_mode="Jacobian", imported_lens=imported,
+                first_block=first, last_block=last, block_bounds=bounds,
+            ))[-1]
+
+        with mock.patch.object(runtime, "MANAGER", self.manager), mock.patch.object(
+            inspection, "current_strip_generation", return_value=7,
+        ):
+            # Narrowed to blocks 5-6 under a wider lens; this one is fitted at 1 and 3.
+            rendered, _attention, _layer, insight, _status = request(5, 6, (1, 10))
+            self.assertIn("across block 3", rendered)
+            self.assertNotIn("Widen the block range", rendered)
+            _row, first, last, _bounds = inspection.show_block_range(insight, 5, 6, (1, 10))
+            self.assertEqual((first["value"], last["value"]), (3, 3))
+            # A carried range between fitted blocks falls back to all of them.
+            rendered, _attention, _layer, insight, _status = request(2, 2, (1, 10))
+            self.assertIn("across blocks 1–3", rendered)
+            _row, first, last, _bounds = inspection.show_block_range(insight, 2, 2, (1, 10))
+            self.assertEqual((first["value"], last["value"]), (1, 3))
+            self.assertEqual(rendered, request(None, None, None)[0])
+            self.assertIsNone(self.manager.occupant)
+
     def test_imported_lens_is_remembered_and_recalled_after_a_reload(self):
         from chatlab.ui import inspection, runtime
 
