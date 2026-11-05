@@ -785,7 +785,7 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
     finally:
         runtime.MANAGER.release_generation()
     status = (
-        f"Imported for {code_span(str(imported['model_id']))}: "
+        f"Imported {'an' if imported['kind'].startswith('R') else 'a'} {imported['kind']} for {code_span(str(imported['model_id']))}: "
         f"{imported['layers']} fitted layers, {imported['n_prompts']:,} fitting prompts."
     )
     # Copied only once the file has passed every check, so a rejected upload

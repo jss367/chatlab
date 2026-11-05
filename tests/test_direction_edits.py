@@ -282,7 +282,7 @@ class LensAccessorTests(LensFixture):
         ids = self.manager.tokenizer.encode(PASSAGE)
         targets = [ids[2], [ids[3], ids[4]]]
         with self.service.open_session() as session:
-            self.assertEqual(session.jacobian_lens(), {"name": "lens.pt", "n_prompts": 10, "layers": [1, 2, 3]})
+            self.assertEqual(session.jacobian_lens(), {"name": "lens.pt", "kind": "J-Lens", "n_prompts": 10, "layers": [1, 2, 3]})
             got = session.lens_log_probs(ids, targets, [1, 3], [0, 4, 6])
         np.testing.assert_allclose(got, self.expected_log_probs(ids, targets, [1, 3], [0, 4, 6]), atol=1e-5)
         self.assertEqual(hooks_left(self.manager), [])

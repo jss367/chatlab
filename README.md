@@ -49,7 +49,7 @@ drove.
 - Branching a response from any token into one of the alternatives the model considered, or into text you type yourself
 - Forking the conversation so the same transcript can be taken in several directions, and starting new ones beside it
 - A logit lens showing what every layer would have predicted for a token, and where it was decided
-- An optional Jacobian lens reading concepts after a token as a layer × position grid, with lenses fetched from the Hub or imported from disk, click-to-pin tokens, and rank shading
+- An optional Jacobian lens reading concepts after a token as a layer × position grid, with lenses fetched from the Hub or imported from disk, click-to-pin tokens, and rank shading. It reads J-Lens, R-Lens and J++ Lens files
 - An attention view showing which earlier tokens the model looked at when predicting it
 - Attention across the reply: one pass reads every head's attention behind every reply token, then plays it back token by token with the attention sink hidden or shown, a per-position histogram, and how much went to the user message, the system prompt, earlier turns, the template, a passage you mark, the earlier reply and the last 16 tokens. Heads can be chosen by layer or one at a time, or ranked by how much they read a region
 - A key-value cache view laying out each layer's cached keys and values per head and position: key norms, value norms, and key similarity to the query
@@ -432,7 +432,11 @@ outside ChatLab and export with `lens.save("lens.pt")`. ChatLab accepts that
 saved artifact directly, up to 8 GiB; a resumable fitting checkpoint is a
 different format. It expects `J`, `d_model`, `source_layers`, and
 `n_prompts`, and checks a recorded `model_id` (or `provenance["model_id"]`,
-as Neuronpedia's `fit_lens.py` writes it) against the fitted model ID. Matrices are mapped into CPU memory and the transport runs
+as Neuronpedia's `fit_lens.py` writes it) against the fitted model ID. A
+lens saved by jpp_lens's `BaseLens.save` is read too: its matrices are under
+`parameters["jacobians"]`, and its `config` gives `d_model`,
+`num_prompts_trained_on` and the fitted model as `hf_model_name`, which is
+checked the same way. A logit lens saved there is refused. Matrices are mapped into CPU memory and the transport runs
 there one block at a time, so the lens never takes accelerator memory; only
 the model's own norm and head run where its weights are.
 
@@ -444,6 +448,33 @@ used during fitting. If an artifact also includes `model_id` or
 Transformers load, its resolved revision. Each inspection verifies that the
 final block readout reproduces the model's actual output before displaying
 results.
+
+#### J-Lens, R-Lens and J++ Lens
+
+Three kinds of lens are read. They differ only in how their matrices were
+fitted, and each is one matrix per block applied the same way. The J-Lens
+averages the plain Jacobian. The R-Lens computes each Jacobian through a
+layer-wise relevance propagation backward pass, which keeps noise from
+compounding through the norms and gated MLPs. The
+[J++ Lens](https://github.com/safety-research/jpp_lens) (Ayonrinde and
+Lindsey, 2026) also clusters the activations at each block, fits one
+Jacobian per cluster, and weighs them into one. Its readout leaves out every
+token with no letter or digit (whitespace, punctuation, and head rows past
+the tokenizer), so ChatLab does the same for a J++ lens: those tokens are
+never candidates and are not counted in a pinned token's rank, though a
+pinned punctuation token still gets one. The note under the readout names
+the lens kind and says when tokens were left out. Extensions reading a lens
+through `session.lens_log_probs` get the whole vocabulary whatever the kind.
+
+The kind comes from the file. Neuronpedia's conversions name the J++ method
+in their provenance, and the J++ lenses released with the paper keep a
+stage-two fitting key in their config; an LRP estimator recorded in either
+place marks an R-Lens. A J++ lens fitted with the current jpp_lens code
+records neither mark and is read as an R-Lens, unfiltered. J++ lenses for
+small models such as Qwen3.5-0.8B, Qwen3.5-2B and Qwen3-4B are under
+`*/jpp/` in `neuronpedia/jacobian-lens`; the paper's lenses for 9B and
+larger models are in `koayon/jpp-lenses`, and R-Lenses in
+`camilablank/workspace-lenses`.
 
 ### Models
 
