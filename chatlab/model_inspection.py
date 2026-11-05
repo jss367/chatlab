@@ -1252,6 +1252,10 @@ class InspectionMixin:
                 for cell, rank, score in zip(output, *logits.pinned(pinned_id)):
                     cell["pinned_rank"] = int(rank)
                     cell["pinned_score"] = float(score)
+            for row in cells:
+                for candidates in row["top"]:
+                    for token in candidates:
+                        decode(token)
             tokens = [
                 {
                     "index": position, "token_id": ids[position], "text": decode(ids[position]),
@@ -1274,6 +1278,8 @@ class InspectionMixin:
                 "slice": {
                     "start": start, "total": len(ids), "tokens": tokens,
                     "layers": cells, "output": output,
+                    # Every candidate's text, for the concept table's tokens.
+                    "texts": dict(decoded),
                 },
             })
 

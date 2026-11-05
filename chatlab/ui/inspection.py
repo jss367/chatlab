@@ -117,6 +117,103 @@ JACOBIAN_JS = r"""
     });
   };
   new MutationObserver(reveal).observe(document.body, {childList: true, subtree: true});
+  // Ticked concepts, in the order they were ticked, which picks each one's
+  // color. They outlive a change of block range, which redraws the same
+  // readout under the same key, and are cleared by any other readout.
+  const PALETTE = 6;
+  const ticked = {key: null, order: []};
+  const paint = figure => {
+    figure.querySelectorAll('.jl-pick').forEach(box => {
+      const slot = ticked.order.indexOf(box.value);
+      box.checked = slot >= 0;
+      const row = box.closest('tr');
+      if (row) { if (slot >= 0) row.dataset.hl = slot % PALETTE; else delete row.dataset.hl; }
+    });
+    figure.querySelectorAll('.jl-word').forEach(word => {
+      const here = (word.dataset.concepts || '').split(' ');
+      const slot = ticked.order.findIndex(token => here.includes(token));
+      if (slot >= 0) word.dataset.hl = slot % PALETTE; else delete word.dataset.hl;
+    });
+  };
+  const adopt = () => {
+    document.querySelectorAll('#jacobian-lens:not([data-painted])').forEach(figure => {
+      figure.dataset.painted = '1';
+      if (figure.dataset.key !== ticked.key) { ticked.key = figure.dataset.key; ticked.order = []; }
+      paint(figure);
+    });
+  };
+  new MutationObserver(adopt).observe(document.body, {childList: true, subtree: true});
+  document.addEventListener('change', event => {
+    const box = event.target.closest && event.target.closest('#jacobian-lens .jl-pick');
+    if (!box) return;
+    ticked.order = ticked.order.filter(token => token !== box.value);
+    if (box.checked) ticked.order.push(box.value);
+    paint(box.closest('#jacobian-lens'));
+  });
+  const shown = text => {
+    const visible = text.replace(/\n/g, '\u21b5').replace(/\t/g, '\u21e5');
+    return visible.trim() === '' && visible !== '' ? visible.replace(/ /g, '\u2420') : visible;
+  };
+  const element = (tag, className, text) => {
+    const made = document.createElement(tag);
+    if (className) made.className = className;
+    if (text !== undefined) made.textContent = text;
+    return made;
+  };
+  // A click on a position lists its top token at every block in range,
+  // highest block first, each with its count by block and a box to tick it.
+  document.addEventListener('click', event => {
+    const word = event.target.closest('#jacobian-lens .jl-word');
+    const close = event.target.closest('#jacobian-lens .jl-detail-close');
+    if (!word && !close) return;
+    const holder = (word || close).closest('.jl-concepts');
+    const detail = holder.querySelector('.jl-detail');
+    holder.querySelectorAll('.jl-word.jl-open').forEach(open => open.classList.remove('jl-open'));
+    if (close || (!detail.hidden && detail.dataset.pos === word.dataset.pos)) {
+      detail.hidden = true;
+      return;
+    }
+    let data;
+    try { data = JSON.parse(holder.dataset.readout); } catch (error) { return; }
+    const position = Number(word.dataset.pos);
+    detail.replaceChildren();
+    const head = element('div', 'jl-detail-head');
+    head.append(element('span', '', `Position ${data.positions[position]} \u00b7 ${shown(word.textContent)}`));
+    const button = element('button', 'jl-detail-close', '\u00d7');
+    button.type = 'button';
+    button.setAttribute('aria-label', 'Close');
+    head.append(button);
+    detail.append(head);
+    const table = element('table', 'viz-table');
+    const top = element('tr');
+    ['Block', '', 'Top token', 'Count by block'].forEach(name => top.append(element('th', '', name)));
+    table.appendChild(element('thead')).append(top);
+    const body = table.appendChild(element('tbody'));
+    for (let block = data.blocks.length - 1; block >= 0; block -= 1) {
+      const token = data.top[block][position];
+      if (token === null || token === undefined) continue;
+      const row = body.appendChild(element('tr'));
+      row.append(element('td', 'jl-count', String(data.blocks[block])));
+      const box = element('input', 'jl-pick');
+      box.type = 'checkbox';
+      box.value = String(token);
+      row.appendChild(element('td')).append(box);
+      row.appendChild(element('td')).append(element('code', '', shown(data.texts[token] || '')));
+      const strip = element('span', 'jl-strip');
+      (data.counts[token] || []).forEach((count, column, counts) => {
+        const mark = element('i');
+        mark.style.setProperty('--jl-level', (count / (Math.max(...counts) || 1)).toFixed(2));
+        mark.title = `Block ${data.blocks[column]}: ${count} of ${data.positions.length} positions`;
+        strip.append(mark);
+      });
+      row.appendChild(element('td')).append(strip);
+    }
+    detail.append(table);
+    detail.dataset.pos = word.dataset.pos;
+    detail.hidden = false;
+    word.classList.add('jl-open');
+    paint(holder.closest('#jacobian-lens'));
+  });
 }
 """
 
@@ -134,6 +231,28 @@ JACOBIAN_CSS = """
 .jl-grid .jl-selected { box-shadow: inset 0 -2px 0 var(--viz-line); }
 .jl-grid thead .jl-selected { color: var(--viz-ink); font-weight: 600; }
 .jl-output th, .jl-output td { border-top: 2px solid var(--viz-axis); }
+.jl-text { max-height: 260px; overflow: auto; margin: 0.3rem 0; padding: 0.4rem 0.5rem; border: 1px solid var(--viz-grid); border-radius: 6px; font-size: 0.82rem; line-height: 1.85; color: var(--viz-ink); }
+.jl-word { cursor: pointer; white-space: pre-wrap; border-radius: 3px; padding: 0.05rem 0; }
+.jl-word:hover, .jl-word.jl-open { outline: 1px solid var(--viz-line); }
+.jl-word.jl-selected { box-shadow: inset 0 -2px 0 var(--viz-line); }
+#jacobian-lens [data-hl="0"] { --jl-hue: #e8a317; }
+#jacobian-lens [data-hl="1"] { --jl-hue: #2f8fd8; }
+#jacobian-lens [data-hl="2"] { --jl-hue: #2fae6b; }
+#jacobian-lens [data-hl="3"] { --jl-hue: #8b6be0; }
+#jacobian-lens [data-hl="4"] { --jl-hue: #e05a7a; }
+#jacobian-lens [data-hl="5"] { --jl-hue: #1fa6a6; }
+.jl-word[data-hl] { background: color-mix(in srgb, var(--jl-hue) 38%, transparent); }
+#jacobian-lens tr[data-hl] td { background: color-mix(in srgb, var(--jl-hue) 16%, transparent); }
+#jacobian-lens tr[data-hl] td:first-child { box-shadow: inset 3px 0 0 var(--jl-hue); }
+.jl-concept-wrap { max-height: 420px; overflow: auto; margin: 0.3rem 0; }
+.jl-concept-table td, .jl-detail td { padding-top: 0.1rem; padding-bottom: 0.1rem; }
+.jl-concept-table code, .jl-detail code { background: none; padding: 0; }
+.jl-count { color: var(--viz-muted); text-align: right; font-variant-numeric: tabular-nums; }
+.jl-strip { display: inline-flex; width: 160px; max-width: 100%; height: 0.85rem; vertical-align: middle; border: 1px solid var(--viz-grid); border-radius: 2px; overflow: hidden; }
+.jl-strip i { flex: 1 1 0; min-width: 1px; background: color-mix(in srgb, var(--viz-line) calc(var(--jl-level, 0) * 85%), transparent); }
+.jl-detail { margin: 0.3rem 0; padding: 0.3rem 0.5rem; border: 1px solid var(--viz-line); border-radius: 6px; max-height: 360px; overflow: auto; }
+.jl-detail-head { display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; font-weight: 600; color: var(--viz-ink); }
+.jl-detail-close { background: none; border: none; cursor: pointer; font-size: 1rem; color: var(--viz-muted); }
 """
 
 
@@ -240,8 +359,15 @@ def inspect_layers(
     pinned_text: str = "",
     inspection_session: str | None = None,
     pinned_token_id: str = "",
+    first_block=None,
+    last_block=None,
+    block_bounds: tuple[int, int] | None = None,
 ):
     """Run the logit lens and attention readout for the clicked token.
+
+    A Jacobian readout is drawn over the block range the reader chose for
+    the one before it, clamped to its own fitted blocks the same way the
+    sliders are; see :func:`carried_blocks`.
 
     The model's input is rebuilt from the prompt ids published with the
     response and the token ids in the response metrics, so the pass sees
@@ -421,7 +547,9 @@ def inspect_layers(
         from chatlab.experiment_runs import SESSION_ID
         insight["saved_session"] = SESSION_ID
         frame = (
-            render_lens(insight),
+            render_lens(insight, *chosen_blocks(
+                *carried_blocks(insight, first_block, last_block, block_bounds), fitted_blocks(insight),
+            )),
             render_attention(insight, layer),
             gr.update(maximum=max(layer_count, 1), value=layer),
             insight,
@@ -505,10 +633,98 @@ def render_kv_cache(insight: dict | None, layer, metric):
     )
 
 
-def render_lens(insight: dict) -> str:
+def render_lens(insight: dict, first=None, last=None) -> str:
     if insight.get("kind") == "jacobian":
-        return charts.jacobian_lens_chart(insight)
+        return charts.jacobian_lens_chart(insight, first, last)
     return charts.logit_lens_chart(insight)
+
+
+def fitted_blocks(insight: dict | None) -> tuple[int, int] | None:
+    """The first and last fitted block a Jacobian readout covers, numbered from 1."""
+    if not insight or insight.get("kind") != "jacobian" or not insight.get("layers"):
+        return None
+    return insight["layers"][0]["layer"] + 1, insight["layers"][-1]["layer"] + 1
+
+
+def chosen_blocks(first, last, bounds: tuple[int, int] | None) -> tuple[int | None, int | None]:
+    """The block range to draw, with ``None`` at an end the reader left open.
+
+    ``bounds`` are the fitted blocks of the readout the sliders were last set
+    for. A slider left at its end stays open, so the next readout, or one
+    through a lens fitted at other blocks, is shown in full at that end; a
+    range the reader narrowed carries over to the next token they inspect.
+    """
+    if not bounds:
+        return None, None
+    low, high = bounds
+    first = None if first is None or int(first) <= low else int(first)
+    last = None if last is None or int(last) >= high else int(last)
+    return first, last
+
+
+def carried_blocks(insight: dict | None, first, last, bounds) -> tuple[int | None, int | None]:
+    """The chosen block range clamped to a new Jacobian readout's fitted blocks.
+
+    Open ends take the fitted ends. A carried range that no longer covers a
+    fitted block, or that clamps to first after last, falls back to every
+    fitted block. Answers ``(None, None)`` for a readout with no fitted blocks.
+    """
+    fitted = fitted_blocks(insight)
+    if fitted is None:
+        return None, None
+    low, high = fitted
+    chosen_first, chosen_last = chosen_blocks(first, last, bounds)
+    first = low if chosen_first is None else min(max(chosen_first, low), high)
+    last = high if chosen_last is None else min(max(chosen_last, low), high)
+    if first > last or not any(first <= row["layer"] + 1 <= last for row in insight["layers"]):
+        return low, high
+    return first, last
+
+
+def show_block_range(insight: dict | None, first, last, bounds):
+    """Fit the block sliders to a new Jacobian readout, keeping a narrowed range.
+
+    Answers the slider row, both sliders and the bounds they now describe.
+    A lens fitted at a single block has no range to choose, so the row hides
+    and both sliders sit on that block. Both ends are then open, so the next
+    readout shows every block it was fitted at.
+    """
+    fitted = fitted_blocks(insight)
+    if fitted is None:
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip()
+    low, high = fitted
+    first, last = carried_blocks(insight, first, last, bounds)
+    if high <= low:
+        return (
+            gr.update(visible=False),
+            gr.update(minimum=low, maximum=low, value=low),
+            gr.update(minimum=low, maximum=low, value=low),
+            fitted,
+        )
+    return (
+        gr.update(visible=True),
+        gr.update(minimum=low, maximum=high, value=first),
+        gr.update(minimum=low, maximum=high, value=last),
+        fitted,
+    )
+
+
+def render_block_range(insight: dict | None, first, last, bounds):
+    """Redraw the Jacobian readout over the chosen blocks, without a new pass."""
+    if fitted_blocks(insight) is None:
+        return gr.skip()
+    controls = insight.get("inspection_controls")
+    if controls and not INSPECTION_CONTROLS.current(controls["session"], controls["revision"]):
+        return gr.skip()
+    return render_lens(insight, *chosen_blocks(first, last, bounds))
+
+
+def all_blocks(insight: dict | None, bounds):
+    """Put both sliders back at the ends and redraw every fitted block."""
+    if not bounds:
+        return gr.skip(), gr.skip(), gr.skip()
+    low, high = bounds
+    return low, high, render_block_range(insight, low, high, bounds)
 
 
 def recall_lens() -> tuple[str | None, str | None]:

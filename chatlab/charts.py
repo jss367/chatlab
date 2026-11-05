@@ -7,6 +7,7 @@ the app stylesheet, so light and dark themes are each stepped deliberately.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import math
@@ -491,13 +492,162 @@ def _jacobian_slice(insight: dict) -> str:
     )
 
 
-def jacobian_lens_chart(insight: dict) -> str:
-    """Ranked concept readouts after a token; scores are never probabilities."""
-    layers = insight.get("layers") or []
-    if not layers:
+# Concepts the table lists, most frequent first.
+CONCEPT_ROWS = 40
+
+
+def jacobian_blocks(insight: dict, first=None, last=None) -> dict:
+    """``insight`` with only the fitted blocks from ``first`` to ``last``.
+
+    Blocks are numbered from 1, as the panel shows them; ``None`` leaves that
+    end open, and a reversed pair is read the right way round. The pinned
+    rank line, the per-block table, the grid and the concept table all draw
+    from what is left, so one range governs the whole readout.
+    """
+    if first is None and last is None:
+        return insight
+    low = 1 if first is None else int(first)
+    high = 10**9 if last is None else int(last)
+    low, high = min(low, high), max(low, high)
+
+    def inside(row):
+        return low <= row["layer"] + 1 <= high
+
+    trimmed = dict(insight)
+    trimmed["layers"] = [row for row in insight.get("layers") or [] if inside(row)]
+    if insight.get("slice"):
+        trimmed["slice"] = dict(insight["slice"])
+        trimmed["slice"]["layers"] = [row for row in insight["slice"].get("layers") or [] if inside(row)]
+    trimmed["block_range"] = (low, high)
+    return trimmed
+
+
+def _concept_counts(rows: list, positions: int) -> tuple[dict, dict, list]:
+    """How often each token is a top candidate, overall, per block and per position.
+
+    Answers ``(totals, by_block, at)``: ``totals`` maps a token ID to the
+    number of block and position cells that list it, ``by_block`` maps it to
+    one such count per block in ``rows``, and ``at`` holds, per position, the
+    set of token IDs listed there at any of those blocks.
+    """
+    totals: dict = {}
+    by_block: dict = {}
+    at = [set() for _ in range(positions)]
+    for column, row in enumerate(rows):
+        for position, candidates in enumerate(row.get("top") or []):
+            for token in candidates:
+                totals[token] = totals.get(token, 0) + 1
+                by_block.setdefault(token, [0] * len(rows))[column] += 1
+                if position < positions:
+                    at[position].add(token)
+    return totals, by_block, at
+
+
+def _strip(counts: list, rows: list, positions: int) -> str:
+    """One shaded mark per block, darker where the token is listed at more positions."""
+    peak = max(counts) or 1
+    marks = "".join(
+        f'<i style="--jl-level:{count / peak:.2f}" title="Block {row["layer"] + 1}: '
+        f'{count:,} of {positions:,} positions"></i>'
+        for count, row in zip(counts, rows)
+    )
+    return f'<span class="jl-strip">{marks}</span>'
+
+
+def _jacobian_concepts(insight: dict) -> str:
+    """The tokens the lens reads most often across the slice, and where.
+
+    Each fitted block and position contributes its top candidates, so a
+    token's count is the number of cells that list it. Ticking a token
+    shades the positions where it is listed in the text above the table
+    (see JACOBIAN_JS); clicking a position there lists that position's top
+    token at every block. Everything here is read from the inspection the
+    panel already holds, so changing the block range needs no new pass.
+    """
+    data = insight.get("slice") or {}
+    tokens = data.get("tokens") or []
+    rows = [row for row in data.get("layers") or [] if row.get("top")]
+    if not tokens or not rows:
+        return ""
+    known = data.get("texts") or {}
+
+    def text_of(token) -> str:
+        # A readout read back from JSON keys its texts by string.
+        return known.get(token, known.get(str(token), ""))
+
+    totals, by_block, at = _concept_counts(rows, len(tokens))
+    depth = max(len(candidates) for row in rows for candidates in row["top"])
+    listed = sorted(totals, key=lambda token: (-totals[token], text_of(token)))[:CONCEPT_ROWS]
+    shown = set(listed)
+
+    def label(token) -> str:
+        return _token_label({"text": text_of(token), "token_id": token})
+
+    table = "".join(
+        f'<tr data-concept="{int(token)}"><td><input type="checkbox" class="jl-pick" '
+        f'value="{int(token)}" aria-label="Highlight {label(token)}"></td>'
+        f'<td><code>{label(token)}</code></td><td class="jl-count">{totals[token]:,}</td>'
+        f'<td>{_strip(by_block[token], rows, len(tokens))}</td></tr>'
+        for token in listed
+    )
+    # The top token at each block and position, which a position's detail
+    # lists and can tick, so the text marks where each of them is read too.
+    firsts = {candidates[0] for row in rows for candidates in row["top"][:len(tokens)] if candidates}
+    selected = insight.get("index")
+    words = []
+    for position, token in enumerate(tokens):
+        text = token.get("text") or ""
+        concepts = " ".join(str(int(item)) for item in sorted(at[position] & (shown | firsts)))
+        marked = " jl-selected" if token["index"] == selected else ""
+        shown_text = html.escape(text.replace("\n", "↵")) if text else _token_label(token)
+        words.append(
+            f'<span class="jl-word{marked}" data-pos="{position}" data-concepts="{concepts}" '
+            f'title="Position {token["index"] + 1}">{shown_text}</span>'
+            + ("<br>" if "\n" in text else "")
+        )
+    # What a click on a position needs: its top token at every block, and
+    # each such token's count at every block for the strip beside it.
+    readout = {
+        "blocks": [row["layer"] + 1 for row in rows],
+        "positions": [token["index"] + 1 for token in tokens],
+        "top": [[candidates[0] if candidates else None for candidates in row["top"]] for row in rows],
+        "texts": {str(token): text_of(token) for token in firsts},
+        "counts": {str(token): by_block[token] for token in firsts},
+    }
+    first, last = readout["blocks"][0], readout["blocks"][-1]
+    blocks = f"block {first}" if first == last else f"blocks {first}–{last}"
+    return (
+        f'<div class="jl-concepts" data-readout="{html.escape(json.dumps(readout), quote=True)}">'
+        f'<div class="viz-note">Concepts the lens reads across {blocks} and every position below. '
+        f"A token's count is the number of block and position cells that list it among their "
+        f"top {depth}. Tick tokens to highlight where they "
+        "are read; click a position to list its top token at each block.</div>"
+        f'<div class="jl-text">{"".join(words)}</div>'
+        '<div class="jl-detail" hidden></div>'
+        '<div class="jl-concept-wrap"><table class="viz-table jl-concept-table">'
+        '<thead><tr><th></th><th>Token</th><th>Count</th><th>Count by block</th></tr></thead>'
+        f"<tbody>{table}</tbody></table></div></div>"
+    )
+
+
+def jacobian_lens_chart(insight: dict, first=None, last=None) -> str:
+    """Ranked concept readouts after a token; scores are never probabilities.
+
+    ``first`` and ``last`` limit the readout to those fitted blocks; see
+    :func:`jacobian_blocks`.
+    """
+    if not insight.get("layers"):
         return EMPTY_JACOBIAN
+    insight = jacobian_blocks(insight, first, last)
+    layers = insight["layers"]
+    if not layers:
+        low, high = insight["block_range"]
+        return (
+            '<div class="viz-empty">The lens has no fitted block between blocks '
+            f"{low:,} and {high:,}. Widen the block range.</div>"
+        )
     pinned = insight.get("pinned_text")
-    chart = _jacobian_slice(insight)
+    chart = _jacobian_concepts(insight) + _jacobian_slice(insight)
     if pinned is not None:
         first, last = layers[0]["layer"], layers[-1]["layer"]
         width = _VIEW_WIDTH - _LENS_PAD_LEFT - _PAD_RIGHT
@@ -550,7 +700,7 @@ def jacobian_lens_chart(insight: dict) -> str:
         rows.append(f'<tr><td>{row["layer"] + 1}</td><td>{candidates}</td>{tracked}</tr>')
     tracked_headers = "<th>Pinned rank</th><th>Pinned score</th>" if pinned is not None else ""
     return (
-        '<figure class="viz-root" id="jacobian-lens">'
+        f'<figure class="viz-root" id="jacobian-lens" data-key="{html.escape(_readout_key(insight), quote=True)}">'
         f'<figcaption class="viz-title">Jacobian lens after '
         f'<code>{html.escape(repr(insight.get("token_text", "")))}</code></figcaption>'
         '<div class="viz-note">Vocabulary readouts of the state after processing this token. '
@@ -563,6 +713,23 @@ def jacobian_lens_chart(insight: dict) -> str:
         f'<tbody>{"".join(rows)}</tbody></table></div>'
         f'<div class="viz-note">Lens: {html.escape(insight.get("lens_name", ""))} · '
         f'{insight.get("n_prompts", 0):,} fitting prompts.{_jacobian_precision_note(insight)}</div></figure>'
+    )
+
+
+def _readout_key(insight: dict) -> str:
+    """Names one readout, the same under any block range; see JACOBIAN_JS.
+
+    The inspected sequence is part of the name, so another prompt read at the
+    same position, through the same lens and pin, does not inherit the ticks.
+    """
+    data = insight.get("slice") or {}
+    target = insight.get("saved_target") or {}
+    sequence = hashlib.sha1(
+        json.dumps([token.get("token_id") for token in data.get("tokens") or []]).encode()
+    ).hexdigest()[:12]
+    return (
+        f"{insight.get('import_id', '')}:{insight.get('index', '')}:{data.get('start', '')}:"
+        f"{insight.get('pinned_id', '')}:{target.get('strip', '')}:{target.get('generation', '')}:{sequence}"
     )
 
 
