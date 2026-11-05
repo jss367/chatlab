@@ -56,12 +56,14 @@ tiktoken>=0.7
 # adapter targets and to read one feature's decoder row without loading
 # the whole set.
 safetensors>=0.8
-torch>=2.5
+# Below 2.15: the 8-bit and 4-bit Metal kernel revision kernels 0.17 resolves
+# has builds only through torch 2.14, so 2.15 fails the packaged smoke test.
+torch>=2.5,<2.15
 # Turns a pasted picture into a vision model's input. Transformers' image
 # processors run on it (their slow numpy versions are going away), and so do
 # the video processors a Qwen-VL processor loads beside its image one, which
 # refuse to be built without it. 0.20 is the release paired with torch 2.5.
-torchvision>=0.20
+torchvision>=0.20,<0.30
 # The download and load progress bars are tqdm classes that report to the
 # interface rather than the terminal.
 tqdm>=4.60
