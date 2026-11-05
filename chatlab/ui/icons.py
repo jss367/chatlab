@@ -77,6 +77,10 @@ ICONS: dict[str, str] = {
         '<circle cx="12" cy="12" r="10"/><path d="M22 12h-4"/><path d="M6 12H2"/>'
         '<path d="M12 6V2"/><path d="M12 22v-4"/>'
     ),
+    "circle-help": (
+        '<circle cx="12" cy="12" r="10"/>'
+        '<path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>'
+    ),
     "spell-check": '<path d="m6 16 6-12 6 12"/><path d="M8 12h8"/><path d="m16 20 2 2 4-4"/>',
     "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
     "paperclip": (

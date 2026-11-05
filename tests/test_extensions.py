@@ -817,7 +817,7 @@ class ExtensionSettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             # Background imports may add modules while the predicate runs.
             result = subprocess.run([sys.executable, '-c',
-                "from chatlab import app; import sys; demo=app.build_app(); assert not any(n.startswith(('chatlab.extensions.maze_experiments', 'chatlab.extensions.osguard', 'chatlab.extensions.os_harm', 'chatlab.extensions.hangman', 'chatlab.extensions.institutions')) for n in tuple(sys.modules)); demo.close()"],
+                "from chatlab import app; import sys; demo=app.build_app(); assert not any(n.startswith(('chatlab.extensions.maze_experiments', 'chatlab.extensions.osguard', 'chatlab.extensions.os_harm', 'chatlab.extensions.hangman', 'chatlab.extensions.twenty_questions', 'chatlab.extensions.institutions')) for n in tuple(sys.modules)); demo.close()"],
                 env=os.environ | {settings.SETTINGS_PATH_ENV: str(Path(temp)/'settings.json'), 'GRADIO_ANALYTICS_ENABLED':'False'},
                 capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)

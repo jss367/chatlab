@@ -83,6 +83,9 @@ COVERAGE = {
     "chatlab-maze-trials-1": (
         "saved/maze/trials-1-original.json",
         "test_saved_maze.SavedMazeRunTests.test_a_trial_run_keeps_its_stamp_and_the_trial_file_still_reads"),
+    "chatlab-twenty-questions-1": (
+        "saved/twenty_questions/played-probed-rechecked.json",
+        "test_saved_formats_twenty_questions.PlayedGameTests.test_resaved_by_todays_writer_it_reads_the_same"),
     "chatlab-probe-1": (
         "saved/probes/probe-era1-no-revision-below-chance.json",
         "test_saved_formats_probes.SavedProbeTests.test_resaving_with_todays_writer_keeps_the_facts"),
