@@ -220,6 +220,115 @@ class JacobianLensTests(unittest.TestCase):
         self.save()
         self.assertIn("import_id", self.import_lens())
 
+    def jpp_layout(self, **config):
+        """``self.data`` as safety-research/jpp_lens saves it."""
+        return {
+            "parameters": {"jacobians": self.data["J"]},
+            "source_layers": self.data["source_layers"],
+            "config": {
+                "hf_model_name": self.manager.model_id, "lens_type": "jacobian",
+                "d_model": 16, "num_prompts_trained_on": 64, "relative_end_transport_layer": -1,
+                "num_clusters": 0, "lrp_mode": "rlens",
+            } | config,
+        }
+
+    def test_the_jpp_lens_layout_reads_the_same_as_the_reference_layout(self):
+        pin = self.manager.tokenizer.decode([self.ids[3]])
+        reference = self.inspect(3, pinned_text=pin)
+        self.assertEqual(reference["lens_kind"], "J-Lens")
+        torch.save(self.jpp_layout(), self.path)
+        imported = self.import_lens()
+        self.assertEqual((imported["kind"], imported["n_prompts"], imported["layers"]), ("R-Lens", 64, 2))
+        result = self.inspect(3, imported, pinned_text=pin)
+        self.assertEqual(result["lens_kind"], "R-Lens")
+        self.assertFalse(result["filtered"])
+        self.assertEqual(result["layers"], reference["layers"])
+        self.assertEqual(result["slice"]["layers"], reference["slice"]["layers"])
+        self.assertEqual(self.manager.jacobian_lens_summary()["kind"], "R-Lens")
+
+    def test_the_jpp_lens_layout_is_checked_like_the_reference_one(self):
+        cases = [
+            {"hf_model_name": "other/model"}, {"d_model": 17},
+            {"num_prompts_trained_on": 0}, {"lens_type": "logit"},
+        ]
+        for change in cases:
+            with self.subTest(change=change):
+                torch.save(self.jpp_layout(**change), self.path)
+                with self.assertRaises(ValueError):
+                    self.import_lens()
+        data = self.jpp_layout()
+        data["parameters"] = {"jacobians": {}}
+        torch.save(data, self.path)
+        with self.assertRaisesRegex(ValueError, "nonempty"):
+            self.import_lens()
+
+    def test_the_lens_kind_comes_from_what_the_file_records(self):
+        relp = json.dumps({"estimator": "relp", "rules": {"ln_rule": True}})
+        cases = [
+            ({}, "J-Lens"),
+            ({"provenance": {"model_id": "m", "config_json": relp}}, "R-Lens"),
+            ({"provenance": {"config_json": json.dumps({"estimator": "standard"})}}, "J-Lens"),
+            ({"provenance": {"config_json": "not json"}}, "J-Lens"),
+            ({"provenance": {"method": "jpp", "lrp_mode": "rlens"}}, "J++ Lens"),
+            ({"provenance": {"source_config": {"lrp_mode": "rlens"}}}, "R-Lens"),
+            ({"config": {"lrp_mode": "none"}}, "J-Lens"),
+            ({"config": {"lrp_mode": "rlens"}}, "R-Lens"),
+            ({"config": {"lrp_mode": "rlens", "num_s2_fitting_prompts": 10}}, "J++ Lens"),
+            ({"config": {"lrp_mode": "none", "num_clusters": 8}}, "J++ Lens"),
+        ]
+        for data, kind in cases:
+            with self.subTest(data=data):
+                self.assertEqual(jacobian_lens.lens_kind(data), kind)
+
+    def test_a_jpp_lens_leaves_tokens_with_no_letter_or_digit_out_of_its_readout(self):
+        index = 3
+        captured = {}
+        handles = [
+            self.manager.model.model.layers[layer].register_forward_hook(
+                lambda _module, _inputs, output, layer=layer: captured.__setitem__(layer, output[0].detach().clone())
+            )
+            for layer in self.data["J"]
+        ]
+        with torch.no_grad():
+            self.manager.model(torch.tensor([self.ids]), use_cache=False)
+        for handle in handles:
+            handle.remove()
+        tokenizer = self.manager.tokenizer
+        excluded = jacobian_lens.non_semantic_mask(tokenizer, self.manager.model.config.vocab_size)
+        texts = tokenizer.batch_decode([[token] for token in range(len(tokenizer))])
+        self.assertEqual(excluded.tolist(), [not any(char.isalnum() for char in text) for text in texts])
+        self.assertFalse(excluded[tokenizer.convert_tokens_to_ids("<|endoftext|>")])
+        self.assertTrue(excluded.any() and not excluded.all())
+        # A pinned punctuation token still gets a rank among the tokens that are kept.
+        comma = tokenizer.encode(",")[0]
+        self.assertTrue(excluded[comma])
+        self.data["provenance"] = {"method": "jpp", "lrp_mode": "rlens"}
+        self.save()
+        for pin in (self.ids[index], comma):
+            with self.subTest(pin=tokenizer.decode([pin])):
+                result = self.inspect(index, pinned_id=pin)
+                self.assertEqual(result["lens_kind"], "J++ Lens")
+                self.assertTrue(result["filtered"])
+                for row, column in zip(result["layers"], result["slice"]["layers"]):
+                    with torch.no_grad():
+                        transported = captured[row["layer"]] @ self.data["J"][row["layer"]].T
+                        expected = self.manager.model.lm_head(self.manager.model.model.norm(transported))
+                    pinned = expected[:, pin].clone()
+                    expected[:, excluded] = float("-inf")
+                    self.assertEqual(
+                        [candidate["token_id"] for candidate in row["candidates"]],
+                        expected[index].topk(5).indices.tolist(),
+                    )
+                    self.assertAlmostEqual(row["score"], float(pinned[index]), places=5)
+                    self.assertEqual(row["rank"], int((expected[index] > pinned[index]).sum()) + 1)
+                    for position, cell in enumerate(column["cells"]):
+                        self.assertFalse(excluded[cell["token_id"]])
+                        self.assertEqual(cell["pinned_rank"], int((expected[position] > pinned[position]).sum()) + 1)
+                    self.assertFalse(any(excluded[token] for top in column["top"] for token in top))
+        rendered = charts.jacobian_lens_chart(result)
+        self.assertIn("J++ Lens", rendered)
+        self.assertIn("no letter or digit", rendered)
+
     def test_multitoken_pins_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "one vocabulary token"):
             self.inspect(1, pinned_text="a whole sentence")

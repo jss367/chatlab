@@ -295,8 +295,9 @@ class GenerationSession:
     def jacobian_lens(self):
         """The Jacobian lens imported for the pinned load, or ``None``.
 
-        A dict with its ``name``, the ``n_prompts`` it was fitted on and the
-        ``layers`` it has a matrix for, the only blocks it can read. When none
+        A dict with its ``name``, its ``kind`` (``"J-Lens"``, ``"R-Lens"`` or
+        ``"J++ Lens"``), the ``n_prompts`` it was fitted on and the ``layers``
+        it has a matrix for, the only blocks it can read. When none
         is imported, the lens last imported for this model on the Chat page
         is brought back first, as Chat does. Call it outside
         :meth:`transformers_model`.

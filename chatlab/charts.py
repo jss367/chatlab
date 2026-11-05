@@ -712,7 +712,18 @@ def jacobian_lens_chart(insight: dict, first=None, last=None) -> str:
         f'<thead><tr><th>Decoder block</th><th>Top tokens · score</th>{tracked_headers}</tr></thead>'
         f'<tbody>{"".join(rows)}</tbody></table></div>'
         f'<div class="viz-note">Lens: {html.escape(insight.get("lens_name", ""))} · '
-        f'{insight.get("n_prompts", 0):,} fitting prompts.{_jacobian_precision_note(insight)}</div></figure>'
+        f'{html.escape(insight.get("lens_kind") or "J-Lens")} · '
+        f'{insight.get("n_prompts", 0):,} fitting prompts.{_jacobian_filter_note(insight)}'
+        f'{_jacobian_precision_note(insight)}</div></figure>'
+    )
+
+
+def _jacobian_filter_note(insight: dict) -> str:
+    if not insight.get("filtered"):
+        return ""
+    return (
+        " Tokens with no letter or digit are left out of the candidates and the pinned rank, "
+        "as the J++ Lens reads."
     )
 
 

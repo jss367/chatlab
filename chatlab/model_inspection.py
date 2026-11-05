@@ -959,7 +959,7 @@ class InspectionMixin:
             self._jacobian_lens = (self.load_id, import_id, lens)
             return {
                 "import_id": import_id, "load_id": self.load_id,
-                "model_id": self.model_id, "name": lens.name,
+                "model_id": self.model_id, "name": lens.name, "kind": lens.kind,
                 "layers": len(lens.matrices), "n_prompts": lens.n_prompts,
                 "path": str(path), "fitted_model_id": fitted_model_id.strip(),
                 "backend": engine.backend, "model_revision": revision,
@@ -1012,15 +1012,19 @@ class InspectionMixin:
     def jacobian_lens_summary(self) -> dict | None:
         """The lens imported for the current load as a caller outside the UI needs it, or ``None``.
 
-        Its name, how many prompts it was fitted on, and the blocks it has a
-        matrix for, which are the only blocks it can read.
+        Its name, its kind (J-Lens, R-Lens or J++ Lens), how many prompts it
+        was fitted on, and the blocks it has a matrix for, which are the only
+        blocks it can read.
         """
         with self._lock:
             imported = self._jacobian_lens
             if imported is None or not self.loaded or imported[0] != self.load_id:
                 return None
             lens = imported[2]
-            return {"name": lens.name, "n_prompts": lens.n_prompts, "layers": sorted(lens.matrices)}
+            return {
+                "name": lens.name, "kind": lens.kind, "n_prompts": lens.n_prompts,
+                "layers": sorted(lens.matrices),
+            }
 
     @_guards_device_memory
     def lens_log_probs(
@@ -1241,7 +1245,12 @@ class InspectionMixin:
                 return decoded[token]
 
             actual = logits.row(-1)
-            rows, cells = lens.read(engine, states, actual, decode, pinned_id)
+            excluded = None
+            if lens.filters_readout:
+                if lens.excluded is None or lens.excluded.numel() != len(actual):
+                    lens.excluded = jacobian_lens.non_semantic_mask(self.tokenizer, len(actual))
+                excluded = lens.excluded
+            rows, cells = lens.read(engine, states, actual, decode, pinned_id, excluded)
             best_ids, best_scores = logits.best()
             output = [
                 {"token_id": int(token), "text": decode(token), "score": float(score)}
@@ -1273,6 +1282,7 @@ class InspectionMixin:
                 "pinned_text": decode(pinned_id) if pinned_id is not None else None,
                 "pinned_id": pinned_id, "vocab_size": len(actual),
                 "lens_name": lens.name, "n_prompts": lens.n_prompts,
+                "lens_kind": lens.kind, "filtered": lens.filters_readout,
                 "model_id": self.model_id, "import_id": imported[1],
                 "backend": engine.backend, "precision": self.precision,
                 "slice": {

@@ -1,13 +1,19 @@
 """Read imported Jacobian lenses without fitting or changing the loaded model.
 
 File interoperability and readout convention follow anthropics/jacobian-lens:
-https://github.com/anthropics/jacobian-lens (Apache-2.0).
+https://github.com/anthropics/jacobian-lens (Apache-2.0), and the J++ lens of
+safety-research/jpp_lens (Ayonrinde & Lindsey, 2026, Apache-2.0).
 Source layer zero is the output of decoder block zero, before the final norm.
 
 A lens is a set of ``d_model × d_model`` matrices, one per fitted decoder
 block. Reading a residual state through one transports it into the final
 block's basis, and the model's own norm and head then turn it into
-vocabulary scores. Both backends are read the same way: a Transformers model
+vocabulary scores. The J-Lens, R-Lens and J++ Lens differ only in how those
+matrices were fitted: the R-Lens takes each Jacobian through a layer-wise
+relevance propagation backward pass, and the J++ Lens also fits one Jacobian
+per activation cluster and weighs them into one. All three are read the same
+way, except that a J++ readout leaves out the tokens with no letter or digit
+(its Readout Filtering). Both backends are read the same way: a Transformers model
 through forward hooks on its blocks, an MLX model through the layer recorder
 its logit lens already uses. Everything the lens computes stays on the CPU
 in float32 except the norm and head, which run where the model's weights are.
@@ -22,7 +28,7 @@ import re
 import shutil
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -170,16 +176,90 @@ def check_identity(layout: Layout, model_id: str, fitted_model_id: str) -> str:
     return fitted
 
 
+J_LENS, R_LENS, JPP_LENS = "J-Lens", "R-Lens", "J++ Lens"
+
+
+def _dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _first(*values):
+    """The first of ``values`` that is not ``None``."""
+    return next((value for value in values if value is not None), None)
+
+
+def lens_kind(data: dict) -> str:
+    """Which lens a saved file holds, as far as the file says.
+
+    Neuronpedia's conversions name the method under provenance; the J++
+    lenses released with the paper keep a stage-two fitting key in their
+    config. A file that records an LRP backward pass and neither of those is
+    an R-Lens, and anything else a J-Lens. A J++ lens written by the current
+    jpp_lens code carries no mark of its own, so it reads as an R-Lens.
+    """
+    config = _dict(data.get("config"))
+    provenance = _dict(data.get("provenance"))
+    source_config = _dict(provenance.get("source_config"))
+    if (
+        provenance.get("method") == "jpp" or "num_s2_fitting_prompts" in config
+        or isinstance(config.get("num_clusters"), int) and config["num_clusters"] > 0
+    ):
+        return JPP_LENS
+    lrp = _first(config.get("lrp_mode"), provenance.get("lrp_mode"), source_config.get("lrp_mode"))
+    if isinstance(lrp, str) and lrp != "none":
+        return R_LENS
+    # The released R-Lens files record their estimator as JSON under provenance.
+    try:
+        estimator = json.loads(provenance.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        estimator = {}
+    return R_LENS if _dict(estimator).get("estimator") == "relp" else J_LENS
+
+
+def non_semantic_mask(tokenizer, vocabulary: int):
+    """The J++ Lens's Readout Filtering: which output IDs decode to no letter or digit.
+
+    A boolean tensor over ``vocabulary``, the head's width. Whitespace and
+    punctuation tokens are marked, and so are head rows past the tokenizer,
+    which decode to nothing. Special tokens decode with their names and are
+    kept, as the reference keeps them.
+    """
+    import torch
+
+    known = min(vocabulary, len(tokenizer))
+    ids = [[token] for token in range(known)]
+    texts = (
+        tokenizer.batch_decode(ids) if hasattr(tokenizer, "batch_decode")
+        else [tokenizer.decode(token) for token in ids]
+    )
+    mask = torch.ones(vocabulary, dtype=torch.bool)
+    mask[:known] = torch.tensor([not any(char.isalnum() for char in text) for text in texts], dtype=torch.bool)
+    return mask
+
+
 @dataclass
 class FittedLens:
     matrices: dict
     width: int
     n_prompts: int
     name: str
+    kind: str = J_LENS
+    # The Readout Filtering mask, made on the first readout that needs it.
+    excluded: object = field(default=None, repr=False, compare=False)
+
+    @property
+    def filters_readout(self) -> bool:
+        """Whether readouts leave out tokens with no letter or digit, as the J++ Lens does."""
+        return self.kind == JPP_LENS
 
     @classmethod
     def load(cls, path, engine, model_id: str, fitted_model_id: str, model_revision: str | None):
         """Read and check the lens at ``path`` against the loaded model.
+
+        Two file layouts are read. The reference one keeps the matrices under
+        ``J`` beside ``d_model``, ``n_prompts`` and ``source_layers``. The
+        jpp_lens one keeps them under ``parameters["jacobians"]`` beside
+        ``source_layers``, with the rest in a ``config``.
 
         ``model_revision`` is the loaded checkpoint's, as
         :meth:`ModelManager.model_revision` reports it; a Transformers lens
@@ -195,26 +275,34 @@ class FittedLens:
         # mmap keeps the whole set of dense matrices off the accelerator and
         # avoids eagerly copying the file into RAM. Never load arbitrary pickle.
         data = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-        if not isinstance(data, dict) or not isinstance(data.get("J"), dict) or not data["J"]:
+        if not isinstance(data, dict):
             raise ValueError("Expected a saved Jacobian lens with a nonempty J dictionary.")
-        # Neuronpedia's fit_lens.py records the fitted model under provenance.
-        declared_model = data.get("model_id")
-        provenance = data.get("provenance")
-        if declared_model is None and isinstance(provenance, dict):
-            declared_model = provenance.get("model_id")
+        config = _dict(data.get("config"))
+        provenance = _dict(data.get("provenance"))
+        if config.get("lens_type", "jacobian") != "jacobian":
+            raise ValueError(f"That file holds a {config['lens_type']} lens, not a Jacobian lens.")
+        matrices = _dict(data["parameters"]).get("jacobians") if "parameters" in data else data.get("J")
+        if not isinstance(matrices, dict) or not matrices:
+            raise ValueError("Expected a saved Jacobian lens with a nonempty J dictionary.")
+        # Neuronpedia's fit_lens.py records the fitted model under provenance,
+        # its J++ conversions under the source config there, and jpp_lens in
+        # its own config.
+        declared_model = _first(
+            data.get("model_id"), provenance.get("model_id"), config.get("hf_model_name"),
+            _dict(provenance.get("source_config")).get("hf_model_name"),
+        )
         if declared_model is not None and declared_model != fitted:
             raise ValueError("The lens file names a different model.")
         revision = data.get("model_revision")
         if layout.backend == "torch" and revision is not None:
             if revision != model_revision:
                 raise ValueError("The lens file's model revision does not match the loaded checkpoint.")
-        width = data.get("d_model")
+        width = _first(data.get("d_model"), config.get("d_model"))
         if type(width) is not int or width != layout.width:
             raise ValueError("The lens residual width does not match the loaded model.")
-        count = data.get("n_prompts")
+        count = _first(data.get("n_prompts"), config.get("num_prompts_trained_on"))
         if type(count) is not int or count <= 0:
             raise ValueError("The lens must record a positive n_prompts.")
-        matrices = data["J"]
         if any(type(layer) is not int or not 0 <= layer < len(layout.blocks) for layer in matrices):
             raise ValueError("The lens contains invalid decoder layer indices.")
         if data.get("source_layers") != sorted(matrices):
@@ -233,7 +321,7 @@ class FittedLens:
                 raise ValueError(f"The lens matrices exceed the {SIZE_LIMIT} limit.")
             if not torch.isfinite(matrix).all():
                 raise ValueError("The lens contains non-finite matrix entries.")
-        return cls(matrices, width, count, path.name)
+        return cls(matrices, width, count, path.name, lens_kind(data))
 
     def wanted(self, layout: Layout) -> list[int]:
         """The fitted blocks plus the last one, whose readout is the check."""
@@ -268,7 +356,7 @@ class FittedLens:
             for handle in handles:
                 handle.remove()
 
-    def read(self, engine, states, actual_logits, decode, pinned_id=None):
+    def read(self, engine, states, actual_logits, decode, pinned_id=None, excluded=None):
         """Score every fed position through each fitted block.
 
         Returns ``(rows, cells)``: ``rows`` describes the last fed position
@@ -276,6 +364,10 @@ class FittedLens:
         pinned token's rank; ``cells`` holds, per block, the top token at
         every fed position, with the pinned token's rank beside it, and under
         ``top`` the IDs of the top candidates at every position.
+
+        ``excluded`` is a boolean mask over the vocabulary, or ``None``. The
+        tokens it marks are never candidates and are not counted in a pinned
+        token's rank, though a pinned token it marks still gets one.
         """
         import torch
 
@@ -300,6 +392,10 @@ class FittedLens:
             scores = unembed(engine, layout, states[layer] @ matrix.float().T)
             if not torch.isfinite(scores).all():
                 raise ValueError("The Jacobian readout produced non-finite scores.")
+            # A pinned token keeps its own score; only the ranking leaves the excluded out.
+            pinned_scores = scores[:, pinned_id].clone() if pinned_id is not None else None
+            if excluded is not None:
+                scores[:, excluded] = float("-inf")
             final = scores[-1]
             values, ids = final.topk(min(TOP_CANDIDATES, final.numel()))
             row = {
@@ -317,7 +413,6 @@ class FittedLens:
                 for best, score in zip(top_ids, top_scores)
             ]
             if pinned_id is not None:
-                pinned_scores = scores[:, pinned_id]
                 ranks = (scores > pinned_scores[:, None]).sum(dim=1) + 1
                 row["rank"] = int(ranks[-1])
                 row["score"] = float(pinned_scores[-1])
