@@ -25,7 +25,7 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from chatlab import api, library, logs, remote, settings
-from chatlab.desktop_launcher import RemoteConnection, WINDOW_TITLE, find_available_port
+from chatlab.desktop_launcher import RemoteConnection, WINDOW_TITLE, _confirm, find_available_port
 
 
 TESTS = Path(__file__).resolve().parent
@@ -700,6 +700,140 @@ class FakeSession:
 
     def close(self):
         self.closed = True
+
+
+class FakeAlert:
+    """An NSAlert that records itself and ends its sheet with the reader's button."""
+
+    shown = []
+    response = 1000
+
+    @classmethod
+    def alloc(cls):
+        return cls()
+
+    def init(self):
+        self.buttons, self.field, self.parent = [], None, None
+        return self
+
+    def setMessageText_(self, text):
+        self.title = text
+
+    def setInformativeText_(self, text):
+        self.message = text
+
+    def addButtonWithTitle_(self, title):
+        self.buttons.append(title)
+
+    def setAccessoryView_(self, field):
+        self.field = field
+
+    def window(self):
+        return mock.Mock()
+
+    def beginSheetModalForWindow_completionHandler_(self, parent, handler):
+        self.parent = parent
+        self.default = self.field and self.field.value
+        FakeAlert.shown.append(self)
+        if self.field is not None and FakeField.typed is not None:
+            self.field.value = FakeField.typed
+        threading.Thread(target=handler, args=(FakeAlert.response,)).start()
+
+
+class FakeField:
+    """An NSTextField the reader types FakeField.typed into."""
+
+    typed = None
+
+    @classmethod
+    def alloc(cls):
+        return cls()
+
+    def initWithFrame_(self, frame):
+        self.value = ""
+        return self
+
+    def cell(self):
+        return mock.Mock()
+
+    def setStringValue_(self, value):
+        self.value = value
+
+    def stringValue(self):
+        return self.value
+
+
+class SheetTests(unittest.TestCase):
+    """Dialogs attach to the window as sheets, which macOS paints, not standalone alerts."""
+
+    def setUp(self):
+        FakeAlert.shown, FakeAlert.response, FakeField.typed = [], 1000, None
+        appkit = mock.Mock(NSAlert=FakeAlert, NSTextField=FakeField, NSAlertFirstButtonReturn=1000)
+        helper = mock.Mock(callAfter=lambda function, *args: function(*args))
+        modules = {"AppKit": appkit, "PyObjCTools": mock.Mock(AppHelper=helper), "PyObjCTools.AppHelper": helper}
+        patcher = mock.patch.dict(sys.modules, modules)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.native = mock.Mock()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.saved = Path(directory.name) / "remote-host"
+
+    def window(self, answer=None):
+        window = FakeWindow(answer)
+        window.native = self.native
+        return window
+
+    def run_off_the_main_thread(self, function):
+        result = []
+        thread = threading.Thread(target=lambda: result.append(function()))
+        thread.start()
+        thread.join(3)
+        self.assertFalse(thread.is_alive())
+        return result[0]
+
+    def test_the_host_prompt_is_a_sheet_offering_the_last_host(self):
+        remote.save_target(self.saved, remote.RemoteTarget("gpu-box", "/srv/chatlab"))
+        FakeField.typed = "new-gpu"
+        window = self.window()
+        sessions = []
+
+        def factory(target, **options):
+            sessions.append(FakeSession(target, **options))
+            return sessions[-1]
+
+        connection = RemoteConnection(window, "http://127.0.0.1:47890/", self.saved, session_factory=factory)
+        self.run_off_the_main_thread(connection.connect)
+
+        alert = FakeAlert.shown[0]
+        self.assertIs(alert.parent, self.native)
+        self.assertEqual(alert.message, RemoteConnection.PROMPT)
+        self.assertEqual(alert.default, "gpu-box:/srv/chatlab")
+        self.assertEqual(alert.buttons, ["OK", "Cancel"])
+        self.assertEqual(sessions[0].target, remote.RemoteTarget("new-gpu", "~/chatlab"))
+        self.assertEqual(window.named("evaluate_js"), [])
+
+    def test_cancel_answers_false_and_ok_true(self):
+        window = self.window()
+        self.assertTrue(self.run_off_the_main_thread(lambda: _confirm(window, "ChatLab", "Go?")))
+        FakeAlert.response = 1001
+        self.assertFalse(self.run_off_the_main_thread(lambda: _confirm(window, "ChatLab", "Go?")))
+        self.assertEqual(window.named("dialog"), [])
+
+    def test_a_closed_window_answers_cancel_instead_of_waiting(self):
+        window = self.window()
+        window.events = mock.Mock(**{"closed.is_set.return_value": True})
+        self.assertFalse(self.run_off_the_main_thread(lambda: _confirm(window, "ChatLab", "Go?")))
+        self.assertEqual(FakeAlert.shown, [])
+
+    def test_a_sheet_the_run_loop_never_shows_answers_cancel_once_the_window_closes(self):
+        window = self.window()
+        closed = threading.Event()
+        window.events = mock.Mock(closed=closed)
+        # Quitting stopped the run loop, so the queued sheet never runs.
+        sys.modules["PyObjCTools.AppHelper"].callAfter = lambda function, *args: closed.set()
+        self.assertFalse(self.run_off_the_main_thread(lambda: _confirm(window, "ChatLab", "Go?")))
+        self.assertEqual(FakeAlert.shown, [])
 
 
 class RemoteConnectionTests(unittest.TestCase):
