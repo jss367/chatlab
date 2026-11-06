@@ -810,6 +810,61 @@ def import_jacobian_lens(path, fitted_model_id, repository="", filename=""):
     return imported, f"{status} Remembered for this model, so its next load picks the lens up again."
 
 
+def _size(size: int | None) -> str:
+    return f"{size / 1e9:.1f} GB" if size else "size unknown"
+
+
+def find_lenses():
+    """List the Hub's lenses for the loaded model; ``(choices update, note)``.
+
+    A quantized checkpoint is searched under the model it was quantized
+    from, since lenses are published against that one, and the note says
+    which weights the import needs.
+    """
+    model_id = runtime.MANAGER.model_id if runtime.MANAGER.loaded else None
+    if not model_id:
+        return gr.update(choices=[], value=None, visible=False), "Load a model first, then search for its lenses."
+    source = jacobian_lens.quantized_from(model_id)
+    searched = source or model_id
+    try:
+        found = jacobian_lens.find_lenses(searched)
+    except ValueError as error:
+        return gr.update(choices=[], value=None, visible=False), failure_status("Could not search for lenses", str(error))
+    note = ""
+    if source:
+        note = (
+            f"{code_span(model_id)} is a quantized version of {code_span(source)}, and these lenses were "
+            f"fitted for {code_span(source)}. With Transformers, load {code_span(source)} in full precision "
+            "before importing; an MLX conversion imports them as it is. "
+        )
+    if not found:
+        return gr.update(choices=[], value=None, visible=False), (
+            f"{note}No lens on Hugging Face names {code_span(searched)} as its base model. "
+            "A lens published without that tag can still be imported by repository and file."
+        )
+    choices = [
+        (
+            f"{lens.repository} · {lens.filename} · {_size(lens.size)} · "
+            f"{lens.downloads:,} downloads{f' · updated {lens.updated}' if lens.updated else ''}",
+            json.dumps([lens.repository, lens.filename, lens.fitted_model_id]),
+        )
+        for lens in found
+    ]
+    count = f"{len(found)} lens file{'s' if len(found) != 1 else ''}"
+    return (
+        gr.update(choices=choices, value=None, visible=True),
+        f"{note}Found {count} for {code_span(searched)}. Pick one to fill in the fields below, then press Import lens.",
+    )
+
+
+def pick_found_lens(value):
+    """Fill the repository, file and model ID from a lens picked in the list."""
+    if not value:
+        return gr.skip(), gr.skip(), gr.skip()
+    repository, filename, fitted_model_id = json.loads(value)
+    return repository, filename, fitted_model_id
+
+
 def change_lens_mode(mode, inspection_session=None):
     INSPECTION_CONTROLS.change(inspection_session, mode=mode)
     jacobian = mode == "Jacobian"

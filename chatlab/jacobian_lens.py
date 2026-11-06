@@ -582,6 +582,104 @@ def download(repository: str, filename: str) -> Path:
         raise ValueError(f"The lens could not be downloaded: {error}") from None
 
 
+@dataclass(frozen=True)
+class FoundLens:
+    """One lens file published on the Hub for a model."""
+
+    repository: str
+    filename: str
+    fitted_model_id: str
+    size: int | None
+    downloads: int
+    updated: str
+
+
+# How many repositories one search reads the file lists of.
+MAX_FOUND_REPOSITORIES = 20
+# Searched separately, since the Hub matches one substring of the repository
+# name: "lens" finds J-lens, J++ lens and "jlens" repositories, "jacobian"
+# the few named only for the method.
+LENS_SEARCH_TERMS = ("lens", "jacobian")
+# A repository is kept only when its name or tags say it holds lenses of the
+# kinds this module reads; "lens" alone also matches probes, oracles and
+# training checkpoints.
+LENS_REPOSITORY = re.compile(r"jacobian|j-?lens|jpp|j\+\+|r-?lens|rs-lens", re.IGNORECASE)
+
+
+def _model_key(name: str) -> str:
+    return re.sub(r"[\W_]+", "-", name.lower()).strip("-")
+
+
+def _fits(filename: str, model_id: str) -> bool:
+    """Whether a lens file plausibly belongs to ``model_id``.
+
+    A repository of lenses for several models tags every one of them as its
+    base model, and keeps each model's lenses in a folder named for it. A
+    file at the top level is taken to be for the tagged model; one in a
+    folder must name the model somewhere in its path.
+    """
+    if "/" not in filename:
+        return True
+    return _model_key(model_id.split("/")[-1]) in _model_key(filename)
+
+
+def quantized_from(model_id: str, api=None) -> str | None:
+    """The model ``model_id`` is a quantized version of, from its model card.
+
+    A quantized repository (FP8, GPTQ, an MLX conversion) names its source
+    as ``base_model`` and is tagged ``base_model:quantized:<source>``. Lenses
+    are published against the source, so a search for the quantized
+    checkpoint alone finds nothing. ``None`` when the card names no source,
+    or the ID is not a Hub repository.
+    """
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError
+
+    if not REPOSITORY_ID.match(model_id or ""):
+        return None
+    try:
+        info = (api or HfApi()).model_info(model_id)
+    except (HfHubHTTPError, OSError, ValueError):
+        return None
+    prefix = "base_model:quantized:"
+    sources = [tag[len(prefix):] for tag in info.tags or () if tag.startswith(prefix)]
+    return sources[0] if len(sources) == 1 else None
+
+
+def find_lenses(model_id: str, api=None) -> list[FoundLens]:
+    """Lens files on the Hub whose model card names ``model_id`` as its base model.
+
+    Each repository named or tagged as a lens is listed by its ``.pt`` files
+    within the size limit that belong to the model; one with none is
+    dropped. Most downloaded first. Raises
+    ``ValueError`` when the Hub cannot be reached.
+    """
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError
+
+    api = api or HfApi()
+    try:
+        repositories = {}
+        for term in LENS_SEARCH_TERMS:
+            for listed in api.list_models(filter=f"base_model:{model_id}", search=term, limit=MAX_FOUND_REPOSITORIES):
+                repositories.setdefault(listed.id, None)
+        found = []
+        for repository in list(repositories)[:MAX_FOUND_REPOSITORIES]:
+            info = api.model_info(repository, files_metadata=True)
+            if not LENS_REPOSITORY.search(" ".join([repository, *(info.tags or ())])):
+                continue
+            updated = info.last_modified.date().isoformat() if info.last_modified else ""
+            found.extend(
+                FoundLens(repository, sibling.rfilename, model_id, sibling.size, info.downloads or 0, updated)
+                for sibling in info.siblings or ()
+                if sibling.rfilename.endswith(".pt") and _fits(sibling.rfilename, model_id)
+                and (sibling.size is None or sibling.size <= MAX_FILE_BYTES)
+            )
+    except (HfHubHTTPError, OSError) as error:
+        raise ValueError(f"Could not search Hugging Face: {error}") from None
+    return sorted(found, key=lambda lens: (-lens.downloads, lens.repository, lens.filename))
+
+
 def keep(path) -> Path:
     """Copy a lens chosen from disk under ``lens_directory()/uploads``; the kept path.
 
