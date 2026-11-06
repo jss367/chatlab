@@ -56,18 +56,16 @@ STEERING_NEEDS_TORCH = (
 )
 
 
-def measure_download(
-    model_id: str, revision: str | None, token: str | None, progress: DownloadProgress
-) -> None:
-    """Tell ``progress`` how many bytes fetching ``model_id`` will take.
+def cached_blobs(model_id: str) -> frozenset[str]:
+    """The names of the complete files the cache holds for ``model_id``.
 
-    The sum of every file the Hub lists that the cache does not already hold
-    whole: the figure ``snapshot_download``'s own bars reach only once the
-    last file has started. Best effort: without an answer the bars' running
-    total is all the page shows.
+    The cache keeps each file once, named for its content (the LFS sha256,
+    or the git blob id for a small file), and a revision that reuses one
+    only links to it, so this answers for every revision at once. A partial
+    file ends in ``.incomplete`` and is left out.
     """
 
-    from huggingface_hub import HfApi, constants
+    from huggingface_hub import constants
     from huggingface_hub.file_download import repo_folder_name
 
     blobs = (
@@ -76,17 +74,43 @@ def measure_download(
         / "blobs"
     )
     try:
+        return frozenset(
+            entry.name
+            for entry in blobs.iterdir()
+            if entry.is_file() and not entry.name.endswith(".incomplete")
+        )
+    except OSError:
+        return frozenset()
+
+
+def measure_download(
+    model_id: str,
+    revision: str | None,
+    token: str | None,
+    progress: DownloadProgress,
+    cached: frozenset[str],
+) -> None:
+    """Tell ``progress`` how many bytes fetching ``model_id`` will take.
+
+    The sum of every file the Hub lists that is not among ``cached``, the
+    :func:`cached_blobs` taken before the download began: read any later
+    and a file the download finished meanwhile would pass for one it never
+    had to fetch. That sum is the figure ``snapshot_download``'s own bars
+    reach only once the last file has started, since it counts no bytes for
+    a file it already holds. Best effort: without an answer the bars'
+    running total is all the page shows.
+    """
+
+    from huggingface_hub import HfApi
+
+    try:
         info = HfApi().model_info(
             model_id, revision=revision, token=token, files_metadata=True, timeout=10
         )
         total = 0
         for file in info.siblings or []:
-            # The cache keeps each file once, named for its content (the LFS
-            # sha256, or the git blob id for a small file), and a revision
-            # that reuses one only links to it. snapshot_download counts no
-            # bytes for such a file, so neither may this.
             blob = file.lfs.sha256 if file.lfs else file.blob_id
-            if blob is None or not (blobs / blob).is_file():
+            if blob not in cached:
                 total += file.size or 0
     except Exception as error:
         logger.info("Could not size the download of %s: %s", model_id, first_line(error))
@@ -458,7 +482,7 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
             # which asks the Hub for the same file list before it starts.
             threading.Thread(
                 target=measure_download,
-                args=(checked_id, revision, token, progress),
+                args=(checked_id, revision, token, progress, cached_blobs(checked_id)),
                 name=f"measure {checked_id}",
                 daemon=True,
             ).start()

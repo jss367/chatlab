@@ -46,6 +46,7 @@ from fakes import Encoding
 # tests stub snapshot_download and have no Hub to ask.
 _measure = mock.patch.object(model_runtime, "measure_download", lambda *args: None)
 measure_download = model_runtime.measure_download
+cached_blobs = model_runtime.cached_blobs
 
 
 def setUpModule():
@@ -1583,12 +1584,15 @@ class DownloadProgressTests(unittest.TestCase):
             (blobs / "aaa").write_text("weights")
             # A partial file is still to fetch in full.
             (blobs / "bbb.incomplete").write_text("half")
-            with mock.patch("huggingface_hub.constants.HF_HUB_CACHE", cache), \
-                    mock.patch(
-                        "huggingface_hub.HfApi.model_info", return_value=info
-                    ) as ask:
-                measure_download("org/model", "v1", "tok", progress)
+            with mock.patch("huggingface_hub.constants.HF_HUB_CACHE", cache):
+                cached = cached_blobs("org/model")
+            # A file the download finishes while the Hub is being asked
+            # still counts: the cache was read before the download began.
+            (blobs / "bbb").write_text("weights")
+            with mock.patch("huggingface_hub.HfApi.model_info", return_value=info) as ask:
+                measure_download("org/model", "v1", "tok", progress, cached)
 
+        self.assertEqual(cached, {"c0ffee", "aaa"})
         self.assertEqual(progress.snapshot().bytes_total, 2000)
         self.assertEqual(ask.call_args.kwargs["revision"], "v1")
         self.assertTrue(ask.call_args.kwargs["files_metadata"])
@@ -1598,7 +1602,7 @@ class DownloadProgressTests(unittest.TestCase):
 
         progress = DownloadProgress()
         with mock.patch("huggingface_hub.HfApi.model_info", side_effect=OSError("offline")):
-            measure_download("org/model", None, None, progress)
+            measure_download("org/model", None, None, progress, frozenset())
 
         self.assertEqual(progress.snapshot().bytes_total, 0)
 
