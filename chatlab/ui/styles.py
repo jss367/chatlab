@@ -52,6 +52,7 @@ THEME = gr.themes.Base(
     button_secondary_shadow="none",
     input_background_fill="white",
     input_background_fill_dark="*neutral_950",
+    input_border_width="1px",
     input_border_color="*neutral_200",
     input_border_color_dark="*neutral_700",
     input_shadow="none",
