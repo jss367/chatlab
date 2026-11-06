@@ -523,7 +523,11 @@ body.column-dragging {{ user-select: none; }}
 #current-model-row {{ align-items: center; gap: 12px; }}
 #currently-loaded-model {{ flex: 1; min-width: 0; }}
 #models-page .model-access > button {{ border: 0; }}
+/* The pane stretches to the height of the list beside it, and a Gradio
+   column grows by its scale, so without this the box takes up whatever
+   height the pane has left over. */
 #models-page .model-activity {{
+  flex: 0 0 auto !important;
   padding: 16px 20px; border: 1px solid var(--border-color-primary); border-radius: 12px;
   background: var(--block-background-fill);
 }}
