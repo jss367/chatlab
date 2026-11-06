@@ -589,12 +589,16 @@ def _sheet(window, title: str, message: str, default: str | None = None):
 
     done = threading.Event()
     answer = None
+    closed = getattr(getattr(window, "events", None), "closed", None)
+
+    def window_closed() -> bool:
+        return closed is not None and closed.is_set()
 
     def show():
         nonlocal answer
         try:
-            if not native.isVisible() and not native.isMiniaturized():
-                # The window is gone, so nothing would ever end the sheet.
+            if window_closed():
+                # Nothing would ever end a sheet on a closed window.
                 done.set()
                 return
             alert = AppKit.NSAlert.alloc().init()
@@ -628,7 +632,11 @@ def _sheet(window, title: str, message: str, default: str | None = None):
         show()
         return None
     AppHelper.callAfter(show)
-    done.wait()
+    # The run loop may stop before it runs show, or the window may close
+    # under the sheet; either way no answer is coming.
+    while not done.wait(0.5):
+        if window_closed():
+            return None
     return answer
 
 

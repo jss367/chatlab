@@ -774,7 +774,7 @@ class SheetTests(unittest.TestCase):
         patcher = mock.patch.dict(sys.modules, modules)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.native = mock.Mock(**{"isVisible.return_value": True})
+        self.native = mock.Mock()
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.saved = Path(directory.name) / "remote-host"
@@ -821,9 +821,17 @@ class SheetTests(unittest.TestCase):
         self.assertEqual(window.named("dialog"), [])
 
     def test_a_closed_window_answers_cancel_instead_of_waiting(self):
-        self.native.isVisible.return_value = False
-        self.native.isMiniaturized.return_value = False
         window = self.window()
+        window.events = mock.Mock(**{"closed.is_set.return_value": True})
+        self.assertFalse(self.run_off_the_main_thread(lambda: _confirm(window, "ChatLab", "Go?")))
+        self.assertEqual(FakeAlert.shown, [])
+
+    def test_a_sheet_the_run_loop_never_shows_answers_cancel_once_the_window_closes(self):
+        window = self.window()
+        closed = threading.Event()
+        window.events = mock.Mock(closed=closed)
+        # Quitting stopped the run loop, so the queued sheet never runs.
+        sys.modules["PyObjCTools.AppHelper"].callAfter = lambda function, *args: closed.set()
         self.assertFalse(self.run_off_the_main_thread(lambda: _confirm(window, "ChatLab", "Go?")))
         self.assertEqual(FakeAlert.shown, [])
 
