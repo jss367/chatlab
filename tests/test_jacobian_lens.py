@@ -480,6 +480,19 @@ class JacobianLensTests(unittest.TestCase):
         self.assertEqual(readout["positions"], [1, 2, 3, 4])
         self.assertEqual(readout["top"][1], [top[0] for top in data["layers"][1]["top"]])
 
+    def test_concept_text_marks_leading_spaces_line_breaks_and_template_markers(self):
+        result = self.inspect(3)
+        data = result["slice"]
+        token = data["layers"][0]["top"][0][0]
+        data["texts"][token] = " <b>"
+        data["tokens"][0]["text"] = "<|im_start|>"
+        data["tokens"][1]["text"] = "a<\nb"
+        rendered = charts.jacobian_lens_chart(result)
+        self.assertIn('<code><span class="jl-space">␣</span>&lt;b&gt;</code>', rendered)
+        self.assertIn('class="jl-word jl-special" data-pos="0"', rendered)
+        self.assertIn('a&lt;<span class="jl-ws">↵</span>b</span><br>', rendered)
+        self.assertIn('<th class="jl-axis"><div><span>Block 1</span>', rendered)
+
     def test_concept_texts_are_escaped_and_survive_a_json_round_trip(self):
         result = self.inspect(3)
         token = result["slice"]["layers"][0]["top"][0][0]

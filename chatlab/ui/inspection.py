@@ -129,10 +129,32 @@ JACOBIAN_JS = r"""
       const row = box.closest('tr');
       if (row) { if (slot >= 0) row.dataset.hl = slot % PALETTE; else delete row.dataset.hl; }
     });
+    // Ticked concepts lead the table in the order they were ticked; the
+    // rest keep their rank.
+    figure.querySelectorAll('.jl-concept-wrap tbody').forEach(body => {
+      const rows = [...body.querySelectorAll('tr[data-concept]')];
+      rows.forEach((row, rank) => { if (row.dataset.rank === undefined) row.dataset.rank = rank; });
+      const slot = row => {
+        const at = ticked.order.indexOf(row.dataset.concept);
+        return at < 0 ? Infinity : at;
+      };
+      rows.sort((a, b) => slot(a) - slot(b) || a.dataset.rank - b.dataset.rank);
+      body.append(...rows);
+    });
+    // A position read as several ticked concepts carries a band of each.
     figure.querySelectorAll('.jl-word').forEach(word => {
       const here = (word.dataset.concepts || '').split(' ');
-      const slot = ticked.order.findIndex(token => here.includes(token));
-      if (slot >= 0) word.dataset.hl = slot % PALETTE; else delete word.dataset.hl;
+      const slots = ticked.order.map((token, slot) => here.includes(token) ? slot % PALETTE : -1).filter(slot => slot >= 0);
+      if (!slots.length) {
+        delete word.dataset.hl;
+        word.style.removeProperty('--jl-paint');
+        return;
+      }
+      word.dataset.hl = slots[0];
+      const step = 100 / slots.length;
+      const bands = slots.map((slot, band) =>
+        `color-mix(in srgb, var(--jl-hue-${slot}) var(--jl-mix), transparent) ${(band * step).toFixed(1)}% ${((band + 1) * step).toFixed(1)}%`);
+      word.style.setProperty('--jl-paint', `linear-gradient(to bottom, ${bands.join(', ')})`);
     });
   };
   const adopt = () => {
@@ -143,6 +165,7 @@ JACOBIAN_JS = r"""
     });
   };
   new MutationObserver(adopt).observe(document.body, {childList: true, subtree: true});
+  adopt();
   document.addEventListener('change', event => {
     const box = event.target.closest && event.target.closest('#jacobian-lens .jl-pick');
     if (!box) return;
@@ -178,13 +201,15 @@ JACOBIAN_JS = r"""
     const position = Number(word.dataset.pos);
     detail.replaceChildren();
     const head = element('div', 'jl-detail-head');
-    head.append(element('span', '', `Position ${data.positions[position]} \u00b7 ${shown(word.textContent)}`));
+    const title = element('span', '', `Position ${data.positions[position]} `);
+    title.append(element('code', '', shown(word.textContent)));
+    head.append(title);
     const button = element('button', 'jl-detail-close', '\u00d7');
     button.type = 'button';
     button.setAttribute('aria-label', 'Close');
     head.append(button);
     detail.append(head);
-    const table = element('table', 'viz-table');
+    const table = element('table', 'viz-table jl-concept-table');
     const top = element('tr');
     ['Block', '', 'Top token', 'Count by block'].forEach(name => top.append(element('th', '', name)));
     table.appendChild(element('thead')).append(top);
@@ -199,14 +224,14 @@ JACOBIAN_JS = r"""
       box.value = String(token);
       row.appendChild(element('td')).append(box);
       row.appendChild(element('td')).append(element('code', '', shown(data.texts[token] || '')));
-      const strip = element('span', 'jl-strip');
+      const cell = row.appendChild(element('td', 'jl-strip-cell'));
+      const strip = cell.appendChild(element('span', 'jl-strip'));
       (data.counts[token] || []).forEach((count, column, counts) => {
         const mark = element('i');
         mark.style.setProperty('--jl-level', (count / (Math.max(...counts) || 1)).toFixed(2));
         mark.title = `Block ${data.blocks[column]}: ${count} of ${data.positions.length} positions`;
         strip.append(mark);
       });
-      row.appendChild(element('td')).append(strip);
     }
     detail.append(table);
     detail.dataset.pos = word.dataset.pos;
@@ -231,28 +256,47 @@ JACOBIAN_CSS = """
 .jl-grid .jl-selected { box-shadow: inset 0 -2px 0 var(--viz-line); }
 .jl-grid thead .jl-selected { color: var(--viz-ink); font-weight: 600; }
 .jl-output th, .jl-output td { border-top: 2px solid var(--viz-axis); }
-.jl-text { max-height: 260px; overflow: auto; margin: 0.3rem 0; padding: 0.4rem 0.5rem; border: 1px solid var(--viz-grid); border-radius: 6px; font-size: 0.82rem; line-height: 1.85; color: var(--viz-ink); }
-.jl-word { cursor: pointer; white-space: pre-wrap; border-radius: 3px; padding: 0.05rem 0; }
-.jl-word:hover, .jl-word.jl-open { outline: 1px solid var(--viz-line); }
-.jl-word.jl-selected { box-shadow: inset 0 -2px 0 var(--viz-line); }
-#jacobian-lens [data-hl="0"] { --jl-hue: #e8a317; }
-#jacobian-lens [data-hl="1"] { --jl-hue: #2f8fd8; }
-#jacobian-lens [data-hl="2"] { --jl-hue: #2fae6b; }
-#jacobian-lens [data-hl="3"] { --jl-hue: #8b6be0; }
-#jacobian-lens [data-hl="4"] { --jl-hue: #e05a7a; }
-#jacobian-lens [data-hl="5"] { --jl-hue: #1fa6a6; }
-.jl-word[data-hl] { background: color-mix(in srgb, var(--jl-hue) 38%, transparent); }
-#jacobian-lens tr[data-hl] td { background: color-mix(in srgb, var(--jl-hue) 16%, transparent); }
-#jacobian-lens tr[data-hl] td:first-child { box-shadow: inset 3px 0 0 var(--jl-hue); }
-.jl-concept-wrap { max-height: 420px; overflow: auto; margin: 0.3rem 0; }
-.jl-concept-table td, .jl-detail td { padding-top: 0.1rem; padding-bottom: 0.1rem; }
-.jl-concept-table code, .jl-detail code { background: none; padding: 0; }
-.jl-count { color: var(--viz-muted); text-align: right; font-variant-numeric: tabular-nums; }
-.jl-strip { display: inline-flex; width: 160px; max-width: 100%; height: 0.85rem; vertical-align: middle; border: 1px solid var(--viz-grid); border-radius: 2px; overflow: hidden; }
-.jl-strip i { flex: 1 1 0; min-width: 1px; background: color-mix(in srgb, var(--viz-line) calc(var(--jl-level, 0) * 85%), transparent); }
-.jl-detail { margin: 0.3rem 0; padding: 0.3rem 0.5rem; border: 1px solid var(--viz-line); border-radius: 6px; max-height: 360px; overflow: auto; }
+#jacobian-lens { --jl-hue-0: #f59e0b; --jl-hue-1: #10b981; --jl-hue-2: #0ea5e9; --jl-hue-3: #6366f1; --jl-hue-4: #f43f5e; --jl-hue-5: #14b8a6; --jl-mono: ui-monospace, SFMono-Regular, Menlo, monospace; --jl-mix: 34%; }
+.dark #jacobian-lens { --jl-mix: 48%; color-scheme: dark; }
+#jacobian-lens [data-hl="0"] { --jl-hue: var(--jl-hue-0); }
+#jacobian-lens [data-hl="1"] { --jl-hue: var(--jl-hue-1); }
+#jacobian-lens [data-hl="2"] { --jl-hue: var(--jl-hue-2); }
+#jacobian-lens [data-hl="3"] { --jl-hue: var(--jl-hue-3); }
+#jacobian-lens [data-hl="4"] { --jl-hue: var(--jl-hue-4); }
+#jacobian-lens [data-hl="5"] { --jl-hue: var(--jl-hue-5); }
+.jl-text { max-height: 320px; overflow: auto; margin: 0.5rem 0; padding: 0.8rem 1rem; border-radius: 12px; background: color-mix(in srgb, var(--viz-grid) 30%, transparent); font-family: Charter, "Iowan Old Style", Georgia, serif; font-size: 0.95rem; line-height: 2.1; color: var(--viz-ink); }
+.jl-word { cursor: pointer; white-space: pre-wrap; border-radius: 3px; padding: 0.15rem 0; transition: background-color 0.12s; }
+.jl-word:hover { background-color: color-mix(in srgb, var(--viz-line) 12%, transparent); }
+.jl-word.jl-open { outline: 1.5px solid var(--viz-line); outline-offset: 1px; }
+.jl-word.jl-selected { text-decoration: underline 2px var(--viz-line); text-underline-offset: 5px; }
+.jl-word[data-hl] { background: var(--jl-paint); }
+.jl-special { font-family: var(--jl-mono); font-size: 0.72rem; color: var(--viz-muted); }
+.jl-ws { font-family: var(--jl-mono); font-size: 0.8em; color: var(--viz-muted); opacity: 0.6; }
+.jl-concept-wrap { max-height: 460px; overflow: auto; margin: 0.4rem 0; }
+.jl-concept-table { border: none; border-collapse: separate; border-spacing: 0 3px; }
+.jl-concept-table th { font-size: 0.66rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; border: none; border-bottom: 1px solid var(--viz-grid); padding-top: 0.3rem; padding-bottom: 0.35rem; z-index: 1; }
+.jl-concept-table th * { color: inherit; }
+.jl-concept-table td { padding: 0.3rem 0.5rem; border: 1px solid transparent; border-left: none; border-right: none; transition: background-color 0.12s; }
+.jl-concept-table td:first-child { width: 1.4rem; border-left: 1px solid transparent; border-radius: 8px 0 0 8px; }
+.jl-concept-table td:last-child { border-right: 1px solid transparent; border-radius: 0 8px 8px 0; }
+.jl-concept-table tbody tr:hover td { background: color-mix(in srgb, var(--viz-grid) 45%, transparent); }
+#jacobian-lens tr[data-hl] td { --jl-edge: color-mix(in srgb, var(--jl-hue) 60%, transparent); background: color-mix(in srgb, var(--jl-hue) 13%, transparent); border-top-color: var(--jl-edge); border-bottom-color: var(--jl-edge); }
+#jacobian-lens tr[data-hl] td:first-child { border-left-color: var(--jl-edge); }
+#jacobian-lens tr[data-hl] td:last-child { border-right-color: var(--jl-edge); }
+.jl-concept-table code, .jl-detail code { background: none; padding: 0; font-family: var(--jl-mono); font-size: 0.82rem; }
+.jl-space { color: var(--viz-muted); opacity: 0.55; }
+.jl-pick { appearance: auto; width: 14px; height: 14px; margin: 0; border: none; background: none; cursor: pointer; vertical-align: middle; accent-color: var(--jl-hue, var(--viz-line)); }
+.jl-count { width: 4rem; color: var(--viz-muted); text-align: right; font-family: var(--jl-mono); font-size: 0.74rem; font-variant-numeric: tabular-nums; }
+th.jl-count { font-family: inherit; }
+.jl-axis div { display: flex; justify-content: space-between; gap: 0.5rem; }
+.jl-axis span:first-child, .jl-axis span:last-child { font-weight: 500; opacity: 0.75; }
+.jl-strip-cell { width: 55%; }
+.jl-strip { display: flex; gap: 1px; width: 100%; min-width: 120px; height: 1.1rem; vertical-align: middle; border-radius: 3px; overflow: hidden; }
+.jl-strip i { flex: 1 1 0; min-width: 1px; background: color-mix(in srgb, var(--jl-hue, var(--viz-ink)) calc(5% + var(--jl-level, 0) * 70%), transparent); }
+.jl-detail { margin: 0.5rem 0; padding: 0.5rem 0.75rem; border: 1px solid var(--viz-grid); border-radius: 12px; max-height: 360px; overflow: auto; }
 .jl-detail-head { display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; font-weight: 600; color: var(--viz-ink); }
-.jl-detail-close { background: none; border: none; cursor: pointer; font-size: 1rem; color: var(--viz-muted); }
+.jl-detail-close { background: none; border: none; cursor: pointer; font-size: 1.1rem; line-height: 1; color: var(--viz-muted); }
+.jl-detail-close:hover { color: var(--viz-ink); }
 """
 
 

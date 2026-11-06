@@ -11,6 +11,7 @@ import hashlib
 import html
 import json
 import math
+import re
 from typing import Sequence
 
 
@@ -554,6 +555,25 @@ def _strip(counts: list, rows: list, positions: int) -> str:
     return f'<span class="jl-strip">{marks}</span>'
 
 
+def _concept_label(text: str) -> str:
+    """A concept's text with its leading spaces drawn as faint ␣ marks."""
+    body = text.lstrip(" ")
+    if not body:
+        return _token_label({"text": text})
+    spaces = len(text) - len(body)
+    mark = f'<span class="jl-space">{"␣" * spaces}</span>' if spaces else ""
+    return mark + _token_label({"text": body})
+
+
+# Chat template markers such as <|im_start|> and <think>, set apart in the text.
+_SPECIAL_TOKEN = re.compile(r"\s*</?\|?[\w.-]+\|?>\s*")
+
+
+def _word_html(text: str) -> str:
+    """A position's text for the readout, with line breaks shown as faint ↵ marks."""
+    return '<span class="jl-ws">↵</span>'.join(html.escape(part) for part in text.split("\n"))
+
+
 def _jacobian_concepts(insight: dict) -> str:
     """The tokens the lens reads most often across the slice, and where.
 
@@ -586,8 +606,8 @@ def _jacobian_concepts(insight: dict) -> str:
     table = "".join(
         f'<tr data-concept="{int(token)}"><td><input type="checkbox" class="jl-pick" '
         f'value="{int(token)}" aria-label="Highlight {label(token)}"></td>'
-        f'<td><code>{label(token)}</code></td><td class="jl-count">{totals[token]:,}</td>'
-        f'<td>{_strip(by_block[token], rows, len(tokens))}</td></tr>'
+        f'<td><code>{_concept_label(text_of(token))}</code></td><td class="jl-count">{totals[token]:,}</td>'
+        f'<td class="jl-strip-cell">{_strip(by_block[token], rows, len(tokens))}</td></tr>'
         for token in listed
     )
     # The top token at each block and position, which a position's detail
@@ -599,7 +619,9 @@ def _jacobian_concepts(insight: dict) -> str:
         text = token.get("text") or ""
         concepts = " ".join(str(int(item)) for item in sorted(at[position] & (shown | firsts)))
         marked = " jl-selected" if token["index"] == selected else ""
-        shown_text = html.escape(text.replace("\n", "↵")) if text else _token_label(token)
+        if _SPECIAL_TOKEN.fullmatch(text):
+            marked += " jl-special"
+        shown_text = _word_html(text) if text else _token_label(token)
         words.append(
             f'<span class="jl-word{marked}" data-pos="{position}" data-concepts="{concepts}" '
             f'title="Position {token["index"] + 1}">{shown_text}</span>'
@@ -625,7 +647,9 @@ def _jacobian_concepts(insight: dict) -> str:
         f'<div class="jl-text">{"".join(words)}</div>'
         '<div class="jl-detail" hidden></div>'
         '<div class="jl-concept-wrap"><table class="viz-table jl-concept-table">'
-        '<thead><tr><th></th><th>Token</th><th>Count</th><th>Count by block</th></tr></thead>'
+        '<thead><tr><th></th><th>Concept</th><th class="jl-count">Count</th>'
+        f'<th class="jl-axis"><div><span>Block {first}</span><span>Count by block</span>'
+        f'<span>Block {last}</span></div></th></tr></thead>'
         f"<tbody>{table}</tbody></table></div></div>"
     )
 
