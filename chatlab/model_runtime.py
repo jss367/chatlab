@@ -56,6 +56,33 @@ STEERING_NEEDS_TORCH = (
 )
 
 
+def measure_download(
+    model_id: str, revision: str | None, token: str | None, progress: DownloadProgress
+) -> None:
+    """Tell ``progress`` how many bytes fetching ``model_id`` will take.
+
+    The sum of every file the Hub lists that the cache does not already hold
+    whole: the figure ``snapshot_download``'s own bars reach only once the
+    last file has started. Best effort: without an answer the bars' running
+    total is all the page shows.
+    """
+
+    from huggingface_hub import HfApi, try_to_load_from_cache
+
+    try:
+        info = HfApi().model_info(
+            model_id, revision=revision, token=token, files_metadata=True, timeout=10
+        )
+        total = 0
+        for file in info.siblings or []:
+            cached = try_to_load_from_cache(model_id, file.rfilename, revision=info.sha)
+            if not isinstance(cached, str):
+                total += file.size or 0
+    except Exception as error:
+        logger.info("Could not size the download of %s: %s", model_id, first_line(error))
+        return
+    progress.expect_bytes(total)
+
 class ExclusiveLoad(NamedTuple):
     """What :meth:`ModelManager.claim_exclusive_load` answers with.
 
@@ -416,6 +443,14 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
         )
         try:
             self._list_download(checked_id, progress)
+            # On its own thread so a slow answer never holds up the download,
+            # which asks the Hub for the same file list before it starts.
+            threading.Thread(
+                target=measure_download,
+                args=(checked_id, revision, token, progress),
+                name=f"measure {checked_id}",
+                daemon=True,
+            ).start()
             from huggingface_hub import snapshot_download
 
             path = snapshot_download(

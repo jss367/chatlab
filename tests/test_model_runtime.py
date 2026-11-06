@@ -42,11 +42,19 @@ from chatlab.tokenization import (
 from fakes import Encoding
 
 
+# A download sizes itself against the Hub on a thread of its own; these
+# tests stub snapshot_download and have no Hub to ask.
+_measure = mock.patch.object(model_runtime, "measure_download", lambda *args: None)
+measure_download = model_runtime.measure_download
+
+
 def setUpModule():
     settings_sandbox.start()
+    _measure.start()
 
 
 def tearDownModule():
+    _measure.stop()
     settings_sandbox.stop()
 
 
@@ -1533,6 +1541,52 @@ class DownloadProgressTests(unittest.TestCase):
         with files as entered:
             entered.update(1)
         self.assertEqual(files.n, 1)
+
+    def test_the_hubs_total_holds_while_the_bars_learn_sizes(self):
+        progress, files, transfer, rebuild = self.bars()
+        progress.expect_bytes(3000)
+        # Only the first of three files has started, so the bars know 1000.
+        for bar in (transfer, rebuild):
+            bar.total = 1000
+        transfer.update(900)
+
+        snap = progress.snapshot()
+
+        self.assertEqual((snap.bytes_done, snap.bytes_total), (900, 3000))
+        self.assertAlmostEqual(snap.fraction, 0.3)
+
+    def test_the_total_counts_only_what_the_cache_lacks(self):
+        from chatlab.progress_bars import DownloadProgress
+
+        info = types.SimpleNamespace(
+            sha="abc",
+            siblings=[
+                types.SimpleNamespace(rfilename="config.json", size=10),
+                types.SimpleNamespace(rfilename="a.safetensors", size=1000),
+                types.SimpleNamespace(rfilename="b.safetensors", size=2000),
+            ],
+        )
+        cached = {"config.json": "/cache/config.json"}
+        progress = DownloadProgress()
+        with mock.patch("huggingface_hub.HfApi.model_info", return_value=info) as ask, \
+                mock.patch(
+                    "huggingface_hub.try_to_load_from_cache",
+                    lambda repo, name, revision: cached.get(name),
+                ):
+            measure_download("org/model", "v1", "tok", progress)
+
+        self.assertEqual(progress.snapshot().bytes_total, 3000)
+        self.assertEqual(ask.call_args.kwargs["revision"], "v1")
+        self.assertTrue(ask.call_args.kwargs["files_metadata"])
+
+    def test_a_failed_size_lookup_leaves_the_bars_in_charge(self):
+        from chatlab.progress_bars import DownloadProgress
+
+        progress = DownloadProgress()
+        with mock.patch("huggingface_hub.HfApi.model_info", side_effect=OSError("offline")):
+            measure_download("org/model", None, None, progress)
+
+        self.assertEqual(progress.snapshot().bytes_total, 0)
 
     def test_iterating_a_bar_counts_files(self):
         # huggingface_hub before 1.25 hands the file bar to tqdm's thread_map,
