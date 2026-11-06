@@ -67,21 +67,32 @@ def measure_download(
     total is all the page shows.
     """
 
-    from huggingface_hub import HfApi, try_to_load_from_cache
+    from huggingface_hub import HfApi, constants
+    from huggingface_hub.file_download import repo_folder_name
 
+    blobs = (
+        Path(constants.HF_HUB_CACHE)
+        / repo_folder_name(repo_id=model_id, repo_type="model")
+        / "blobs"
+    )
     try:
         info = HfApi().model_info(
             model_id, revision=revision, token=token, files_metadata=True, timeout=10
         )
         total = 0
         for file in info.siblings or []:
-            cached = try_to_load_from_cache(model_id, file.rfilename, revision=info.sha)
-            if not isinstance(cached, str):
+            # The cache keeps each file once, named for its content (the LFS
+            # sha256, or the git blob id for a small file), and a revision
+            # that reuses one only links to it. snapshot_download counts no
+            # bytes for such a file, so neither may this.
+            blob = file.lfs.sha256 if file.lfs else file.blob_id
+            if blob is None or not (blobs / blob).is_file():
                 total += file.size or 0
     except Exception as error:
         logger.info("Could not size the download of %s: %s", model_id, first_line(error))
         return
     progress.expect_bytes(total)
+
 
 class ExclusiveLoad(NamedTuple):
     """What :meth:`ModelManager.claim_exclusive_load` answers with.

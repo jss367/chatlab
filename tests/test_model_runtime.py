@@ -1558,24 +1558,38 @@ class DownloadProgressTests(unittest.TestCase):
     def test_the_total_counts_only_what_the_cache_lacks(self):
         from chatlab.progress_bars import DownloadProgress
 
+        lfs = types.SimpleNamespace
         info = types.SimpleNamespace(
             sha="abc",
             siblings=[
-                types.SimpleNamespace(rfilename="config.json", size=10),
-                types.SimpleNamespace(rfilename="a.safetensors", size=1000),
-                types.SimpleNamespace(rfilename="b.safetensors", size=2000),
+                types.SimpleNamespace(
+                    rfilename="config.json", size=10, blob_id="c0ffee", lfs=None
+                ),
+                # Cached under an older revision: the blob is there, the
+                # new snapshot's link to it is not.
+                types.SimpleNamespace(
+                    rfilename="a.safetensors", size=1000, blob_id="g1", lfs=lfs(sha256="aaa")
+                ),
+                types.SimpleNamespace(
+                    rfilename="b.safetensors", size=2000, blob_id="g2", lfs=lfs(sha256="bbb")
+                ),
             ],
         )
-        cached = {"config.json": "/cache/config.json"}
         progress = DownloadProgress()
-        with mock.patch("huggingface_hub.HfApi.model_info", return_value=info) as ask, \
-                mock.patch(
-                    "huggingface_hub.try_to_load_from_cache",
-                    lambda repo, name, revision: cached.get(name),
-                ):
-            measure_download("org/model", "v1", "tok", progress)
+        with tempfile.TemporaryDirectory() as cache:
+            blobs = Path(cache) / "models--org--model" / "blobs"
+            blobs.mkdir(parents=True)
+            (blobs / "c0ffee").write_text("{}")
+            (blobs / "aaa").write_text("weights")
+            # A partial file is still to fetch in full.
+            (blobs / "bbb.incomplete").write_text("half")
+            with mock.patch("huggingface_hub.constants.HF_HUB_CACHE", cache), \
+                    mock.patch(
+                        "huggingface_hub.HfApi.model_info", return_value=info
+                    ) as ask:
+                measure_download("org/model", "v1", "tok", progress)
 
-        self.assertEqual(progress.snapshot().bytes_total, 3000)
+        self.assertEqual(progress.snapshot().bytes_total, 2000)
         self.assertEqual(ask.call_args.kwargs["revision"], "v1")
         self.assertTrue(ask.call_args.kwargs["files_metadata"])
 
