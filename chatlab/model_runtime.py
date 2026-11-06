@@ -97,22 +97,27 @@ def measure_download(
     and a file the download finished meanwhile would pass for one it never
     had to fetch. That sum is the figure ``snapshot_download``'s own bars
     reach only once the last file has started, since it counts no bytes for
-    a file it already holds. Best effort: without an answer the bars'
-    running total is all the page shows.
+    a file it already holds, nor for a second path to content it has just
+    fetched for the first. Best effort: without an answer the bars' running
+    total is all the page shows.
     """
 
-    from huggingface_hub import HfApi
-
     try:
+        from huggingface_hub import HfApi
+
         info = HfApi().model_info(
             model_id, revision=revision, token=token, files_metadata=True, timeout=10
         )
         total = 0
+        counted = set(cached)
         for file in info.siblings or []:
             blob = file.lfs.sha256 if file.lfs else file.blob_id
-            if blob not in cached:
+            if blob is None or blob not in counted:
                 total += file.size or 0
+            if blob is not None:
+                counted.add(blob)
     except Exception as error:
+        progress.stop_sizing()
         logger.info("Could not size the download of %s: %s", model_id, first_line(error))
         return
     progress.expect_bytes(total)
@@ -480,6 +485,7 @@ class ModelManager(LoadingMixin, GenerationMixin, InspectionMixin):
             self._list_download(checked_id, progress)
             # On its own thread so a slow answer never holds up the download,
             # which asks the Hub for the same file list before it starts.
+            progress.start_sizing()
             threading.Thread(
                 target=measure_download,
                 args=(checked_id, revision, token, progress, cached_blobs(checked_id)),
