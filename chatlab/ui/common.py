@@ -50,10 +50,11 @@ DOWNLOAD_BAR_WIDTH = 24
 # it shows with Chat only, and is wide enough for a model ID and a token
 # count while leaving the conversation most of the screen.
 #
-# Wide enough for the longest page name at the tile's small type. With five built-in
+# Wide enough for the longest page name at the tile's small type, bold when
+# selected ("Institutions", about 63px of the 69px inside a tile). With five built-in
 # pages there is nothing to be won by hiding those names: the pane would save
 # a handful of pixels and cost a reader the only signpost on the screen.
-NAV_PANE_WIDTH = 72
+NAV_PANE_WIDTH = 88
 
 
 CONVERSATION_PANE_WIDTH = 248
