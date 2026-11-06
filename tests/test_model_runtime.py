@@ -42,11 +42,25 @@ from chatlab.tokenization import (
 from fakes import Encoding
 
 
+# A download sizes itself against the Hub on a thread of its own; these
+# tests stub snapshot_download and have no Hub to ask, so the lookup gives
+# up at once, as it would offline.
+_measure = mock.patch.object(
+    model_runtime,
+    "measure_download",
+    lambda model_id, revision, token, progress, cached: progress.stop_sizing(),
+)
+measure_download = model_runtime.measure_download
+cached_blobs = model_runtime.cached_blobs
+
+
 def setUpModule():
     settings_sandbox.start()
+    _measure.start()
 
 
 def tearDownModule():
+    _measure.stop()
     settings_sandbox.stop()
 
 
@@ -1533,6 +1547,102 @@ class DownloadProgressTests(unittest.TestCase):
         with files as entered:
             entered.update(1)
         self.assertEqual(files.n, 1)
+
+    def test_the_hubs_total_holds_while_the_bars_learn_sizes(self):
+        progress, files, transfer, rebuild = self.bars()
+        progress.expect_bytes(3000)
+        # Only the first of three files has started, so the bars know 1000.
+        for bar in (transfer, rebuild):
+            bar.total = 1000
+        transfer.update(900)
+
+        snap = progress.snapshot()
+
+        self.assertEqual((snap.bytes_done, snap.bytes_total), (900, 3000))
+        self.assertAlmostEqual(snap.fraction, 0.3)
+
+    def test_the_total_counts_only_what_the_cache_lacks(self):
+        from chatlab.progress_bars import DownloadProgress
+
+        lfs = types.SimpleNamespace
+        info = types.SimpleNamespace(
+            sha="abc",
+            siblings=[
+                types.SimpleNamespace(
+                    rfilename="config.json", size=10, blob_id="c0ffee", lfs=None
+                ),
+                # Cached under an older revision: the blob is there, the
+                # new snapshot's link to it is not.
+                types.SimpleNamespace(
+                    rfilename="a.safetensors", size=1000, blob_id="g1", lfs=lfs(sha256="aaa")
+                ),
+                types.SimpleNamespace(
+                    rfilename="b.safetensors", size=2000, blob_id="g2", lfs=lfs(sha256="bbb")
+                ),
+            ],
+        )
+        progress = DownloadProgress()
+        with tempfile.TemporaryDirectory() as cache:
+            blobs = Path(cache) / "models--org--model" / "blobs"
+            blobs.mkdir(parents=True)
+            (blobs / "c0ffee").write_text("{}")
+            (blobs / "aaa").write_text("weights")
+            # A partial file is still to fetch in full.
+            (blobs / "bbb.incomplete").write_text("half")
+            with mock.patch("huggingface_hub.constants.HF_HUB_CACHE", cache):
+                cached = cached_blobs("org/model")
+            # A file the download finishes while the Hub is being asked
+            # still counts: the cache was read before the download began.
+            (blobs / "bbb").write_text("weights")
+            with mock.patch("huggingface_hub.HfApi.model_info", return_value=info) as ask:
+                measure_download("org/model", "v1", "tok", progress, cached)
+
+        self.assertEqual(cached, {"c0ffee", "aaa"})
+        self.assertEqual(progress.snapshot().bytes_total, 2000)
+        self.assertEqual(ask.call_args.kwargs["revision"], "v1")
+        self.assertTrue(ask.call_args.kwargs["files_metadata"])
+
+    def test_no_byte_total_is_shown_until_the_hub_answers(self):
+        progress, files, transfer, rebuild = self.bars()
+        progress.start_sizing()
+        # The first file has started and is nearly done; alone it would
+        # read as the whole download at 90%.
+        transfer.total = 1000
+        transfer.update(900)
+
+        self.assertEqual(progress.snapshot().bytes_total, 0)
+        progress.expect_bytes(3000)
+        self.assertEqual(progress.snapshot().bytes_total, 3000)
+
+    def test_a_blob_at_two_paths_counts_once(self):
+        from chatlab.progress_bars import DownloadProgress
+
+        weights = types.SimpleNamespace(sha256="aaa")
+        info = types.SimpleNamespace(
+            sha="abc",
+            siblings=[
+                types.SimpleNamespace(rfilename="a.safetensors", size=1000, blob_id="g", lfs=weights),
+                types.SimpleNamespace(rfilename="copy/a.safetensors", size=1000, blob_id="g", lfs=weights),
+                types.SimpleNamespace(rfilename="README.md", size=5, blob_id=None, lfs=None),
+                types.SimpleNamespace(rfilename="LICENSE", size=7, blob_id=None, lfs=None),
+            ],
+        )
+        progress = DownloadProgress()
+        with mock.patch("huggingface_hub.HfApi.model_info", return_value=info):
+            measure_download("org/model", None, None, progress, frozenset())
+
+        self.assertEqual(progress.snapshot().bytes_total, 1012)
+
+    def test_a_failed_size_lookup_leaves_the_bars_in_charge(self):
+        from chatlab.progress_bars import DownloadProgress
+
+        progress = DownloadProgress()
+        progress.start_sizing()
+        progress.bar_class()(total=500, unit="B")
+        with mock.patch("huggingface_hub.HfApi.model_info", side_effect=OSError("offline")):
+            measure_download("org/model", None, None, progress, frozenset())
+
+        self.assertEqual(progress.snapshot().bytes_total, 500)
 
     def test_iterating_a_bar_counts_files(self):
         # huggingface_hub before 1.25 hands the file bar to tqdm's thread_map,

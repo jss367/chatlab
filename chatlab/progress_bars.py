@@ -141,11 +141,40 @@ class DownloadProgress:
     before 1.23, which added the transfer bar). That is why byte totals below
     are read as a maximum across byte bars rather than a sum: they are two
     views of the same bytes.
+
+    Those bars learn a file's size only when that file starts, so their
+    total climbs through the whole download, and the percentage with it
+    hangs near the top while the total runs away. :meth:`expect_bytes`
+    takes the whole figure from the Hub's file list up front, and the larger
+    of the two is reported. Between :meth:`start_sizing` and that answer no
+    byte total is reported at all, so the first file's bar never passes for
+    the whole download and the percentage never runs backwards.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._bars: list = []
+        self._expected_bytes = 0
+        self._sizing = False
+
+    def start_sizing(self) -> None:
+        """Hold back the byte total until :meth:`expect_bytes` or :meth:`stop_sizing`."""
+
+        with self._lock:
+            self._sizing = True
+
+    def expect_bytes(self, total: int) -> None:
+        """Record how many bytes the download will fetch, known before it starts."""
+
+        with self._lock:
+            self._expected_bytes = max(0, int(total))
+            self._sizing = False
+
+    def stop_sizing(self) -> None:
+        """Give up on a total from the Hub, leaving the bars' own in charge."""
+
+        with self._lock:
+            self._sizing = False
 
     def bar_class(self) -> type:
         """A tqdm class for ``snapshot_download(tqdm_class=...)`` that reports here."""
@@ -162,7 +191,7 @@ class DownloadProgress:
         with self._lock:
             bars = list(self._bars)
             files_done = files_total = 0
-            bytes_done = bytes_total = 0
+            bytes_done, bytes_total = 0, self._expected_bytes
             for bar in bars:
                 count = int(bar.n or 0)
                 total = int(bar.total or 0)
@@ -177,6 +206,8 @@ class DownloadProgress:
                 else:
                     files_done += count
                     files_total += total
+            if self._sizing:
+                bytes_total = 0
         return DownloadSnapshot(files_done, files_total, bytes_done, bytes_total)
 
 

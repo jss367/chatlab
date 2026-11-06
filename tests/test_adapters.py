@@ -27,11 +27,23 @@ BASE = "org/base-model"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
 
+# A download sizes itself against the Hub on a thread of its own; these
+# tests stub snapshot_download and have no Hub to ask, so the lookup gives
+# up at once, as it would offline.
+_measure = mock.patch.object(
+    model_runtime,
+    "measure_download",
+    lambda model_id, revision, token, progress, cached: progress.stop_sizing(),
+)
+
+
 def setUpModule():
     settings_sandbox.start()
+    _measure.start()
 
 
 def tearDownModule():
+    _measure.stop()
     settings_sandbox.stop()
 
 
