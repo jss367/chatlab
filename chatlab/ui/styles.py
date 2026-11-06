@@ -602,14 +602,26 @@ body.column-dragging {{ user-select: none; }}
   --token-view-width: 240px;
 }}
 #conversation-tabs > .tab-wrapper {{ flex: none; }}
-/* The tabs are laid out in what is left when the switch has taken its room,
-   so the last of them cannot run underneath it. The room is padding rather
-   than a narrower strip because the rule under the tabs is drawn across the
-   strip's padding: it stays the full width of the page, which is what it is
-   there to divide. Too narrow a window for even four tabs scrolls them
-   sideways; Gradio cuts them off instead, which puts a tab out of reach. */
+/* The tabs and Gradio's "more" menu are laid out in what is left when the
+   switch has taken its room, so neither can run underneath it. The room is
+   taken from the wrapper rather than padded inside the tab strip because
+   Gradio decides which tabs fit by the strip's full width, padding
+   included: padded, a tab it kept would be drawn under the switch, and so
+   would the menu holding the ones it moved out. Gradio draws the rule under
+   the tabs on the strip, so it is drawn again across the wrapper: it stays
+   the full width of the page, which is what it is there to divide. */
+#conversation-tabs > .tab-wrapper {{ padding-right: var(--token-view-width); }}
+#conversation-tabs > .tab-wrapper::after {{
+  content: ""; position: absolute; left: 0; right: 0;
+  /* The strip is centered in the wrapper's content box, which Gradio sizes
+     a padding short of the strip, so the strip's foot is half that padding
+     below the box's own. */
+  top: calc(var(--size-8) - var(--size-2) / 2 - 1px); height: 1px;
+  background: var(--border-color-primary);
+}}
+/* Too narrow a window for even the first tab scrolls it sideways rather
+   than cutting it off. */
 #conversation-tabs .tab-container[role="tablist"] {{
-  padding-right: var(--token-view-width);
   overflow-x: auto; scrollbar-width: none;
 }}
 #conversation-tabs .tab-container[role="tablist"]::-webkit-scrollbar {{ display: none; }}
