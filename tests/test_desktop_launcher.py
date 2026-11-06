@@ -275,7 +275,7 @@ class RestartOfferTests(unittest.TestCase):
         still restart into the choice they just saved.
         """
 
-        flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
+        flow = desktop_launcher.UpdateFlow(mock.MagicMock(native=None), Path("/Applications/ChatLab.app"))
         with mock.patch.object(updater, "install_update", side_effect=updater.UpdateError("disk full")), \
                 mock.patch.object(updater, "relaunch") as relaunch:
             with self.assertLogs(level="ERROR"):
@@ -329,7 +329,7 @@ class RestartOfferTests(unittest.TestCase):
         has to work - the update is not relaunching any more.
         """
 
-        flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
+        flow = desktop_launcher.UpdateFlow(mock.MagicMock(native=None), Path("/Applications/ChatLab.app"))
         with mock.patch.object(updater, "install_update"), \
                 mock.patch.object(updater, "relaunch", side_effect=OSError("no such file")):
             with self.assertLogs(level="ERROR"):
@@ -349,7 +349,7 @@ class RestartOfferTests(unittest.TestCase):
         than being cancelled the moment it starts.
         """
 
-        flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
+        flow = desktop_launcher.UpdateFlow(mock.MagicMock(native=None), Path("/Applications/ChatLab.app"))
         self.assertIsNone(flow.may_restart())
         stopped = flow.cancel
         flow.release_restart()
@@ -378,7 +378,7 @@ class RestartOfferTests(unittest.TestCase):
         the swap - the fresh event is for the next update, not for this one.
         """
 
-        flow = desktop_launcher.UpdateFlow(mock.MagicMock(), Path("/Applications/ChatLab.app"))
+        flow = desktop_launcher.UpdateFlow(mock.MagicMock(native=None), Path("/Applications/ChatLab.app"))
         seen = {}
 
         def install(release, bundle, progress=None, begin_swap=None, cancelled=None):

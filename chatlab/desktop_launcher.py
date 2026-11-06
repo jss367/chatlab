@@ -295,9 +295,7 @@ class UpdateFlow:
                 self._worker = current
                 current.start()
         if busy and interactive:
-            _window_call(
-                self.window, "create_confirmation_dialog", "ChatLab", "An update check or download is already running."
-            )
+            _confirm(self.window, "ChatLab", "An update check or download is already running.")
         return current
 
     def wait_for_swap(self, timeout: float = 300, grace: float = 3.0) -> None:
@@ -335,28 +333,22 @@ class UpdateFlow:
             release = updater.check_for_update()
         except updater.UpdateError as error:
             logging.warning("%s", error)
-            if interactive and _window_call(
-                self.window, "create_confirmation_dialog", "ChatLab", f"{error}\n\nOpen the releases page?"
-            ):
+            if interactive and _confirm(self.window, "ChatLab", f"{error}\n\nOpen the releases page?"):
                 webbrowser.open(updater.RELEASES_PAGE_URL)
             return
         else:
             if release is None:
                 logging.info("ChatLab %s is up to date", __version__)
                 if interactive:
-                    _window_call(
-                        self.window, "create_confirmation_dialog",
-                        "ChatLab",
-                        f"ChatLab {__version__} is the latest version.",
-                    )
+                    _confirm(self.window, "ChatLab", f"ChatLab {__version__} is the latest version.")
                 return
             self._offer(release)
         finally:
             self._lock.release()
 
     def _offer(self, release: updater.ReleaseInfo) -> None:
-        accepted = _window_call(
-            self.window, "create_confirmation_dialog",
+        accepted = _confirm(
+            self.window,
             "Update available",
             f"ChatLab {release.version} is available (you have {__version__}).\n\n"
             "Download and install it now? ChatLab will restart when it finishes.",
@@ -383,7 +375,7 @@ class UpdateFlow:
         except updater.UpdateError as error:
             logging.error("Update failed: %s", error)
             _window_call(self.window, "set_title", WINDOW_TITLE)
-            _window_call(self.window, "create_confirmation_dialog", "Update failed", str(error))
+            _confirm(self.window, "Update failed", str(error))
             return
         else:
             relaunching = True
@@ -400,8 +392,8 @@ class UpdateFlow:
             logging.error("Could not reopen ChatLab after the update: %s", error)
             self.release_restart()
             _window_call(self.window, "set_title", WINDOW_TITLE)
-            _window_call(
-                self.window, "create_confirmation_dialog",
+            _confirm(
+                self.window,
                 "Update installed",
                 f"ChatLab {release.version} is installed, but it could not be reopened "
                 f"({error}).\n\nQuit and open ChatLab again to run it.",
@@ -468,9 +460,7 @@ class RemoteConnection:
             self._say(f"ChatLab is already connected to {current.target.host}. Disconnect first.")
             return
         last = remote.load_target(self.saved)
-        answer = _window_call(
-            self.window, "evaluate_js", f"prompt({json.dumps(self.PROMPT)}, {json.dumps(str(last) if last else '')})"
-        )
+        answer = _ask(self.window, "Connect to Remote Host", self.PROMPT, str(last) if last else "")
         if not isinstance(answer, str) or not answer.strip():
             return
         try:
@@ -556,7 +546,90 @@ class RemoteConnection:
             return True
 
     def _say(self, message: str) -> None:
-        _window_call(self.window, "create_confirmation_dialog", "ChatLab", message)
+        _confirm(self.window, "ChatLab", message)
+
+
+def _confirm(window, title: str, message: str) -> bool:
+    """Ask OK or Cancel in a sheet on the window; True for OK."""
+
+    answer = _sheet(window, title, message)
+    if answer is _NO_SHEET:
+        return bool(_window_call(window, "create_confirmation_dialog", title, message))
+    return answer is not None
+
+
+def _ask(window, title: str, message: str, default: str) -> str | None:
+    """Ask for a line of text in a sheet on the window; None for Cancel."""
+
+    answer = _sheet(window, title, message, default)
+    if answer is _NO_SHEET:
+        return _window_call(window, "evaluate_js", f"prompt({json.dumps(message)}, {json.dumps(default)})")
+    return answer
+
+
+_NO_SHEET = object()
+
+
+def _sheet(window, title: str, message: str, default: str | None = None):
+    """Show an alert as a sheet on the window and wait for the answer.
+
+    pywebview shows its dialogs, and WebKit's prompt(), as standalone NSAlerts
+    with runModal, and on recent macOS that panel can come up with its text
+    unpainted until something else forces a redraw. A sheet attached to the
+    window draws normally. Returns the entered text (or "" with no text field)
+    for OK, None for Cancel, and _NO_SHEET when the window has no Cocoa window
+    to attach to, so the caller can fall back to pywebview's dialog.
+    """
+
+    native = getattr(window, "native", None)
+    if native is None:
+        return _NO_SHEET
+    import AppKit
+    from PyObjCTools import AppHelper
+
+    done = threading.Event()
+    answer = None
+
+    def show():
+        nonlocal answer
+        try:
+            if not native.isVisible() and not native.isMiniaturized():
+                # The window is gone, so nothing would ever end the sheet.
+                done.set()
+                return
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_(title)
+            alert.setInformativeText_(message)
+            alert.addButtonWithTitle_("OK")
+            alert.addButtonWithTitle_("Cancel")
+            field = None
+            if default is not None:
+                field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 320, 24))
+                field.cell().setScrollable_(True)
+                field.setStringValue_(default)
+                alert.setAccessoryView_(field)
+                alert.window().setInitialFirstResponder_(field)
+
+            def finished(response):
+                nonlocal answer
+                if response == AppKit.NSAlertFirstButtonReturn:
+                    answer = "" if field is None else str(field.stringValue())
+                done.set()
+
+            native.makeKeyAndOrderFront_(None)
+            alert.beginSheetModalForWindow_completionHandler_(native, finished)
+        except Exception:  # noqa: BLE001 - a dialog that fails to show is a Cancel
+            logging.exception("Could not show the %r sheet", title)
+            done.set()
+
+    if threading.current_thread() is threading.main_thread():
+        # Waiting here would block the run loop the sheet needs; only notices
+        # are shown from the main thread, and they need no answer.
+        show()
+        return None
+    AppHelper.callAfter(show)
+    done.wait()
+    return answer
 
 
 def _window_call(window, method: str, *args):
