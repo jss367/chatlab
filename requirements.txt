@@ -19,8 +19,8 @@ huggingface-hub>=1.1
 # missing file from the network being down.
 httpx>=0.24.1
 # Fetches the Metal kernels the 8-bit and 4-bit weight precisions run on.
-# Transformers 5.18 requires kernels 0.17; retain a compatible bounded pair.
-kernels>=0.17,<0.18
+# Transformers 5.22 requires kernels 0.17.2 or newer; retain a compatible bounded pair.
+kernels>=0.17.2,<0.18
 # Inspect chat templates for native thinking controls.
 jinja2>=3.1
 # Runs the MLX-quantized checkpoints mlx-community publishes, on Apple
@@ -58,16 +58,20 @@ tiktoken>=0.7
 safetensors>=0.8
 # Below 2.15: the 8-bit and 4-bit Metal kernel revision kernels 0.17 resolves
 # has builds only through torch 2.14, so 2.15 fails the packaged smoke test.
-torch>=2.5,<2.15
+# 2.6 is the floor because Transformers 5.22 disables itself below it.
+torch>=2.6,<2.15
 # Turns a pasted picture into a vision model's input. Transformers' image
 # processors run on it (their slow numpy versions are going away), and so do
 # the video processors a Qwen-VL processor loads beside its image one, which
-# refuse to be built without it. 0.20 is the release paired with torch 2.5.
-torchvision>=0.20,<0.30
+# refuse to be built without it. 0.21 is the release paired with torch 2.6.
+torchvision>=0.21,<0.30
 # The download and load progress bars are tqdm classes that report to the
 # interface rather than the terminal.
 tqdm>=4.60
-# Pinned to 5.18 as a pair with kernels 0.17 above: 5.18 accepts only that
+# Pinned as a pair with kernels 0.17 above: this release accepts only that
 # kernels release, and without it reports no kernels and refuses the 8-bit
 # and 4-bit loads. The Metal quantizer behind those precisions arrived in 5.3.
-transformers>=5.18,<5.19
+# 5.22 is the floor because 5.18 drops the weight_scale_inv tensors of
+# Qwen3.8-27B-FP8's gate_proj layers while loading it, so the model answers
+# in noise without any error.
+transformers>=5.22.1,<5.23
