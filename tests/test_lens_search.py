@@ -1,6 +1,5 @@
 """Finding published Jacobian lenses on the Hub for the loaded model."""
 
-import json
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -23,12 +22,15 @@ class FakeHub:
         self.tags = tags or {}
         self.searches = []
 
-    def list_models(self, filter, search, limit):
+    def list_models(self, filter, limit, search=None):
         self.searches.append((filter, search))
-        base = filter.removeprefix("base_model:")
+        base_filter, *tags = [filter] if isinstance(filter, str) else filter
+        base = base_filter.removeprefix("base_model:")
         return [
             SimpleNamespace(id=name) for name, repo in self.repositories.items()
-            if repo["base"] == base and search in name.lower()
+            if repo["base"] == base
+            and (search is None or search in name.lower())
+            and all(tag in repo.get("tags", []) for tag in tags)
         ]
 
     def model_info(self, repository, files_metadata=False):
@@ -64,6 +66,10 @@ HUB = {
         "base": "Qwen/Qwen3.8-27B",
         "files": [_file("qwen3.8-27b/r-lens/lens.pt", 100), _file("gemma-4-12b/r-lens/lens.pt", 100)],
     },
+    # Named for neither "lens" nor "jacobian"; only its tags say what it is.
+    "lab/qwen-readouts": {
+        "base": "Qwen/Qwen3.8-27B", "tags": ["jacobian-lens"], "files": [_file("readout.pt", 50)],
+    },
     # Says "lens" and holds a .pt file, but is not a lens of a kind ChatLab reads.
     "someone/cot-oracle-lens": {
         "base": "Qwen/Qwen3.8-27B", "files": [_file("training_state.pt", 10)],
@@ -83,12 +89,15 @@ class FindLensesTests(unittest.TestCase):
             [
                 ("eyes-ml/Qwen3.8-27B_jacobian-lens", "Qwen3.8-27B_jacobian_lens.pt"),
                 ("gghfez/Qwen3.8-27B-jacobian-lens", "Qwen3.8-27B_jlens.pt"),
+                ("lab/qwen-readouts", "readout.pt"),
                 ("lab/rs-lenses", "qwen3.8-27b/r-lens/lens.pt"),
             ],
         )
         self.assertEqual(found[0].fitted_model_id, "Qwen/Qwen3.8-27B")
         self.assertEqual(found[0].updated, "2026-08-16")
-        self.assertEqual({search for _, search in hub.searches}, set(jacobian_lens.LENS_SEARCH_TERMS))
+        self.assertEqual(
+            {search for _, search in hub.searches} - {None}, set(jacobian_lens.LENS_SEARCH_TERMS),
+        )
 
     def test_a_quantized_checkpoint_names_its_source(self):
         hub = FakeHub(HUB, tags={"Qwen/Qwen3.8-27B-FP8": [
@@ -123,7 +132,7 @@ class FindLensesPageTests(unittest.TestCase):
         hub = FakeHub(HUB, tags={"Qwen/Qwen3.8-27B-FP8": ["base_model:quantized:Qwen/Qwen3.8-27B"]})
         choices, note = self._find("Qwen/Qwen3.8-27B-FP8", hub)
         self.assertTrue(choices["visible"])
-        self.assertEqual(len(choices["choices"]), 3)
+        self.assertEqual(len(choices["choices"]), 4)
         self.assertIn("quantized version of", note)
         self.assertIn("load `Qwen/Qwen3.8-27B` in full precision", note)
 

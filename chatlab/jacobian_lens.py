@@ -600,6 +600,9 @@ MAX_FOUND_REPOSITORIES = 20
 # name: "lens" finds J-lens, J++ lens and "jlens" repositories, "jacobian"
 # the few named only for the method.
 LENS_SEARCH_TERMS = ("lens", "jacobian")
+# Queried as tags as well, so a repository whose name says neither is still
+# found by what its card declares.
+LENS_TAGS = ("jacobian-lens", "jacobian_lens", "jlens", "j-lens", "jpp-lens", "r-lens")
 # A repository is kept only when its name or tags say it holds lenses of the
 # kinds this module reads; "lens" alone also matches probes, oracles and
 # training checkpoints.
@@ -660,8 +663,11 @@ def find_lenses(model_id: str, api=None) -> list[FoundLens]:
     api = api or HfApi()
     try:
         repositories = {}
-        for term in LENS_SEARCH_TERMS:
-            for listed in api.list_models(filter=f"base_model:{model_id}", search=term, limit=MAX_FOUND_REPOSITORIES):
+        base = f"base_model:{model_id}"
+        queries = [{"filter": base, "search": term} for term in LENS_SEARCH_TERMS]
+        queries += [{"filter": [base, tag]} for tag in LENS_TAGS]
+        for query in queries:
+            for listed in api.list_models(**query, limit=MAX_FOUND_REPOSITORIES):
                 repositories.setdefault(listed.id, None)
         found = []
         for repository in list(repositories)[:MAX_FOUND_REPOSITORIES]:
