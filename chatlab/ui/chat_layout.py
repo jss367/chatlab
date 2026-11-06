@@ -55,8 +55,10 @@ from chatlab.ui.inspection import (
     all_blocks,
     change_lens_mode,
     change_pinned_token,
+    find_lenses,
     import_jacobian_lens,
     inspect_layers,
+    pick_found_lens,
     remember_inspect_target,
     render_attention,
     render_block_range,
@@ -391,6 +393,9 @@ class Layers:
     inspection_session: gr.State
     jacobian_controls: gr.Column
     lens_setup: gr.Accordion
+    find_lenses_button: gr.Button
+    found_lenses: gr.Dropdown
+    found_lenses_note: gr.Markdown
     lens_repository: gr.Textbox
     lens_filename: gr.Textbox
     lens_file: gr.File
@@ -1425,6 +1430,9 @@ def _build_layers() -> Layers:
                 "fit new ones. Supports Llama, Mistral, Qwen, Gemma, OLMo, GLM-4, Phi-3, "
                 "Granite, Cohere, and SmolLM3 text models, as Transformers weights or MLX conversions."
             )
+            find_lenses_button = gr.Button("Find lenses for the loaded model", size="sm")
+            found_lenses_note = gr.Markdown("")
+            found_lenses = gr.Dropdown(label="Lenses on Hugging Face", choices=[], visible=False)
             with gr.Row(elem_classes=["inspector-control-row"]):
                 lens_repository = gr.Textbox(
                     label="Hub repository", placeholder="For example, mhough/olmo3-jacobian-lenses",
@@ -1502,6 +1510,9 @@ def _build_layers() -> Layers:
         inspection_session=inspection_session,
         jacobian_controls=jacobian_controls,
         lens_setup=lens_setup,
+        find_lenses_button=find_lenses_button,
+        found_lenses=found_lenses,
+        found_lenses_note=found_lenses_note,
         lens_repository=lens_repository,
         lens_filename=lens_filename,
         lens_file=lens_file,
@@ -2016,6 +2027,14 @@ def wire_inspector(page: ChatPage, states: SharedState) -> None:
     page.layers.lens_mode.change(
         change_lens_mode, [page.layers.lens_mode, page.layers.inspection_session],
         [page.layers.jacobian_controls, page.layers.attention_layer, *inspection_outputs],
+        queue=False,
+    )
+    page.layers.find_lenses_button.click(
+        find_lenses, None, [page.layers.found_lenses, page.layers.found_lenses_note],
+    )
+    page.layers.found_lenses.input(
+        pick_found_lens, page.layers.found_lenses,
+        [page.layers.lens_repository, page.layers.lens_filename, page.layers.fitted_model_id],
         queue=False,
     )
     page.layers.import_lens_button.click(

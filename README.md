@@ -363,6 +363,14 @@ inside it, or choose a saved file, enter the model ID the lens was fitted
 for, and press **Import lens**. Then click a prompt or response token and
 press **Inspect layers**.
 
+**Find lenses for the loaded model** searches Hugging Face for lens files
+whose model card names the loaded model as its base model, and picking one
+fills in the repository, file and model ID. A quantized checkpoint, such as
+an FP8 or MLX conversion, is searched under the model it was quantized from,
+since lenses are published against that one; a Transformers load then needs
+that model's full-precision weights before the import. A lens published
+without a base model tag is not found, and is imported by name as before.
+
 The readout is a grid: one column per token up to and including the one you
 clicked, one row per fitted decoder block, and a final **Output** row holding
 the model's own next-token prediction at each position. Each cell shows the
