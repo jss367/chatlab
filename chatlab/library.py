@@ -315,7 +315,7 @@ def parse(payload: str) -> dict:
     if not branches:
         branches[MAIN_BRANCH] = []
     active = data.get("active")
-    if active not in branches:
+    if not isinstance(active, str) or active not in branches:
         active = next(iter(branches))
     return {
         "active": active,
@@ -348,9 +348,11 @@ def merge(mine: dict | None, theirs: dict | None) -> dict:
         return mine
     theirs = copy_forks(theirs)
 
-    names = list(mine["branches"])
-    for held in (theirs["branches"], mine["updated"], theirs["updated"]):
-        names += [name for name in held if name not in names]
+    names = dict.fromkeys(
+        name
+        for entries in (mine["branches"], theirs["branches"], mine["updated"], theirs["updated"])
+        for name in entries
+    )
 
     branches: dict[str, list[dict]] = {}
     origins: dict[str, dict] = {}
@@ -435,7 +437,7 @@ def read(path: Path | None = None) -> dict | None:
         raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         logger.warning("Could not read the conversations in %s: %s", target, error)
         return None
     try:

@@ -256,6 +256,15 @@ class WriteTests(unittest.TestCase):
                     settings.DEFAULTS.to_mapping(),
                 )
 
+    def test_settings_backups_do_not_collide_within_one_second(self):
+        with mock.patch.object(settings.time, "strftime", return_value="20261003-010000"):
+            for original in ("{first", "{second"):
+                self.path.write_text(original)
+                with self.assertLogs(settings.logger, level="WARNING"):
+                    self.assertEqual(settings.write(settings.DEFAULTS, path=self.path), self.path)
+        backups = self.root.glob("settings.json.unreadable-*")
+        self.assertEqual({p.read_text() for p in backups}, {"{first", "{second"})
+
     def test_a_file_that_is_not_utf8_reads_as_the_defaults(self):
         self.path.write_bytes(b'{"system_prompt": "\\xff\xff"}')
 

@@ -108,6 +108,15 @@ class RoundTripTests(unittest.TestCase):
             self.assertIsNone(library.read(self.path))
         self.assertEqual(self.path.read_text(), "{not json")
 
+    def test_invalid_utf8_is_preserved_on_the_next_save(self):
+        self.path.parent.mkdir(parents=True)
+        original = b'{"content": "\xff"}'
+        self.path.write_bytes(original)
+        with self.assertLogs(library.logger, level="WARNING"):
+            self.assertIsNone(library.read(self.path))
+            self.assertEqual(library.write(new_forks(), self.path), self.path)
+        self.assertEqual([p.read_bytes() for p in library.unreadable_copies(self.path)], [original])
+
     def test_a_save_over_an_unreadable_file_keeps_the_file_aside(self):
         forks = new_forks()
         put_branch(forks, MAIN_BRANCH, [make_turn("user", "keep me")])
@@ -202,6 +211,11 @@ class RoundTripTests(unittest.TestCase):
             )
         )
         self.assertEqual(restored["active"], "Chat 3")
+
+    def test_a_malformed_active_selection_preserves_the_branches(self):
+        data = {"format": library.LIBRARY_FORMAT, "active": [],
+                "branches": [{"name": "Chat 3", "turns": []}]}
+        self.assertEqual(library.parse(json.dumps(data))["active"], "Chat 3")
 
     def test_an_empty_list_of_branches_becomes_the_main_conversation(self):
         restored = library.parse(

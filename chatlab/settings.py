@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import uuid4
 
 from chatlab import image_runtime
 from chatlab.themes import APPEARANCES, DEFAULT_APPEARANCE, DEFAULT_THEME, THEMES
@@ -468,7 +469,7 @@ def _keep_unreadable(destination: Path) -> None:
     if isinstance(loaded, dict):
         return
     kept = destination.with_name(
-        f"{destination.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}"
+        f"{destination.name}.unreadable-{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex}"
     )
     os.replace(destination, kept)
     logger.warning("Kept the unreadable settings file as %s.", kept)
