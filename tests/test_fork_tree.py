@@ -134,6 +134,6 @@ class ForkTreeTests(unittest.TestCase):
             self.assertIn('&lt;img', markup)
 
     def test_invalid_origin_coordinates_are_rejected(self):
-        for values in ({'turn': True}, {'token': -1}, {'replacement_ids': ['4']}, {'original': []}):
+        for values in ({'turn': True}, {'token': -1}, {'replacement_ids': ['4']}, {'original': []}, {'kind': []}):
             with self.assertRaises(ValueError):
                 validate_origin({'parent': 'Main', 'kind': 'token', **values})

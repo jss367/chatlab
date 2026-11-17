@@ -14,7 +14,7 @@ def validate_origin(value):
     """Validate coordinates without requiring an ancestor to still exist."""
     if not isinstance(value, dict) or not isinstance(value.get("parent"), str):
         raise ValueError("A fork origin needs a parent branch name.")
-    if value.get("kind") not in {"copy", "message", "token", "prompt"}:
+    if value.get("kind") not in ("copy", "message", "token", "prompt"):
         raise ValueError("Unknown fork origin kind.")
     for key in ("turn", "token", "original_id", "message_count"):
         if key in value and (type(value[key]) is not int or value[key] < (1 if key == "token" else 0)):
