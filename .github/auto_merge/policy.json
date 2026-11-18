@@ -1,0 +1,11 @@
+{
+  "repository": "jss367/chatlab",
+  "default_branch": "main",
+  "trusted_authors": ["jss367"],
+  "opt_in_label": "automerge",
+  "opt_out_labels": ["no-automerge", "do-not-merge"],
+  "ci_workflow": "ci.yml",
+  "required_jobs": ["test", "Browser (chromium, ubuntu-24.04)", "Browser (webkit, macos-15)"],
+  "blocked_path_prefixes": [".github/", "scripts/release", "scripts/deploy", "deploy/", "release/"],
+  "mode": "report"
+}

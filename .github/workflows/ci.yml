@@ -1,9 +1,15 @@
 name: Tests
+run-name: >-
+  Tests PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.ref }}@${{ github.event.pull_request.base.sha }}
 
 on:
   push:
     branches: ["main"]
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
 
 jobs:
   test:
