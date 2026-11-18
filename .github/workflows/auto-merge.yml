@@ -1,0 +1,36 @@
+name: Evaluate safe auto-merge
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+# Pilot is intentionally report-only. Activation requires a reviewed policy
+# change, verified protections, and a separate minimal write-permission change.
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  actions: read
+
+concurrency:
+  group: safe-auto-merge
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: github.repository == 'jss367/chatlab' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out trusted default-branch gate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/auto_merge
+      - name: Evaluate eligible pull requests without merging
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 .github/auto_merge/gate.py
