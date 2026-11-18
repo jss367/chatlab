@@ -1,9 +1,10 @@
 """Fail-closed merge eligibility; only trusted default-branch code is executed.
 
-The pilot has read-only permissions and reports decisions. The merge helper is
-tested but deliberately unreachable from the pilot entry point.
+The checked-in policy and workflow remain read-only/report-only. Execution
+requires both a reviewed merge-mode policy and an explicit --execute switch.
 """
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -47,6 +48,12 @@ def run_title(pr):
         f"Tests PR #{pr['number']} head {pr['head']['sha']} "
         f"base {pr['base']['ref']}@{pr['base']['sha']}"
     )
+
+
+def merge_target(pr):
+    """Compare merge identity, not incidental mutable repository metadata."""
+    return (pr['head']['sha'], pr['base']['repo']['full_name'],
+            pr['base']['ref'], pr['base']['sha'])
 
 
 def eligible(data, policy):
@@ -245,12 +252,12 @@ class GitHub:
 
 
 def guarded_merge(api, number, policy, previous):
-    """Inactive sketch: head-only atomicity, NOT atomic policy enforcement.
+    """Default-off execution path: head-only atomicity, not atomic policy.
 
-    A second snapshot only detects changes visible before that fetch. Labels,
-    base, review and CI can change afterward. This helper must not be activated
-    without verified GitHub enforcement and explicit resolution/acceptance of
-    residual external-policy races. The pilot never calls this function.
+    Refetches reduce the stale-state window. Only the expected head is atomic;
+    GitHub enforces its configured native rules when it processes the request.
+    No override/admin path is used. The current report-only workflow cannot
+    enter this path. Mutable external state can still change after its last read.
     """
     if policy['mode'] != 'merge':
         return False, 'report-only policy'
@@ -258,28 +265,55 @@ def guarded_merge(api, number, policy, previous):
     if not ok:
         return False, reason
     current = api.snapshot(number, policy)
-    if (current['pr']['head']['sha'] != previous['pr']['head']['sha']
-            or current['pr']['base'] != previous['pr']['base']):
+    if merge_target(current['pr']) != merge_target(previous['pr']):
         return False, 'head or base changed before merge'
     ok, reason = eligible(current, policy)
     if not ok:
         return False, reason
-    api.merge(number, current['pr']['head']['sha'])
+    # Snapshot collection uses several requests. Recheck cheap mutable PR
+    # state after that collection, immediately before the head-guarded write.
+    # This catches draft/label/base changes made DURING collection too; it is
+    # still not a compare-and-swap for labels or other external state.
+    live = api.get(f'pulls/{number}')
+    if live['number'] != number or merge_target(live) != merge_target(current['pr']):
+        return False, 'head or base changed at final PR check'
+    ok, reason = eligible(dict(current, pr=live), policy)
+    if not ok:
+        return False, reason
+    api.merge(number, live['head']['sha'])
     return True, 'GitHub accepted expected-head merge; external policy was not atomic'
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--execute', action='store_true',
+                        help='merge eligible PRs only with a separately enabled merge policy')
+    parser.add_argument('--pr', type=int, help='limit evaluation to one open pull request')
+    args = parser.parse_args(argv)
     policy = json.loads(Path(__file__).with_name('policy.json').read_text())
-    if os.environ.get('GH_REPO') != policy['repository'] or policy['mode'] != 'report':
-        raise RuntimeError('pilot requires expected repository and report-only policy')
+    if os.environ.get('GH_REPO') != policy['repository']:
+        raise RuntimeError('expected repository required')
+    if policy['mode'] not in {'report', 'merge'}:
+        raise RuntimeError('unknown policy mode')
+    if args.execute and policy['mode'] != 'merge':
+        raise RuntimeError('--execute requires a separately enabled merge policy')
+    if args.pr is not None and args.pr <= 0:
+        raise RuntimeError('positive PR number required')
     api = GitHub(policy['repository'])
     for pr in api.items('pulls?state=open'):
+        if args.pr is not None and pr['number'] != args.pr:
+            continue
         # Avoid expensive collection for PRs that never opted in.
         if policy['opt_in_label'] not in {label['name'] for label in pr['labels']}:
             print(f"PR #{pr['number']}: skipped (no opt-in)")
             continue
-        ok, reason = eligible(api.snapshot(pr['number'], policy), policy)
-        print(f"PR #{pr['number']}: report only, eligible={ok}: {reason}")
+        snapshot = api.snapshot(pr['number'], policy)
+        ok, reason = eligible(snapshot, policy)
+        if args.execute and ok:
+            merged, reason = guarded_merge(api, pr['number'], policy, snapshot)
+            print(f"PR #{pr['number']}: merged={merged}: {reason}")
+        else:
+            print(f"PR #{pr['number']}: report only, eligible={ok}: {reason}")
 
 
 if __name__ == '__main__':

@@ -2,11 +2,13 @@
 
 from copy import deepcopy
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('auto_merge_gate', ROOT / '.github/auto_merge/gate.py')
@@ -14,6 +16,17 @@ gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 HEAD = 'a' * 40
 BASE = 'b' * 40
+NO_NETWORK = patch.object(gate, 'subprocess', SimpleNamespace(
+    check_output=Mock(side_effect=AssertionError('unexpected subprocess/network call')),
+))
+
+
+def setUpModule():
+    NO_NETWORK.start()
+
+
+def tearDownModule():
+    NO_NETWORK.stop()
 
 
 def fixture():
@@ -315,7 +328,7 @@ class MergeTests(unittest.TestCase):
 
     def test_atomic_expected_head_and_no_bypass(self):
         api = gate.GitHub('jss367/chatlab')
-        with patch.object(subprocess, 'check_output', return_value='{"merged": true}') as call:
+        with patch.object(gate.subprocess, 'check_output', return_value='{"merged": true}') as call:
             api.merge(1, HEAD)
             args = call.call_args.args[0]
             payload = json.loads(call.call_args.kwargs['input'])
@@ -324,7 +337,7 @@ class MergeTests(unittest.TestCase):
             self.assertNotIn('--admin', args)
 
     def test_refused_merge_is_not_success(self):
-        with patch.object(subprocess, 'check_output', return_value='{"merged": false}'):
+        with patch.object(gate.subprocess, 'check_output', return_value='{"merged": false}'):
             with self.assertRaises(RuntimeError):
                 gate.GitHub('jss367/chatlab').merge(1, HEAD)
 
@@ -352,9 +365,138 @@ class MergeTests(unittest.TestCase):
 
                 api = gate.GitHub(policy['repository'])
                 with patch.object(api, 'snapshot', return_value=current), \
+                        patch.object(api, 'get', return_value=current['pr']), \
                         patch.object(api, 'merge', side_effect=fake_merge):
                     self.assertTrue(gate.guarded_merge(api, 1, policy, data)[0])
                     self.assertFalse(gate.eligible(current, policy)[0])
+
+    def test_final_pr_changes_block_after_long_snapshot_collection(self):
+        for change in ['label', 'draft', 'closed', 'head', 'base', 'source', 'author', 'number']:
+            with self.subTest(change=change):
+                data, policy = fixture()
+                policy['mode'] = 'merge'
+                live = deepcopy(data['pr'])
+                if change == 'label':
+                    live['labels'].append({'name': 'no-automerge'})
+                elif change == 'draft':
+                    live['draft'] = True
+                elif change == 'closed':
+                    live['state'] = 'closed'
+                elif change == 'head':
+                    live['head']['sha'] = 'c' * 40
+                elif change == 'base':
+                    live['base']['ref'] = 'other'
+                elif change == 'source':
+                    live['head']['repo'] = {'full_name': 'outsider/chatlab'}
+                elif change == 'author':
+                    live['user']['login'] = 'outsider'
+                else:
+                    live['number'] = 2
+                api = gate.GitHub(policy['repository'])
+                with patch.object(api, 'snapshot', return_value=deepcopy(data)), \
+                        patch.object(api, 'get', return_value=live), \
+                        patch.object(api, 'merge') as merge:
+                    self.assertFalse(gate.guarded_merge(api, 1, policy, data)[0])
+                    merge.assert_not_called()
+
+    def test_incidental_repo_metadata_does_not_change_merge_target(self):
+        data, policy = fixture()
+        policy['mode'] = 'merge'
+        current = deepcopy(data)
+        current['pr']['base']['repo']['description'] = 'Updated while evaluating'
+        api = gate.GitHub(policy['repository'])
+        with patch.object(api, 'snapshot', return_value=current), \
+                patch.object(api, 'get', return_value=deepcopy(current['pr'])), \
+                patch.object(api, 'merge') as merge:
+            self.assertTrue(gate.guarded_merge(api, 1, policy, data)[0])
+            merge.assert_called_once_with(1, HEAD)
+
+
+class EntryTests(unittest.TestCase):
+    def setUp(self):
+        self.data, self.policy = fixture()
+        self.api = Mock(spec=gate.GitHub)
+        self.api.items.return_value = [deepcopy(self.data['pr'])]
+        self.api.snapshot.return_value = deepcopy(self.data)
+        self.api.get.return_value = deepcopy(self.data['pr'])
+        self.api.merge.return_value = {'merged': True}
+
+    def invoke(self, args, repository='jss367/chatlab'):
+        with patch.object(gate.Path, 'read_text', return_value=json.dumps(self.policy)), \
+                patch.dict(gate.os.environ, {'GH_REPO': repository}), \
+                patch.object(gate, 'GitHub', return_value=self.api), \
+                patch('sys.stdout', new_callable=io.StringIO) as output:
+            gate.main(args)
+            return output.getvalue()
+
+    def test_default_report_mode_does_not_write(self):
+        self.assertIn('report only, eligible=True', self.invoke([]))
+        self.api.merge.assert_not_called()
+        self.api.get.assert_not_called()
+
+    def test_policy_change_without_execute_switch_still_does_not_write(self):
+        self.policy['mode'] = 'merge'
+        self.assertIn('report only, eligible=True', self.invoke([]))
+        self.api.merge.assert_not_called()
+        self.api.get.assert_not_called()
+
+    def test_execute_switch_with_report_policy_fails_before_remote_calls(self):
+        with self.assertRaisesRegex(RuntimeError, 'separately enabled merge policy'):
+            self.invoke(['--execute'])
+        self.assertEqual(self.api.mock_calls, [])
+
+    def test_both_switches_use_full_revalidation_and_expected_head(self):
+        self.policy['mode'] = 'merge'
+        self.assertIn('merged=True', self.invoke(['--execute']))
+        self.assertEqual(self.api.snapshot.call_count, 2)
+        self.api.get.assert_called_once_with('pulls/1')
+        self.api.merge.assert_called_once_with(1, HEAD)
+
+    def test_execute_entry_still_blocks_a_final_opt_out(self):
+        self.policy['mode'] = 'merge'
+        self.api.get.return_value['labels'].append({'name': 'no-automerge'})
+        self.assertIn('merged=False', self.invoke(['--execute']))
+        self.api.merge.assert_not_called()
+
+    def test_ineligible_candidate_never_enters_write_path(self):
+        self.policy['mode'] = 'merge'
+        self.api.snapshot.return_value['pr']['labels'].append({'name': 'no-automerge'})
+        self.assertIn('eligible=False', self.invoke(['--execute']))
+        self.api.merge.assert_not_called()
+        self.api.get.assert_not_called()
+
+    def test_candidate_without_opt_in_avoids_evidence_collection(self):
+        self.api.items.return_value[0]['labels'] = []
+        self.assertIn('skipped (no opt-in)', self.invoke([]))
+        self.api.snapshot.assert_not_called()
+        self.api.merge.assert_not_called()
+
+    def test_pr_filter_does_not_collect_unrelated_candidates(self):
+        self.invoke(['--pr', '2'])
+        self.api.snapshot.assert_not_called()
+        self.api.merge.assert_not_called()
+
+    def test_wrong_repository_and_invalid_mode_fail_before_remote_calls(self):
+        with self.assertRaisesRegex(RuntimeError, 'expected repository'):
+            self.invoke([], repository='outsider/chatlab')
+        self.assertEqual(self.api.mock_calls, [])
+        self.policy['mode'] = 'unknown'
+        with self.assertRaisesRegex(RuntimeError, 'unknown policy mode'):
+            self.invoke([])
+        self.assertEqual(self.api.mock_calls, [])
+
+    def test_invalid_pr_number_fails_before_remote_calls(self):
+        with self.assertRaisesRegex(RuntimeError, 'positive PR number'):
+            self.invoke(['--pr', '0'])
+        self.assertEqual(self.api.mock_calls, [])
+
+    def test_evidence_failure_is_not_retried_or_merged(self):
+        self.policy['mode'] = 'merge'
+        self.api.snapshot.side_effect = subprocess.CalledProcessError(1, ['gh', 'api'])
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.invoke(['--execute'])
+        self.api.snapshot.assert_called_once()
+        self.api.merge.assert_not_called()
 
 
 class ClientTests(unittest.TestCase):
@@ -363,7 +505,7 @@ class ClientTests(unittest.TestCase):
         for pages, key in [([[{'id': 1}], [{'id': 2}]], None),
                            ([{'jobs': [{'id': 1}]}, {'jobs': [{'id': 2}]}], 'jobs')]:
             with self.subTest(key=key), patch.object(
-                subprocess, 'check_output', return_value=json.dumps(pages)
+                gate.subprocess, 'check_output', return_value=json.dumps(pages)
             ) as call:
                 self.assertEqual(api.items('example?filter=all', key), [{'id': 1}, {'id': 2}])
                 args = call.call_args.args[0]
@@ -377,7 +519,7 @@ class ClientTests(unittest.TestCase):
             'nodes': [{'isResolved': resolved}],
             'pageInfo': {'hasNextPage': next_page, 'endCursor': str(index)},
         }}}}} for index, (resolved, next_page) in enumerate([(True, True), (False, False)])]
-        with patch.object(subprocess, 'check_output', return_value=json.dumps(pages)) as call:
+        with patch.object(gate.subprocess, 'check_output', return_value=json.dumps(pages)) as call:
             threads = gate.GitHub('jss367/chatlab').threads(1)
             self.assertEqual(threads, [{'isResolved': True}, {'isResolved': False}])
             args = call.call_args.args[0]
@@ -392,7 +534,7 @@ class ClientTests(unittest.TestCase):
         self.assertFalse(gate.eligible(data, policy)[0])
 
     def test_malformed_graphql_response_is_not_empty_success(self):
-        with patch.object(subprocess, 'check_output', return_value='[{"errors": [{}]}]'):
+        with patch.object(gate.subprocess, 'check_output', return_value='[{"errors": [{}]}]'):
             with self.assertRaises(KeyError):
                 gate.GitHub('jss367/chatlab').threads(1)
 
