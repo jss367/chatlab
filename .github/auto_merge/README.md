@@ -2,7 +2,8 @@
 
 This pilot evaluates eligible PRs without merging them. It runs trusted code
 from the default branch with read-only permissions and no stored credentials.
-The policy is report-only, and the entry point refuses any other mode. No
+The checked-in policy is report-only, and the workflow supplies no execution
+switch. Changing either one alone cannot enable merging. No
 repository settings, protection rules, deployment or release steps are changed.
 
 ## Eligibility
@@ -82,40 +83,51 @@ is complete. This initial policy supports one explicitly selected CI workflow;
 repositories with multiple required workflows need a tested extension or a
 genuine aggregate validation workflow before activation.
 
-## Activation remains a separate reviewed change
+## Activation is prepared but remains disabled
 
-Protection verification is unavailable under the existing endpoint holds. Do
-not probe or retry them. This PR is safe to review without that verification,
-because its workflow cannot write or merge. Activation is deliberately not
-implemented in the pilot entry point. A future reviewed activation must verify
-the required protections after the existing hold is resolved (no retries or
-alternate access route under the hold), preserve protected-branch
-enforcement, and grant only short-lived `contents: write` / `pull-requests: write`
-permissions in addition to the read scopes required for evidence collection.
-Do not grant repository administration, change security settings, or use PATs.
+The entry point has two independent switches: the reviewed policy must say
+`mode: merge` **and** the invocation must include `--execute`. Without that flag,
+even a merge-mode policy only reports. With the current report-mode policy,
+`--execute` fails before any remote call. The existing workflow invocation,
+permissions, and report-mode policy are unchanged. Tests exercise the execution
+path with mock evidence and mock writes; they reject unexpected subprocesses.
 
-The inactive `guarded_merge` sketch refetches and re-evaluates all evidence and
-rejects a head/base change visible at that fetch. Its REST request atomically
-guards **only the head SHA**. It is not complete merge authorization or ready
-for activation. The helper is unreachable from the report-only workflow, and a
-changed JSON mode alone cannot enable merging. It uses no bypass/admin/force,
-native queued auto-merge, branch deletion, deployment, or PR-code execution.
+`--pr NUMBER` limits evaluation to one open PR. A future activation can therefore
+start with a single explicitly opted-in normal PR instead of scanning every
+candidate. The delivery/workflow guards continue to prohibit self-bootstrap.
 
-GitHub has no atomic compare-and-swap for base SHA, review state, thread state,
-labels or CI reruns alongside the merge request. A second fetch cannot stop a
-change made afterward. A synthetic test explicitly demonstrates that late label,
-base, draft, review and CI mutations can pass the sketch's final snapshot; no
-real merge is attempted. Report mode and read-only permissions remain mandatory.
+The prepared execution path validates the initial evidence, collects and checks
+a fresh snapshot, then reads the PR once more immediately before the write.
+That final check catches draft, label, source, author and target changes during
+the longer evidence collection. The target comparison uses head SHA, base
+repository, branch and SHA, so unrelated repository metadata edits do not create
+false head/base races. The merge request includes the expected full head SHA.
+A refused merge is an error, never an excuse to retry with an override.
 
-GitHub can enforce configured required checks and reviews, including up-to-date
-checks and stale-review dismissal policies; this task has not verified any of
-those settings or token bypass restrictions. Evidence of actual enforcement is
-a prerequisite to activation, not a property inferred from successful CI. Even
-verified protection does not automatically make opt-out labels, custom comment
-commands, or all thread state atomic with the merge request. Activation therefore
-also needs an explicit owner decision about those residual external-policy races
-or a separately reviewed design that enforces the required semantics. This PR
-does not grant that acceptance or promise instantaneous opt-out enforcement.
+This uses GitHub's ordinary merge API, which enforces its configured native
+requirements when processing the request; it has no admin/bypass/force option.
+The client does not need to enumerate classic protection rules in order to obey
+them, and this change does not claim which rules are configured. Required
+checks/reviews and conversation resolution provide their configured GitHub
+guarantees; custom labels, commands, Codex state and exact CI-attempt semantics
+remain observations at their last read. Refetching narrows those ordinary
+concurrent-update windows without making them atomic. Tests retain an explicit
+demonstration of that limit. This is an operational tradeoff, not a requirement
+to invent a fully atomic replacement for GitHub before making code progress.
 
-If the base advances, fresh matching CI may require updating
-the PR branch; an old successful run or rerun with an old run title is refused.
+The smallest future activation change is to select merge mode, add the explicit
+execution flag (initially with a chosen PR number), and grant only the short-lived
+workflow write scopes needed for merging. It does not require a PAT, admin grant,
+new runner, native queued auto-merge setting, deployment or release. The opt-in
+and opt-out labels must also exist before use. None of those activation changes
+are included here.
+
+The explicit classic-protection read hold and rejected workflow-run-by-filename
+lookup remain in force. Neither was retried or replaced with another route.
+The existing CI lookup is unchanged and was not exercised live for this change;
+resolving authorization for that specific CI read is a concrete remaining action
+for runtime validation. It does not block the tested preparation above. Any later
+settings change still needs its own authorization; this code changes no settings.
+
+If the base advances, fresh matching CI may require updating the PR branch; an
+old successful run or rerun with an old run title is refused.
