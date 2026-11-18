@@ -18,6 +18,9 @@ findings and unresolved findings, and name the full current head SHA. Pending,
 dirty, stale or ambiguous states fail closed. Additional requested reviews must
 also be completed and clean for the head. The summary must postdate retargeting
 and earlier Codex findings. A thumbs-up or prose approval alone is insufficient.
+Only an explicit additional-review object containing all four v1 fields with
+null values is accepted as not requested; missing fields or inconsistent null
+status objects block eligibility.
 
 Standing reviewer change requests block merging until that reviewer explicitly
 approves or the review is dismissed. Later ordinary comments do not clear an

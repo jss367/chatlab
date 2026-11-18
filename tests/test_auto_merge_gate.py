@@ -28,7 +28,8 @@ def fixture():
     review = {
         'code_review': {'commit_sha': HEAD, 'status': 'completed',
                         'has_any_findings': False, 'has_unresolved_findings': False},
-        'security_review': {'status': None},
+        'security_review': {'status': None, 'commit_sha': None,
+                            'has_any_findings': None, 'has_unresolved_findings': None},
     }
     comment = {
         'user': {'login': gate.BOT}, 'updated_at': '2026-11-18T01:00:00Z',
@@ -65,6 +66,10 @@ class GateTests(unittest.TestCase):
         state = {'code_review': {'commit_sha': HEAD, 'status': 'completed',
                                 'has_any_findings': False, 'has_unresolved_findings': False}}
         state['code_review'].update(changes)
+        state['security_review'] = {
+            'status': None, 'commit_sha': None,
+            'has_any_findings': None, 'has_unresolved_findings': None,
+        }
         self.data['comments'][0]['body'] = (
             '<!-- codex-pull-request-review-summary -->\n'
             '<!-- codex-review-state:v1 ' + json.dumps(state) + ' -->'
@@ -107,6 +112,32 @@ class GateTests(unittest.TestCase):
     def test_security_review_pending(self):
         self.data['comments'][0]['body'] = self.data['comments'][0]['body'].replace(
             '"status": null', '"status": "in_progress"')
+        self.blocked()
+
+    def test_missing_or_inconsistent_additional_review_state(self):
+        for review in [{}, {'status': None},
+                       {'status': None, 'commit_sha': HEAD,
+                        'has_any_findings': False, 'has_unresolved_findings': False},
+                       {'status': None, 'commit_sha': None,
+                        'has_any_findings': True, 'has_unresolved_findings': True}]:
+            with self.subTest(review=review):
+                self.data, self.policy = fixture()
+                body = self.data['comments'][0]['body']
+                state = json.loads(gate.STATE.findall(body)[0])
+                state['security_review'] = review
+                self.data['comments'][0]['body'] = (
+                    '<!-- codex-pull-request-review-summary -->\n'
+                    '<!-- codex-review-state:v1 ' + json.dumps(state) + ' -->'
+                )
+                self.blocked()
+
+    def test_missing_additional_review_object(self):
+        state = {'code_review': {'commit_sha': HEAD, 'status': 'completed',
+                                'has_any_findings': False, 'has_unresolved_findings': False}}
+        self.data['comments'][0]['body'] = (
+            '<!-- codex-pull-request-review-summary -->\n'
+            '<!-- codex-review-state:v1 ' + json.dumps(state) + ' -->'
+        )
         self.blocked()
 
     def test_human_objection_and_later_comment(self):

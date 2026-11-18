@@ -25,6 +25,13 @@ def clean_review(review, head):
     )
 
 
+def not_requested(review):
+    """Only the explicit v1 all-null representation means not requested."""
+    fields = {'commit_sha', 'status', 'has_any_findings', 'has_unresolved_findings'}
+    return (isinstance(review, dict) and set(review) == fields
+            and all(review[field] is None for field in fields))
+
+
 def run_title(pr):
     return (
         f"Tests PR #{pr['number']} head {pr['head']['sha']} "
@@ -83,6 +90,8 @@ def _eligible(data, policy):
     if len(markers) != 1:
         return False, 'missing or ambiguous structured Codex state'
     state = json.loads(markers[0])
+    if not isinstance(state, dict) or not {'code_review', 'security_review'} <= state.keys():
+        return False, 'incomplete Codex review state'
     if not clean_review(state['code_review'], head):
         return False, 'current head needs completed clean Codex review'
     for kind, review in state.items():
@@ -90,7 +99,7 @@ def _eligible(data, policy):
             continue
         if not isinstance(review, dict):
             return False, 'malformed additional Codex review'
-        if review.get('status') is not None and not clean_review(review, head):
+        if not not_requested(review) and not clean_review(review, head):
             return False, 'additional Codex review incomplete or not clean for head'
     # Retargeting changes the reviewed diff without changing its head SHA.
     changes = [e['created_at'] for e in data['timeline']
