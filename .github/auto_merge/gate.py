@@ -13,6 +13,16 @@ from urllib.parse import quote
 
 BOT = "chatgpt-codex-connector[bot]"
 STATE = re.compile(r"<!-- codex-review-state:v1 (\{[^\n]*\}) -->")
+OBJECTION = re.compile(r"\b(?:do not (?:auto[- ]?)?merge|don't merge)\b|(?<!\S)/no-automerge(?!\S)")
+
+
+def text_objection(item):
+    """Conservative explicit command semantics, not natural-language inference."""
+    user = item['user']
+    if user['login'] == BOT or user.get('type') == 'Bot' or user['login'].endswith('[bot]'):
+        return False
+    body = ' '.join((item.get('body') or '').casefold().replace('’', "'").split())
+    return bool(OBJECTION.search(body))
 
 
 def clean_review(review, head):
@@ -101,12 +111,17 @@ def _eligible(data, policy):
             return False, 'malformed additional Codex review'
         if not not_requested(review) and not clean_review(review, head):
             return False, 'additional Codex review incomplete or not clean for head'
-    # Retargeting changes the reviewed diff without changing its head SHA.
+    # Retargeting changes the diff without changing its head. The shared
+    # summary's updated_at can come from an unrelated review, so it cannot
+    # establish code-review freshness. v1 exposes no per-code-review context
+    # timestamp/base binding: every retargeted PR requires manual handling.
     changes = [e['created_at'] for e in data['timeline']
                if e['event'] == 'base_ref_changed']
-    if changes and summary['updated_at'] <= max(changes):
-        return False, 'review predates base change'
+    if changes:
+        return False, 'retargeted PR has no verifiable code-review context freshness'
     reviews = data['reviews']
+    if any(text_objection(item) for item in data['comments'] + reviews):
+        return False, 'explicit do-not-merge comment or review command'
     findings = [r['submitted_at'] for r in reviews if r['user']['login'] == BOT
                 and r['state'] != 'PENDING']
     if findings and summary['updated_at'] <= max(findings):
@@ -136,8 +151,6 @@ def _eligible(data, policy):
     newest = max(relevant, key=lambda r: (r['run_number'], r['id']))
     if newest['display_title'] != run_title(pr):
         return False, 'latest CI targets a different head or base'
-    if changes and newest['created_at'] <= max(changes):
-        return False, 'CI predates base change'
     if newest['status'] != 'completed' or newest['conclusion'] != 'success':
         return False, 'latest CI did not succeed'
     run = data['run']
@@ -151,6 +164,15 @@ def _eligible(data, policy):
     names = [j['name'] for j in jobs]
     if any(names.count(name) != 1 for name in policy['required_jobs']):
         return False, 'required CI jobs missing or ambiguous'
+    for job in jobs:
+        if job['name'] not in policy['required_jobs']:
+            continue
+        steps = job['steps']
+        for name in policy['required_steps'][job['name']]:
+            matching = [s for s in steps if s['name'] == name]
+            if (len(matching) != 1 or matching[0]['status'] != 'completed'
+                    or matching[0]['conclusion'] != 'success'):
+                return False, 'essential CI step missing, skipped or unsuccessful'
     return True, 'current head has clean review and relevant successful CI'
 
 
@@ -223,7 +245,13 @@ class GitHub:
 
 
 def guarded_merge(api, number, policy, previous):
-    """Reserved for separately reviewed activation; never called by pilot."""
+    """Inactive sketch: head-only atomicity, NOT atomic policy enforcement.
+
+    A second snapshot only detects changes visible before that fetch. Labels,
+    base, review and CI can change afterward. This helper must not be activated
+    without verified GitHub enforcement and explicit resolution/acceptance of
+    residual external-policy races. The pilot never calls this function.
+    """
     if policy['mode'] != 'merge':
         return False, 'report-only policy'
     ok, reason = eligible(previous, policy)
@@ -237,7 +265,7 @@ def guarded_merge(api, number, policy, previous):
     if not ok:
         return False, reason
     api.merge(number, current['pr']['head']['sha'])
-    return True, 'merged exact validated head'
+    return True, 'GitHub accepted expected-head merge; external policy was not atomic'
 
 
 def main():

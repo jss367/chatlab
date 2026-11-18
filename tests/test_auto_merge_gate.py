@@ -48,7 +48,9 @@ def fixture():
         'files': [{'filename': 'chatlab/app.py'}],
         'comments': [comment], 'reviews': [], 'threads': [], 'timeline': [],
         'runs': [run], 'run': deepcopy(run),
-        'jobs': [{'run_id': 42, 'name': name, 'status': 'completed', 'conclusion': 'success'}
+        'jobs': [{'run_id': 42, 'name': name, 'status': 'completed', 'conclusion': 'success',
+                  'steps': [{'name': step, 'status': 'completed', 'conclusion': 'success'}
+                            for step in policy['required_steps'][name]]}
                  for name in policy['required_jobs']],
     }
     return data, policy
@@ -154,6 +156,23 @@ class GateTests(unittest.TestCase):
         ]
         self.assertTrue(gate.eligible(self.data, self.policy)[0])
 
+    def test_explicit_human_text_objections_in_comments_and_reviews(self):
+        for collection in ['comments', 'reviews']:
+            for body in ['Do not merge', 'DO NOT\n MERGE until I check',
+                         '/no-automerge', 'Please don’t merge this.', 'Do not auto-merge']:
+                with self.subTest(collection=collection, body=body):
+                    self.data, self.policy = fixture()
+                    self.data[collection].append({
+                        'id': 50, 'state': 'COMMENTED', 'user': {'login': 'human', 'type': 'User'},
+                        'body': body,
+                    })
+                    self.blocked()
+
+    def test_prose_outside_command_contract_is_not_inferred(self):
+        self.data['comments'].append({'user': {'login': 'human'},
+                                     'body': 'I would prefer waiting for another day.'})
+        self.assertTrue(gate.eligible(self.data, self.policy)[0])
+
     def test_unresolved_outdated_thread(self):
         self.data['threads'] = [{'isResolved': False, 'isOutdated': True}]
         self.blocked()
@@ -166,6 +185,13 @@ class GateTests(unittest.TestCase):
     def test_retarget_requires_fresh_review_and_ci(self):
         self.data['timeline'] = [{'event': 'base_ref_changed',
                                   'created_at': '2026-11-18T01:00:00Z'}]
+        self.blocked()
+
+    def test_unrelated_summary_update_does_not_prove_post_retarget_code_review(self):
+        self.data['timeline'] = [{'event': 'base_ref_changed',
+                                  'created_at': '2026-11-18T00:59:59Z'}]
+        # Summary and CI are both newer than the retarget. The code state has
+        # no per-review timestamp/base binding, so this still must fail closed.
         self.blocked()
 
     def test_missing_or_stale_ci(self):
@@ -196,6 +222,24 @@ class GateTests(unittest.TestCase):
         self.data, self.policy = fixture()
         self.data['jobs'].pop()
         self.blocked()
+
+    def test_essential_steps_skipped_missing_cancelled_or_duplicate_in_successful_job(self):
+        for job_index, name in [(0, 'Test'), (1, 'Test rendered interface'),
+                                (2, 'Test rendered interface')]:
+            for change in ['skipped', 'cancelled', 'failure', 'missing', 'duplicate', 'pending']:
+                with self.subTest(job=job_index, change=change):
+                    self.data, self.policy = fixture()
+                    steps = self.data['jobs'][job_index]['steps']
+                    step = next(s for s in steps if s['name'] == name)
+                    if change == 'missing':
+                        steps.remove(step)
+                    elif change == 'duplicate':
+                        steps.append(deepcopy(step))
+                    elif change == 'pending':
+                        step['status'] = 'in_progress'
+                    else:
+                        step['conclusion'] = change
+                    self.blocked()
         self.data, self.policy = fixture()
         self.data['jobs'].append(deepcopy(self.data['jobs'][0]))
         self.blocked()
@@ -223,7 +267,12 @@ class GateTests(unittest.TestCase):
     def test_self_bootstrap_and_renamed_sensitive_files(self):
         for file in [{'filename': '.github/workflows/auto-merge.yml'},
                      {'filename': 'safe.py', 'previous_filename': '.github/workflows/deploy.yml'},
-                     {'filename': 'deploy/live.sh'}]:
+                     {'filename': 'deploy/live.sh'},
+                     {'filename': 'scripts/build_macos_app.sh'},
+                     {'filename': 'ChatLab.spec'}, {'filename': 'scripts/desktop_entry.py'},
+                     {'filename': 'requirements-desktop.txt'}, {'filename': 'chatlab/version.py'},
+                     {'filename': 'assets/ChatLab.icns'},
+                     {'filename': 'ordinary.py', 'previous_filename': 'ChatLab.spec'}]:
             with self.subTest(file=file):
                 self.data['files'] = [file]
                 self.blocked()
@@ -278,6 +327,99 @@ class MergeTests(unittest.TestCase):
         with patch.object(subprocess, 'check_output', return_value='{"merged": false}'):
             with self.assertRaises(RuntimeError):
                 gate.GitHub('jss367/chatlab').merge(1, HEAD)
+
+    def test_late_external_policy_race_is_not_solved_by_second_snapshot(self):
+        # This is evidence of the inactive helper's LIMIT, not an allowed
+        # activation policy. No API call occurs. Only the head is atomic.
+        for change in ['label', 'base', 'draft', 'review', 'ci']:
+            with self.subTest(change=change):
+                data, policy = fixture()
+                policy['mode'] = 'merge'
+                current = deepcopy(data)
+
+                def fake_merge(number, head):
+                    self.assertEqual(head, HEAD)
+                    if change == 'label':
+                        current['pr']['labels'].append({'name': 'no-automerge'})
+                    elif change == 'base':
+                        current['pr']['base']['sha'] = 'c' * 40
+                    elif change == 'draft':
+                        current['pr']['draft'] = True
+                    elif change == 'review':
+                        current['threads'] = [{'isResolved': False}]
+                    else:
+                        current['run']['status'] = 'in_progress'
+
+                api = gate.GitHub(policy['repository'])
+                with patch.object(api, 'snapshot', return_value=current), \
+                        patch.object(api, 'merge', side_effect=fake_merge):
+                    self.assertTrue(gate.guarded_merge(api, 1, policy, data)[0])
+                    self.assertFalse(gate.eligible(current, policy)[0])
+
+
+class ClientTests(unittest.TestCase):
+    def test_rest_array_and_keyed_pages_are_complete(self):
+        api = gate.GitHub('jss367/chatlab')
+        for pages, key in [([[{'id': 1}], [{'id': 2}]], None),
+                           ([{'jobs': [{'id': 1}]}, {'jobs': [{'id': 2}]}], 'jobs')]:
+            with self.subTest(key=key), patch.object(
+                subprocess, 'check_output', return_value=json.dumps(pages)
+            ) as call:
+                self.assertEqual(api.items('example?filter=all', key), [{'id': 1}, {'id': 2}])
+                args = call.call_args.args[0]
+                self.assertIn('--paginate', args)
+                self.assertIn('--slurp', args)
+                self.assertIn('repos/jss367/chatlab/example?filter=all&per_page=100', args)
+                self.assertEqual(args[args.index('--method') + 1], 'GET')
+
+    def test_graphql_threads_include_blocker_on_second_page(self):
+        pages = [{'data': {'repository': {'pullRequest': {'reviewThreads': {
+            'nodes': [{'isResolved': resolved}],
+            'pageInfo': {'hasNextPage': next_page, 'endCursor': str(index)},
+        }}}}} for index, (resolved, next_page) in enumerate([(True, True), (False, False)])]
+        with patch.object(subprocess, 'check_output', return_value=json.dumps(pages)) as call:
+            threads = gate.GitHub('jss367/chatlab').threads(1)
+            self.assertEqual(threads, [{'isResolved': True}, {'isResolved': False}])
+            args = call.call_args.args[0]
+            self.assertIn('--paginate', args)
+            self.assertIn('--slurp', args)
+            query = next(a for a in args if a.startswith('query='))
+            self.assertIn('after:$endCursor', query)
+            self.assertIn('hasNextPage endCursor', query)
+            self.assertNotIn('mutation', query)
+        data, policy = fixture()
+        data['threads'] = threads
+        self.assertFalse(gate.eligible(data, policy)[0])
+
+    def test_malformed_graphql_response_is_not_empty_success(self):
+        with patch.object(subprocess, 'check_output', return_value='[{"errors": [{}]}]'):
+            with self.assertRaises(KeyError):
+                gate.GitHub('jss367/chatlab').threads(1)
+
+    def test_snapshot_fetches_latest_attempt_jobs(self):
+        data, policy = fixture()
+        run = dict(data['run'], run_attempt=3)
+        runs = [dict(data['runs'][0], run_attempt=3)]
+        api = gate.GitHub(policy['repository'])
+
+        def get(path, paginate=False):
+            return {'pulls/1': data['pr'], 'actions/runs/42': run,
+                    '': {'default_branch': 'main'},
+                    'git/ref/heads/main': {'object': {'sha': BASE}}}[path]
+
+        def items(path, key=None):
+            if path.startswith('actions/workflows/'):
+                return runs
+            if path == 'actions/runs/42/attempts/3/jobs':
+                return data['jobs']
+            return []
+
+        with patch.object(api, 'get', side_effect=get), \
+                patch.object(api, 'items', side_effect=items) as calls, \
+                patch.object(api, 'threads', return_value=[]):
+            snapshot = api.snapshot(1, policy)
+            self.assertEqual(snapshot['run']['run_attempt'], 3)
+            calls.assert_any_call('actions/runs/42/attempts/3/jobs', 'jobs')
 
 
 if __name__ == '__main__':
